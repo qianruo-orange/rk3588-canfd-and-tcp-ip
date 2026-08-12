@@ -72,6 +72,14 @@ static void wait_threads_exit(void)
     }
 }
 
+static void shutdown_modules_safe(void)
+{
+    g_app.running = 0;
+    http_server_stop(&g_app);
+    video_stream_shutdown(&g_app);
+    wait_threads_exit();
+}
+
 int main(void)
 {
     can_ctx_t           can_ctx;
@@ -111,17 +119,14 @@ int main(void)
     while (g_app.running) { watchdog_feed(WD_MAIN); sleep(1); }
 
     /* 通知各模块停止，让工作线程尽快退出 */
-    http_server_stop(&g_app); video_stream_shutdown(&g_app);
-    /* 有界等待线程退出后再执行 dtor，避免与线程并发访问资源 */
-    wait_threads_exit();
+    shutdown_modules_safe();
 
     for (int i = MOD_COUNT-1; i >= 0; i--)
         if (g_mods[i].mod_dtor_t) g_mods[i].mod_dtor_t(&g_app);
     log_close(); return 0;
 
 fail:
-    http_server_stop(&g_app); video_stream_shutdown(&g_app);
-    wait_threads_exit();
+    shutdown_modules_safe();
     for (int i = MOD_COUNT-1; i >= 0; i--)
         if (g_mods[i].mod_dtor_t) g_mods[i].mod_dtor_t(&g_app);
     log_close(); return 1;

@@ -161,22 +161,13 @@ static void serve_log_delete(int fd, const char *filename)
 /* 打包下载所有日志 (tar.gz) */
 static void serve_log_pack(int fd)
 {
-    /* 先完成准备工作（chdir / popen），全部成功后才写 200 头，
-       避免失败时 200 头 + 500 体的协议混用 */
-    char cwd[512];
-    if (getcwd(cwd, sizeof(cwd)) == NULL) cwd[0] = '\0';
-    if (chdir(LOG_DIR) != 0) {
-        log_error("logs pack: chdir %s failed", LOG_DIR);
-        http_send_response(fd, 500, "Internal Error", "text/plain", "", 0);
-        if (cwd[0]) chdir(cwd);
-        return;
-    }
-
-    FILE *tar = popen("tar -czf - . 2>/dev/null", "r");
+    /* 直接在日志目录上执行 tar，避免 chdir 造成进程工作目录副作用 */
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "tar -czf - -C %s . 2>/dev/null", LOG_DIR);
+    FILE *tar = popen(cmd, "r");
     if (!tar) {
         log_error("logs pack: popen tar failed");
         http_send_response(fd, 500, "Internal Error", "text/plain", "", 0);
-        if (cwd[0]) chdir(cwd);
         return;
     }
 
@@ -197,7 +188,6 @@ static void serve_log_pack(int fd)
         watchdog_feed(WD_HTTP);            /* 打包耗时较长，持续喂狗防止看门狗误杀 */
     }
     pclose(tar);
-    if (cwd[0]) chdir(cwd);
 }
 
 /* 日志总入口 */

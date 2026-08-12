@@ -58,12 +58,12 @@ void *watchdog_task(void *arg)
                     log_error("watchdog: %s STUCK (missed %d/%d, beat=%d)",
                         g_wd_slots[i].name, g_wd_slots[i].miss_count,
                         g_wd_slots[i].max_miss, cur);
-                    /* 尽力而为的清理：通知各线程停止并同步磁盘，留出清理窗口；
-                       卡死的线程无法退出，最终由 systemd Restart=on-failure 重启 */
+                    /* 优雅退出：通知主循环与各工作线程结束，尽量在清理窗口内落盘和关闭资源；
+                       若仍然卡死，最终由 systemd Restart=on-failure 兜底重启 */
                     app->running = 0;
                     sync();
                     usleep(200000);   /* 给健康线程 200ms 清理窗口（日志落盘 / 设备关闭） */
-                    _exit(1);
+                    break;
                 }
                 else log_error("watchdog: %s timeout #%d/%d", g_wd_slots[i].name, g_wd_slots[i].miss_count, g_wd_slots[i].max_miss);
             }

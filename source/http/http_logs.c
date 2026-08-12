@@ -21,6 +21,11 @@ static void serve_log_list(int fd)
     char *html = NULL;
     size_t cap = 4096, len = 0;
     html = malloc(cap);
+    if (!html) {
+        closedir(dir);
+        http_send_response(fd, 500, "Error", "text/plain", "", 0);
+        return;
+    }
 
     len += snprintf(html + len, cap - len,
         "<!DOCTYPE html><html lang=\"zh\"><head><meta charset=\"UTF-8\">"

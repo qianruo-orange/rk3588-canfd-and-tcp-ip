@@ -238,7 +238,7 @@ void *video_stream_task(void *arg)
                 break;
             }
 
-            if (buf.bytesused > 0 && buf.index >= 0 && buf.index < vs->nbuffers) {
+            if (buf.bytesused > 0 && buf.index < vs->nbuffers) {
                 frame_t *f = malloc(sizeof(frame_t));
                 if (f) {
                     f->len  = buf.bytesused;

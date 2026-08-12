@@ -29,6 +29,15 @@ static int g_http_port;
 static _Atomic int g_http_active = 0;   /* 活跃 HTTP 连接数 */
 #define HTTP_MAX_CONN 64
 
+typedef void (*api_fn)(app_ctx_t *, int, const char *, const char *, const char *);
+
+static void http_system_api_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_system_api(app, fd); }
+static void http_can_status_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_status(app, fd); }
+static void http_can_toggle_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; http_can_toggle(app, fd, req); }
+static void http_reboot_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_reboot(app, fd); }
+static void http_shutdown_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_shutdown(app, fd); }
+static void http_network_api_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_network_api(app, fd); }
+
 /* ---- 工具函数 ---- */
 
 const char *http_mime_type(const char *path)
@@ -286,22 +295,20 @@ static void *client_handler(app_ctx_t *app, int fd)
         http_serve_file(fd, "/config.html"); goto close;
     }
 
-    /* API 路由表 */
-    typedef void (*api_fn)(app_ctx_t *, int, const char *, const char *, const char *);
     static const struct { const char *uri; int pre; const char *method; api_fn fn; int (*auth)(const char*,int); }
     rt[] = {
-        { "/logs",          1, NULL,   (api_fn)http_logs_handler, http_check_auth_root },
-        { "/logfile/",      1, NULL,   (api_fn)http_logs_handler, http_check_auth_root },
-        { "/api/system",    0, NULL,   (api_fn)http_system_api,   NULL },
-        { "/api/can",       0, NULL,   (api_fn)http_can_status,   NULL },
-        { "/api/can/toggle",0, NULL,   (api_fn)http_can_toggle,   http_check_auth_root },
-        { "/api/config",    0, "POST", (api_fn)http_config_post,  http_check_auth_root },
-        { "/api/config",    0, NULL,   (api_fn)http_config_get,   http_check_auth_root },
-        { "/api/reboot",    0, NULL,   (api_fn)http_reboot,       http_check_auth_root },
-        { "/api/shutdown",  0, NULL,   (api_fn)http_shutdown,     http_check_auth_root },
-        { "/api/network",   0, NULL,   (api_fn)http_network_api,  NULL },
-        { "/api/video/caps",1, NULL,  (api_fn)http_video_caps,   NULL },
-        { "/api/video/devices",0,NULL, (api_fn)http_video_devices,NULL },
+        { "/logs",          1, NULL,   http_logs_handler, http_check_auth_root },
+        { "/logfile/",      1, NULL,   http_logs_handler, http_check_auth_root },
+        { "/api/system",    0, NULL,   http_system_api_wrap,   NULL },
+        { "/api/can",       0, NULL,   http_can_status_wrap,   NULL },
+        { "/api/can/toggle",0, NULL,   http_can_toggle_wrap,   http_check_auth_root },
+        { "/api/config",    0, "POST", http_config_post,  http_check_auth_root },
+        { "/api/config",    0, NULL,   http_config_get,   http_check_auth_root },
+        { "/api/reboot",    0, NULL,   http_reboot_wrap,       http_check_auth_root },
+        { "/api/shutdown",  0, NULL,   http_shutdown_wrap,     http_check_auth_root },
+        { "/api/network",   0, NULL,   http_network_api_wrap,  NULL },
+        { "/api/video/caps",1, NULL,  http_video_caps,   NULL },
+        { "/api/video/devices",0,NULL, http_video_devices,NULL },
     };
 
     for (int i = 0; i < (int)(sizeof(rt)/sizeof(rt[0])); i++) {

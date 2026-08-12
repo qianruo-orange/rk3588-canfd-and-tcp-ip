@@ -42,12 +42,12 @@ static int signal_setup(void *arg)
 static app_ctx_t g_app;
 
 static module_t g_mods[] = {
-    { "can",      can_init,           can_cleanup,            can_task },
-    { "tcp",      tcp_init,           tcp_cleanup,            tcp_task },
-    { "http",     http_server_start,  http_server_stop,       http_server_task },
-    { "video",    video_stream_init,  video_stream_shutdown,  video_stream_task },
-    { "watchdog", watchdog_init,      NULL,                   watchdog_task },
-    { "signal",   signal_setup,       NULL,                   NULL },
+    { "can",      can_init,           can_cleanup,            can_task, 0 },
+    { "tcp",      tcp_init,           tcp_cleanup,            tcp_task, 0 },
+    { "http",     http_server_start,  http_server_stop,       http_server_task, 0 },
+    { "video",    video_stream_init,  video_stream_shutdown,  video_stream_task, 0 },
+    { "watchdog", watchdog_init,      NULL,                   watchdog_task, 0 },
+    { "signal",   signal_setup,       NULL,                   NULL, 0 },
 };
 #define MOD_COUNT (int)(sizeof(g_mods)/sizeof(g_mods[0]))
 

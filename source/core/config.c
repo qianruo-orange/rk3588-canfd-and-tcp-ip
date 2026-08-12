@@ -17,8 +17,8 @@
 void config_defaults(struct app_config_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
-    strncpy(cfg->log_dir, PATH_LOGS, sizeof(cfg->log_dir) - 1);
-    strncpy(cfg->video_device, "/dev/video0", sizeof(cfg->video_device) - 1);
+    safe_strncpy(cfg->log_dir, sizeof(cfg->log_dir), PATH_LOGS);
+    safe_strncpy(cfg->video_device, sizeof(cfg->video_device), "/dev/video0");
     cfg->video_width  = 640;
     cfg->video_height = 480;
     cfg->http_port    = 80;   /* 与 http.h 的 HTTP_DEFAULT_PORT 一致 */
@@ -46,7 +46,7 @@ int config_load(struct app_config_t *cfg)
     if (!fp) { config_defaults(cfg); return 0; }
 
     memset(cfg, 0, sizeof(*cfg));
-    strncpy(cfg->log_dir, PATH_LOGS, sizeof(cfg->log_dir) - 1);
+    safe_strncpy(cfg->log_dir, sizeof(cfg->log_dir), PATH_LOGS);
     cfg->video_width = 640; cfg->video_height = 480;
     cfg->http_port   = 80;   /* 与 http.h 的 HTTP_DEFAULT_PORT 一致 */
     gateway_args_t *a = &cfg->gw_args;
@@ -64,7 +64,7 @@ int config_load(struct app_config_t *cfg)
         if (strcmp(key, "can_ifname") == 0 && a->can_count < CAN_MAX_IFACES) {
             can_iface_t *ifc = &a->can_ifaces[a->can_count++];
             memset(ifc, 0, sizeof(*ifc)); ifc->sock_fd = -1;
-            strncpy(ifc->ifname, val, sizeof(ifc->ifname) - 1);
+            safe_strncpy(ifc->ifname, sizeof(ifc->ifname), val);
         } else if (strcmp(key, "can_bitrate") == 0) {
             char nm[64]; int r; if (sscanf(val, "%63s %d", nm, &r) == 2)
                 for (int i = 0; i < a->can_count; i++) if (!strcmp(a->can_ifaces[i].ifname, nm)) { a->can_ifaces[i].bitrate = r; break; }
@@ -77,12 +77,12 @@ int config_load(struct app_config_t *cfg)
         } else if (strcmp(key, "can_up") == 0) {
             char nm[64], m[8]; if (sscanf(val, "%63s %7s", nm, m) == 2)
                 for (int i = 0; i < a->can_count; i++) if (!strcmp(a->can_ifaces[i].ifname, nm)) { a->can_ifaces[i].up = !strcmp(m, "on"); break; }
-        } else if (strcmp(key, "tcp_port") == 0) a->tcp_port = atoi(val);
-        else if (strcmp(key, "max_clients") == 0) a->max_clients = atoi(val);
-        else if (strcmp(key, "video_device") == 0) strncpy(cfg->video_device, val, sizeof(cfg->video_device) - 1);
-        else if (strcmp(key, "video_width") == 0) cfg->video_width = atoi(val);
-        else if (strcmp(key, "video_height") == 0) cfg->video_height = atoi(val);
-        else if (strcmp(key, "http_port") == 0) cfg->http_port = atoi(val);
+        } else if (strcmp(key, "tcp_port") == 0) a->tcp_port = parse_int_clamped(val, 1, 65535, 6666);
+        else if (strcmp(key, "max_clients") == 0) a->max_clients = parse_int_clamped(val, 1, TCP_MAX_CLIENTS, 16);
+        else if (strcmp(key, "video_device") == 0) safe_strncpy(cfg->video_device, sizeof(cfg->video_device), val);
+        else if (strcmp(key, "video_width") == 0) cfg->video_width = parse_int_clamped(val, 1, 4096, 640);
+        else if (strcmp(key, "video_height") == 0) cfg->video_height = parse_int_clamped(val, 1, 4096, 480);
+        else if (strcmp(key, "http_port") == 0) cfg->http_port = parse_int_clamped(val, 1, 65535, 80);
     }
     fclose(fp);
     if (a->can_count == 0) { config_defaults(cfg); return 0; }

@@ -4,6 +4,9 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define WD_MAX_SLOTS 8
 
@@ -29,5 +32,23 @@ typedef struct app_ctx {
     struct app_config_t   *cfg;
     _Atomic int            threads_running; /* 活跃工作线程数（线程退出时递减） */
 } app_ctx_t;
+
+static inline void safe_strncpy(char *dst, size_t dst_size, const char *src)
+{
+    if (!dst || dst_size == 0) return;
+    if (!src) { dst[0] = '\0'; return; }
+    snprintf(dst, dst_size, "%s", src);
+}
+
+static inline int parse_int_clamped(const char *s, int min_v, int max_v, int def_v)
+{
+    if (!s || !*s) return def_v;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (end == s) return def_v;
+    if (v < min_v) return min_v;
+    if (v > max_v) return max_v;
+    return (int)v;
+}
 
 #endif /* COMMON_H */

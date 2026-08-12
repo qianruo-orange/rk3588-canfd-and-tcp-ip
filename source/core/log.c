@@ -7,8 +7,10 @@
 #include <pthread.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <limits.h>
 
 #include "core/log.h"
+#include "core/common.h"
 
 typedef struct {
     FILE    *fp_info;
@@ -27,7 +29,7 @@ static void rotate_if_needed(const char *path)
 {
     struct stat st;
     if (stat(path, &st) == 0 && st.st_size > LOG_MAX_SIZE) {
-        char bak[520];
+        char bak[PATH_MAX];
         snprintf(bak, sizeof(bak), "%s.1", path);
         rename(path, bak);
     }
@@ -41,7 +43,7 @@ static void rotate_check(int is_error)
     struct stat st;
     if (fstat(fileno(*fpp), &st) != 0 || st.st_size <= LOG_MAX_SIZE) return;
 
-    char path[520], bak[520];
+    char path[PATH_MAX], bak[PATH_MAX];
     snprintf(path, sizeof(path), "%s/data_transport_test_%s_%s.log",
              g_log.dir, is_error ? "error" : "info", g_log.date);
     snprintf(bak, sizeof(bak), "%s.1", path);
@@ -58,7 +60,7 @@ static void ensure_date(void)
     char cur[16]; strftime(cur, sizeof(cur), "%Y%m%d", tm);
     if (strcmp(cur, g_log.date) == 0) return;
 
-    strncpy(g_log.date, cur, sizeof(g_log.date)-1);
+    safe_strncpy(g_log.date, sizeof(g_log.date), cur);
     if (g_log.fp_info && g_log.fp_info != stderr)  fclose(g_log.fp_info);
     if (g_log.fp_error && g_log.fp_error != stderr) fclose(g_log.fp_error);
 
@@ -74,7 +76,7 @@ static void ensure_date(void)
 void log_init(const char *dir)
 {
     pthread_mutex_lock(&g_log.mutex);
-    strncpy(g_log.dir, dir, sizeof(g_log.dir)-1);
+    safe_strncpy(g_log.dir, sizeof(g_log.dir), dir);
     mkdir(dir, 0755);
     g_log.date[0] = '\0';
     ensure_date();

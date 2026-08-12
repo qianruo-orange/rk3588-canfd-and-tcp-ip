@@ -93,7 +93,7 @@ int can_socket_configure(const char *ifname, int bitrate, int dbitrate,
             unsigned int flags = 0;
             struct ifreq ifr;
             memset(&ifr, 0, sizeof(ifr));
-            strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+            snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
             int sock = socket(AF_INET, SOCK_DGRAM, 0);
             if (sock >= 0) {
                 ioctl(sock, SIOCGIFFLAGS, &ifr);
@@ -151,8 +151,7 @@ int can_socket_open(const char *ifname, int fd_mode)
     if (s < 0) { log_error("socket(PF_CAN)"); return -1; }
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
-    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
-    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
     if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) { log_error("ioctl SIOCGIFINDEX for %s", ifname); close(s); return -1; }
     struct sockaddr_can addr;
     memset(&addr, 0, sizeof(addr));

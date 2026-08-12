@@ -29,12 +29,12 @@ void config_defaults(struct app_config_t *cfg)
 
     can_iface_t *c0 = &args->can_ifaces[args->can_count++];
     memset(c0, 0, sizeof(*c0)); c0->sock_fd = -1;
-    strncpy(c0->ifname, "can0", sizeof(c0->ifname) - 1);
+    snprintf(c0->ifname, sizeof(c0->ifname), "%s", "can0");
     c0->bitrate = 500000; c0->dbitrate = 2000000; c0->fd_mode = 1; c0->up = 1;
 
     can_iface_t *c1 = &args->can_ifaces[args->can_count++];
     memset(c1, 0, sizeof(*c1)); c1->sock_fd = -1;
-    strncpy(c1->ifname, "can1", sizeof(c1->ifname) - 1);
+    snprintf(c1->ifname, sizeof(c1->ifname), "%s", "can1");
     c1->bitrate = 500000; c1->dbitrate = 2000000; c1->fd_mode = 1; c1->up = 1;
 
     log_info("config: defaults loaded");

@@ -166,14 +166,14 @@ int video_stream_init(void *arg)
     if (!vs) return -1;
     pthread_mutex_init(&vs->cfg_mutex, NULL);
     pthread_mutex_init(&vs->frame_mutex, NULL);
-    strncpy(vs->device, "/dev/video0", sizeof(vs->device) - 1);
+    snprintf(vs->device, sizeof(vs->device), "%s", "/dev/video0");
     vs->width  = 640;
     vs->height = 480;
     vs->fd     = -1;
     vs->app    = app;
 
     if (app->cfg->video_device[0])
-        strncpy(vs->device, app->cfg->video_device, sizeof(vs->device) - 1);
+        snprintf(vs->device, sizeof(vs->device), "%s", app->cfg->video_device);
     if (app->cfg->video_width  > 0) vs->width  = app->cfg->video_width;
     if (app->cfg->video_height > 0) vs->height = app->cfg->video_height;
     vs->running = 1;
@@ -317,9 +317,11 @@ void video_stream_restart(void)
     pthread_mutex_lock(&vs->cfg_mutex);
     if (vs->app && vs->app->cfg) {
         if (vs->app->cfg->video_device[0])
-            strncpy(vs->device, vs->app->cfg->video_device, sizeof(vs->device) - 1);
-        if (vs->app->cfg->video_width  > 0) vs->width  = vs->app->cfg->video_width;
-        if (vs->app->cfg->video_height > 0) vs->height = vs->app->cfg->video_height;
+            snprintf(vs->device, sizeof(vs->device), "%s", vs->app->cfg->video_device);
+        if (vs->app->cfg->video_width > 0)
+            vs->width = vs->app->cfg->video_width > 4096 ? 4096 : vs->app->cfg->video_width;
+        if (vs->app->cfg->video_height > 0)
+            vs->height = vs->app->cfg->video_height > 4096 ? 4096 : vs->app->cfg->video_height;
     }
     pthread_mutex_unlock(&vs->cfg_mutex);
 

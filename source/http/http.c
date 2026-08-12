@@ -230,6 +230,7 @@ static void *client_handler(app_ctx_t *app, int fd)
 {
     (void)app;
     char buf[HTTP_BUF_SIZE];
+    const long max_body_bytes = 1024L * 1024L; /* 1MB */
 
     ssize_t n = read(fd, buf, sizeof(buf) - 1);
     if (n <= 0) {
@@ -246,13 +247,24 @@ static void *client_handler(app_ctx_t *app, int fd)
         if (poll(&pfd, 1, 100) <= 0) break;
         ssize_t r = read(fd, buf + n, sizeof(buf) - 1 - n);
         if (r <= 0) break;
-        n += r; buf[n] = '\0'; tries++;
+        n += r; if (n >= (ssize_t)sizeof(buf)-1) n = (ssize_t)sizeof(buf)-1; buf[n] = '\0'; tries++;
     }
 
     /* 读取 POST body —— 最多等 1 秒 */
     const char *cl_hdr = strstr(buf, "Content-Length:");
     if (!cl_hdr) cl_hdr = strstr(buf, "content-length:");
-    int cl = cl_hdr ? atoi(cl_hdr + 15) : 0;
+    long cl = 0;
+    if (cl_hdr) {
+        char *end = NULL;
+        cl = strtol(cl_hdr + 15, &end, 10);
+        if (end == cl_hdr + 15 || cl < 0) cl = 0;
+    }
+    if (cl > max_body_bytes) {
+        http_send_response(fd, 413, "Payload Too Large", "text/plain", "body too large", 15);
+        close(fd);
+        __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+        return NULL;
+    }
     const char *sep = strstr(buf, "\r\n\r\n");
     if (!sep) sep = strstr(buf, "\n\n");
     int hdr_len = sep ? (int)(sep - buf) + (sep[0] == '\r' ? 4 : 2) : 0;
@@ -260,9 +272,11 @@ static void *client_handler(app_ctx_t *app, int fd)
     for (int t = 0; body_read < cl && t < 10; t++) {
         struct pollfd pfd2 = { .fd = fd, .events = POLLIN };
         if (poll(&pfd2, 1, 100) <= 0) break;
-        ssize_t r = read(fd, buf + n, sizeof(buf) - 1 - n);
+        size_t avail = sizeof(buf) - 1 - (size_t)n;
+        if (avail == 0) break;
+        ssize_t r = read(fd, buf + n, avail);
         if (r <= 0) break;
-        n += r; body_read += (int)r; buf[n] = '\0';
+        n += r; body_read += (int)r; if (n >= (ssize_t)sizeof(buf)-1) n = (ssize_t)sizeof(buf)-1; buf[n] = '\0';
     }
     /* body 未读完（超出缓冲区）——拒绝处理，避免配置被静默截断 */
     if (cl > 0 && body_read < cl) {

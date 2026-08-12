@@ -237,11 +237,11 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
 
     v = form_find(keys, vals, count, "video_device");
     int vid_changed = (v != NULL);
-    if (v) strncpy(cfg->video_device, v, sizeof(cfg->video_device) - 1);
+    if (v) safe_strncpy(cfg->video_device, sizeof(cfg->video_device), v);
     v = form_find(keys, vals, count, "video_width");
-    if (v) { vid_changed = 1; cfg->video_width = atoi(v); }
+    if (v) { vid_changed = 1; cfg->video_width = parse_int_clamped(v, 1, 4096, cfg->video_width > 0 ? cfg->video_width : 640); }
     v = form_find(keys, vals, count, "video_height");
-    if (v) { vid_changed = 1; cfg->video_height = atoi(v); }
+    if (v) { vid_changed = 1; cfg->video_height = parse_int_clamped(v, 1, 4096, cfg->video_height > 0 ? cfg->video_height : 480); }
 
     log_info("config: applied to runtime, saving to file");
     config_save(app);

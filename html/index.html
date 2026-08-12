@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>data_transport_test</title>
+<link rel="stylesheet" href="/css/common.css">
+<link rel="stylesheet" href="/css/monitor.css">
+</head><body>
+<div class="top-bar"><h1>data_transport_test</h1><span id="datetime"></span></div>
+<div class="sub">CAN / TCP 数据网关 · 运行中</div>
+<div class="nav">
+  <a href="/config">⚙ 配置</a><a href="/logs">📋 日志</a>
+</div>
+
+<div class="grid">
+  <div class="monitor-grid">
+    <div class="video-column">
+      <div class="card video-card">
+        <h3>视频流</h3>
+        <div class="video-wrapper">
+          <video id="stream_video" autoplay muted playsinline controls></video>
+          <img id="stream_img" style="display:none" alt="stream">
+        </div>
+      </div>
+    </div>
+    <div class="status-column">
+      <div class="card"><h3>CPU</h3>
+        <div class="val-row"><span class="val" id="cpu_val">--%</span><span class="temp" id="temp">-°C</span></div>
+        <div class="bar cpu-bar"><div class="green" id="cpu_bar" style="width:0%"></div></div>
+        <div class="core-bars" id="cpu_cores"></div>
+      </div>
+      <div class="card">
+        <div class="sec"><h4>内存</h4>
+        <div class="hdr-row"><span class="label-left">占用：<b id="mem_used">-</b></span><span class="label-left">总量：<b id="mem_total">-</b></span></div>
+        <div class="bar"><div class="blue" id="mem_bar" style="width:0%"></div><span class="bar-pct" id="mem_val">--%</span></div></div>
+        <div class="sec"><h4>磁盘</h4>
+        <div class="hdr-row"><span class="label-left">占用：<b id="disk_used">-</b></span><span class="label-left">总量：<b id="disk_total">-</b></span></div>
+        <div class="bar"><div class="yellow" id="disk_bar" style="width:0%"></div><span class="bar-pct" id="disk_val">--%</span></div></div>
+      </div>
+      <div class="card">
+        <div class="sec"><h4>NPU</h4>
+        <div class="core-bars" id="npu_cores"></div></div>
+        <div class="sec"><h4>GPU</h4>
+        <div class="val" id="gpu_val">--%</div>
+        <div class="bar gpu-bar"><div class="blue" id="gpu_bar" style="width:0%"></div></div></div>
+      </div>
+      <div class="card"><h3>网络速度</h3>
+        <div id="net_speed"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/js/monitor.js"></script>
+</body></html>

@@ -1,0 +1,31 @@
+# data_transport_test — 配置文件
+# 说明：本文件可由 Web 配置页（/config）读写并热生效；也可手动编辑后重启服务。
+# 格式：<key> <value>，'#' 开头为注释。
+
+# CAN 接口（可多行声明）
+can_ifname can0
+can_ifname can1
+
+# --- can0 ---
+can_bitrate can0 500000
+can_fd can0 on
+can_dbitrate can0 2000000
+can_up can0 on
+
+# --- can1 ---
+can_bitrate can1 500000
+can_fd can1 on
+can_dbitrate can1 2000000
+can_up can1 on
+
+# 下行 TCP 端口（预留）
+tcp_port 6666
+max_clients 16
+
+# --- 视频 ---
+video_device /dev/video0
+video_width 640
+video_height 480
+
+# --- HTTP Web 管理端口 ---
+http_port 80

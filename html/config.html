@@ -1,0 +1,48 @@
+<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>配置</title>
+<link rel="stylesheet" href="/css/common.css">
+<link rel="stylesheet" href="/css/config.css">
+</head><body>
+<div class="top"><h1> 配置</h1><a href="/" class="btn btn-back">← 返回</a><a href="#" onclick="reboot()" class="btn btn-back" style="background:#c0394e;color:#fff"> 重启</a><a href="#" onclick="shutdown()" class="btn btn-back" style="background:#8b4513;color:#fff"> 关机</a></div>
+
+<form id="f">
+<div class="can-grid">
+<div class="card" id="card_can0"><h3>CAN0 <span id="st0"></span> <label class="toggle"><input type="checkbox" id="tg0" onchange="toggleCan(0,this.checked)"><span class="slider"></span></label></h3>
+<div id="cfg0">
+<div class="row"><label>波特率</label><input name="br0" id="br0" type="number"><span class="unit">bps</span></div>
+<div class="row"><label>CAN FD</label><select name="fd0" id="fd0" onchange="chkFd(0)"><option value="on">on</option><option value="off">off</option></select></div>
+<div class="row" id="dbr0"><label>FD波特率</label><input name="db0" id="db0" type="number"><span class="unit">bps</span></div>
+<div class="filters">
+<h4><span>CAN-ID 过滤器</span><button type="button" class="add-btn" onclick="addFilter(0)">+ 添加</button></h4>
+<div id="fil0"></div>
+</div>
+</div><div class="hint" id="hint0">接口已关闭，开启后可配置</div></div>
+
+<div class="card" id="card_can1"><h3>CAN1 <span id="st1"></span> <label class="toggle"><input type="checkbox" id="tg1" onchange="toggleCan(1,this.checked)"><span class="slider"></span></label></h3>
+<div id="cfg1">
+<div class="row"><label>波特率</label><input name="br1" id="br1" type="number"><span class="unit">bps</span></div>
+<div class="row"><label>CAN FD</label><select name="fd1" id="fd1" onchange="chkFd(1)"><option value="on">on</option><option value="off">off</option></select></div>
+<div class="row" id="dbr1"><label>FD波特率</label><input name="db1" id="db1" type="number"><span class="unit">bps</span></div>
+<div class="filters">
+<h4><span>CAN-ID 过滤器</span><button type="button" class="add-btn" onclick="addFilter(1)">+ 添加</button></h4>
+<div id="fil1"></div>
+</div>
+</div><div class="hint" id="hint1">接口已关闭，开启后可配置</div></div>
+
+<div class="card" id="card_net"><h3>网络</h3>
+<div class="row"><label>TCP端口</label><input name="tp" id="tp" type="number"></div>
+<div class="row"><label>最大客户端数</label><input name="mc" id="mc" type="number"></div>
+</div>
+
+<div class="card" id="card_video"><h3>视频</h3>
+<div class="row"><label>设备</label><select name="vd" id="vd" onchange="queryCaps()"><option value="">-- 扫描中 --</option></select></div>
+<div class="row"><label>格式 / 分辨率</label><select name="vr" id="vr" onchange="onResChange()"><option value="">-- 请选择设备 --</option></select></div>
+<input type="hidden" id="vw"><input type="hidden" id="vh">
+</div>
+</div>
+<button type="submit" class="btn btn-save">💾 保存</button>
+<button type="button" class="btn btn-back" onclick="loadCfg()">🔄 查询</button>
+<div id="msg"></div>
+</form>
+
+<script src="/js/config.js"></script>
+</body></html>

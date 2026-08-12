@@ -1,0 +1,480 @@
+/**
+ * http.c — HTTP 核心：主循环、路由分发、认证、静态文件服务、工具函数。
+ */
+
+#define _GNU_SOURCE   /* 暴露 SO_REUSEPORT 等 GNU/Linux 扩展 */
+
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <time.h>
+#include <sys/epoll.h>
+#include <sys/socket.h>
+#include <poll.h>
+#include <unistd.h>
+#include <shadow.h>
+#include <crypt.h>
+#include <pwd.h>
+
+#include "http/http_internal.h"
+#include "video/video_stream.h"
+#include "watchdog/watchdog.h"
+#include "core/common.h"
+
+/* ---- 全局变量 ---- */
+static int g_listen_fd = -1;
+static int g_http_port;
+static _Atomic int g_http_active = 0;   /* 活跃 HTTP 连接数 */
+#define HTTP_MAX_CONN 64
+
+/* ---- 工具函数 ---- */
+
+const char *http_mime_type(const char *path)
+{
+    const char *ext = strrchr(path, '.');
+    if (!ext) return "application/octet-stream";
+    if (strcmp(ext, ".html") == 0) return "text/html; charset=utf-8";
+    if (strcmp(ext, ".css")  == 0) return "text/css";
+    if (strcmp(ext, ".js")   == 0) return "application/javascript";
+    if (strcmp(ext, ".json") == 0) return "application/json";
+    if (strcmp(ext, ".png")  == 0) return "image/png";
+    if (strcmp(ext, ".ico")  == 0) return "image/x-icon";
+    if (strcmp(ext, ".svg")  == 0) return "image/svg+xml";
+    return "text/plain";
+}
+
+void http_send_response(int fd, int code, const char *status,
+                        const char *mime, const void *body, size_t len)
+{
+    char header[512];
+    int off = snprintf(header, sizeof(header),
+                       "HTTP/1.1 %d %s\r\n"
+                       "Content-Type: %s\r\n"
+                       "Content-Length: %zu\r\n"
+                       "Connection: close\r\n\r\n",
+                       code, status, mime, len);
+    if (write(fd, header, off) < 0) return;
+    if (body && len > 0)
+        write(fd, body, len);
+}
+
+void http_handle_404(int fd, const char *path)
+{
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "<html><body><h1>404 Not Found</h1><p>%s</p></body></html>", path);
+    http_send_response(fd, 404, "Not Found", "text/html", msg, strlen(msg));
+}
+
+/* ---- HTTP Basic 认证 ---- */
+
+static pthread_mutex_t g_auth_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* 认证暴力破解限速（http worker 单线程执行认证，无需原子） */
+static int    g_auth_fail = 0;
+static time_t g_auth_fail_win = 0;
+#define AUTH_FAIL_WINDOW 10   /* 窗口：10 秒 */
+#define AUTH_FAIL_LIMIT  20   /* 窗口内允许的最大失败次数 */
+
+/* internal helper: check basic auth; if require_root==1 require uid==0 */
+static int http_check_auth_common(const char *req, int fd, int require_root)
+{
+    /* 暴力破解熔断：窗口内失败超限直接拒绝（不执行 crypt，避免 CPU DoS） */
+    time_t now = time(NULL);
+    if (!g_auth_fail_win || now - g_auth_fail_win >= AUTH_FAIL_WINDOW) {
+        g_auth_fail = 0;
+        g_auth_fail_win = now;
+    }
+    if (g_auth_fail >= AUTH_FAIL_LIMIT) {
+        log_info("HTTP auth: rate limited");
+        goto deny;
+    }
+
+    const char *auth = strstr(req, "Authorization: Basic ");
+    if (!auth) goto deny;
+
+    char decoded[128] = {0};
+    const char *enc = auth + 21;
+    int di = 0;
+    for (int i = 0; enc[i] && enc[i] != '\r' && enc[i] != '\n' && di < 120; i++) {
+        if (enc[i] >= 'A' && enc[i] <= 'Z') decoded[di] = (char)(enc[i] - 'A');
+        else if (enc[i] >= 'a' && enc[i] <= 'z') decoded[di] = (char)(enc[i] - 'a' + 26);
+        else if (enc[i] >= '0' && enc[i] <= '9') decoded[di] = (char)(enc[i] - '0' + 52);
+        else if (enc[i] == '+') decoded[di] = 62;
+        else if (enc[i] == '/') decoded[di] = 63;
+        else continue;
+        ++di;
+    }
+
+    char user_pass[128];
+    int up_len = 0;
+    for (int i = 0; i < di; i += 4) {
+        if (up_len + 3 >= (int)sizeof(user_pass)) break;
+        user_pass[up_len++] = (char)((decoded[i] << 2) | (decoded[i+1] >> 4));
+        if (i + 2 < di)
+            user_pass[up_len++] = (char)((decoded[i+1] << 4) | (decoded[i+2] >> 2));
+        if (i + 3 < di)
+            user_pass[up_len++] = (char)((decoded[i+2] << 6) | decoded[i+3]);
+    }
+    user_pass[up_len] = '\0';
+
+    char *colon = strchr(user_pass, ':');
+    if (!colon) goto deny;
+    *colon = '\0';
+    char *username = user_pass;
+    char *password = colon + 1;
+
+    /* getpwnam/getspnam 使用进程级静态缓冲区，多线程并发会互相覆盖；
+       整个认证流程（查账号 + 校验哈希）加锁串行化 */
+    pthread_mutex_lock(&g_auth_mutex);
+    struct passwd *pw = getpwnam(username);
+    if (!pw) goto auth_unlock_deny;
+
+    struct spwd *sp = getspnam(username);
+    if (!sp) goto auth_unlock_deny;
+
+    char *hash = sp->sp_pwdp;
+    if (!hash || hash[0] == '!' || hash[0] == '*') goto auth_unlock_deny;
+
+    char *result = crypt(password, hash);
+    int ok = (result && strcmp(result, hash) == 0);
+    if (ok && require_root && pw->pw_uid != 0) ok = 0;
+    pthread_mutex_unlock(&g_auth_mutex);
+
+    if (ok) {
+        log_info("HTTP auth: user '%s' OK", username);
+        return 1;
+    }
+
+    log_info("HTTP auth: user '%s' denied", username);
+    goto deny;
+
+auth_unlock_deny:
+    pthread_mutex_unlock(&g_auth_mutex);
+    log_info("HTTP auth: user '%s' denied", username);
+deny:
+    g_auth_fail++;
+    dprintf(fd,
+        "HTTP/1.1 401 Unauthorized\r\n"
+        "WWW-Authenticate: Basic realm=\"data_transport\"\r\n"
+        "Content-Type: text/html\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n\r\n");
+    return 0;
+}
+
+int http_check_auth_user(const char *req, int fd) { return http_check_auth_common(req, fd, 0); }
+int http_check_auth_root(const char *req, int fd) { return http_check_auth_common(req, fd, 1); }
+
+/* ---- 静态文件服务 ---- */
+
+static void http_video_client_closed(int fd);
+
+void http_serve_file(int fd, const char *uri)
+{
+    if (strstr(uri, "..")) { http_handle_404(fd, uri); return; }
+
+    char path[512];
+    if (strcmp(uri, "/") == 0)
+        snprintf(path, sizeof(path), "%s/index.html", HTTP_ROOT);
+    else
+        snprintf(path, sizeof(path), "%s%s", HTTP_ROOT, uri);
+
+    FILE *fp = fopen(path, "rb");
+    if (!fp) { http_handle_404(fd, uri); return; }
+
+    fseek(fp, 0, SEEK_END);
+    size_t size = (size_t)ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (size > 20 * 1024 * 1024) {   /* 静态文件上限 20MB，防止大文件长时间阻塞 HTTP */
+        fclose(fp);
+        http_send_response(fd, 413, "Payload Too Large", "text/plain", "file too large", 15);
+        return;
+    }
+
+    char header[256];
+    int off = snprintf(header, sizeof(header),
+                       "HTTP/1.1 200 OK\r\n"
+                       "Content-Type: %s\r\n"
+                       "Content-Length: %zu\r\n"
+                       "Connection: close\r\n\r\n",
+                       http_mime_type(path), size);
+    if (write(fd, header, off) < 0) { fclose(fp); return; }
+
+    char buf[HTTP_BUF_SIZE];
+    size_t remain = size;
+    while (remain > 0) {
+        size_t n = (remain > sizeof(buf)) ? sizeof(buf) : remain;
+        size_t r = fread(buf, 1, n, fp);
+        if (r == 0) break;
+        if (write(fd, buf, r) < 0) break;
+        remain -= r;
+    }
+    fclose(fp);
+}
+
+/* ---- 每连接处理线程 ---- */
+
+static void *client_handler(app_ctx_t *app, int fd)
+{
+    (void)app;
+    char buf[HTTP_BUF_SIZE];
+
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        close(fd);
+        __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+        return NULL;
+    }
+    buf[n] = '\0';
+
+    /* 持续读取直到收到完整请求（\r\n\r\n 或超时） */
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    int tries = 0;
+    while (!strstr(buf, "\r\n\r\n") && !strstr(buf, "\n\n") && tries < 5) {
+        if (poll(&pfd, 1, 100) <= 0) break;
+        ssize_t r = read(fd, buf + n, sizeof(buf) - 1 - n);
+        if (r <= 0) break;
+        n += r; buf[n] = '\0'; tries++;
+    }
+
+    /* 读取 POST body —— 最多等 1 秒 */
+    const char *cl_hdr = strstr(buf, "Content-Length:");
+    if (!cl_hdr) cl_hdr = strstr(buf, "content-length:");
+    int cl = cl_hdr ? atoi(cl_hdr + 15) : 0;
+    const char *sep = strstr(buf, "\r\n\r\n");
+    if (!sep) sep = strstr(buf, "\n\n");
+    int hdr_len = sep ? (int)(sep - buf) + (sep[0] == '\r' ? 4 : 2) : 0;
+    int body_read = (n > hdr_len && hdr_len > 0) ? (int)(n - hdr_len) : 0;
+    for (int t = 0; body_read < cl && t < 10; t++) {
+        struct pollfd pfd2 = { .fd = fd, .events = POLLIN };
+        if (poll(&pfd2, 1, 100) <= 0) break;
+        ssize_t r = read(fd, buf + n, sizeof(buf) - 1 - n);
+        if (r <= 0) break;
+        n += r; body_read += (int)r; buf[n] = '\0';
+    }
+    /* body 未读完（超出缓冲区）——拒绝处理，避免配置被静默截断 */
+    if (cl > 0 && body_read < cl) {
+        http_send_response(fd, 413, "Payload Too Large", "text/plain", "body too large", 15);
+        goto close;
+    }
+
+    char method[16] = "GET", uri[HTTP_URI_MAX] = "/";
+    sscanf(buf, "%15s %255s", method, uri);
+
+    /* ---- 路由分发 ---- */
+
+    /* 视频 MJPEG：特殊处理（推流线程由 video 模块创建，每连接一个） */
+    if (strcmp(uri, "/video/mjpeg") == 0) {
+        if (video_stream_client_start(fd, http_video_client_closed) != 0) {
+            http_send_response(fd, 500, "Error", "text/plain", "", 0);
+            goto close;
+        }
+        return NULL;
+    }
+
+    /* 认证页面（文件服务 + auth）—— 认证涉及 crypt()，可能阻塞，先喂狗 */
+    watchdog_feed(WD_HTTP);
+    if (strcmp(uri, "/") == 0 || strcmp(uri, "/index.html") == 0) {
+        if (!http_check_auth_user(buf, fd)) goto close;
+        http_serve_file(fd, "/index.html"); goto close;
+    }
+    if (strcmp(uri, "/config") == 0 || strncmp(uri, "/config.html", 11) == 0) {
+        if (!http_check_auth_root(buf, fd)) goto close;
+        http_serve_file(fd, "/config.html"); goto close;
+    }
+
+    /* API 路由表 */
+    typedef void (*api_fn)(app_ctx_t *, int, const char *, const char *, const char *);
+    static const struct { const char *uri; int pre; const char *method; api_fn fn; int (*auth)(const char*,int); }
+    rt[] = {
+        { "/logs",          1, NULL,   (api_fn)http_logs_handler, http_check_auth_root },
+        { "/logfile/",      1, NULL,   (api_fn)http_logs_handler, http_check_auth_root },
+        { "/api/system",    0, NULL,   (api_fn)http_system_api,   NULL },
+        { "/api/can",       0, NULL,   (api_fn)http_can_status,   NULL },
+        { "/api/can/toggle",0, NULL,   (api_fn)http_can_toggle,   http_check_auth_root },
+        { "/api/config",    0, "POST", (api_fn)http_config_post,  http_check_auth_root },
+        { "/api/config",    0, NULL,   (api_fn)http_config_get,   http_check_auth_root },
+        { "/api/reboot",    0, NULL,   (api_fn)http_reboot,       http_check_auth_root },
+        { "/api/shutdown",  0, NULL,   (api_fn)http_shutdown,     http_check_auth_root },
+        { "/api/network",   0, NULL,   (api_fn)http_network_api,  NULL },
+        { "/api/video/caps",1, NULL,  (api_fn)http_video_caps,   NULL },
+        { "/api/video/devices",0,NULL, (api_fn)http_video_devices,NULL },
+    };
+
+    for (int i = 0; i < (int)(sizeof(rt)/sizeof(rt[0])); i++) {
+        int m = rt[i].pre ? !strncmp(uri, rt[i].uri, strlen(rt[i].uri))
+                          : !strcmp(uri, rt[i].uri);
+        if (!m) continue;
+        if (rt[i].method && strcmp(method, rt[i].method) != 0) continue;
+        if (rt[i].auth && !rt[i].auth(buf, fd)) goto close;
+        rt[i].fn(app, fd, method, uri, buf);
+        goto close;
+    }
+
+    /* 兜底：静态文件（公开） */
+    http_serve_file(fd, uri);
+
+close:
+    close(fd);
+    __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+    return NULL;
+}
+
+/* 视频推流线程退出回调：关闭 fd 并归还连接计数 */
+static void http_video_client_closed(int fd)
+{
+    close(fd);
+    __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+}
+
+/* ---- HTTP 主循环 ---- */
+
+static int set_socket_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return -1;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+void *http_server_task(void *arg)
+{
+    app_ctx_t *app = (app_ctx_t *)arg;
+
+    g_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (g_listen_fd < 0) { log_error("http socket"); return NULL; }
+
+    int opt = 1;
+    setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+
+    if (set_socket_nonblocking(g_listen_fd) < 0) {
+        log_error("http set nonblocking");
+        close(g_listen_fd);
+        g_listen_fd = -1;
+        return NULL;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port        = htons(g_http_port);
+
+    if (bind(g_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        log_error("http bind :%d", g_http_port);
+        close(g_listen_fd); g_listen_fd = -1; return NULL;
+    }
+    if (listen(g_listen_fd, 10) < 0) {
+        log_error("http listen :%d", g_http_port);
+        close(g_listen_fd); g_listen_fd = -1; return NULL;
+    }
+
+    int epfd = epoll_create1(0);
+    if (epfd < 0) {
+        log_error("http epoll_create1");
+        close(g_listen_fd);
+        g_listen_fd = -1;
+        return NULL;
+    }
+
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = g_listen_fd;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, g_listen_fd, &ev) < 0) {
+        log_error("http epoll_ctl add listen");
+        close(epfd);
+        close(g_listen_fd);
+        g_listen_fd = -1;
+        return NULL;
+    }
+
+    log_info("HTTP server listening on port %d", g_http_port);
+
+    struct epoll_event events[64];
+    while (app->running) {
+        int n = epoll_wait(epfd, events, sizeof(events) / sizeof(events[0]), 500);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        watchdog_feed(WD_HTTP);
+
+        for (int i = 0; i < n; i++) {
+            int fd = events[i].data.fd;
+            if (fd == g_listen_fd) {
+                while (1) {
+                    struct sockaddr_in client;
+                    socklen_t len = sizeof(client);
+                    int client_fd = accept(g_listen_fd, (struct sockaddr *)&client, &len);
+                    if (client_fd < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                        if (errno == EINTR) continue;
+                        log_error("http accept");
+                        break;
+                    }
+                    if (__atomic_fetch_add(&g_http_active, 1, __ATOMIC_RELAXED) >= HTTP_MAX_CONN) {
+                        __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+                        log_error("http: too many connections, rejecting %s",
+                                  inet_ntoa(client.sin_addr));
+                        close(client_fd);
+                        continue;
+                    }
+                    log_info("HTTP connect from %s", inet_ntoa(client.sin_addr));
+                    /* 置非阻塞，避免慢客户端阻塞服务端 write */
+                    set_socket_nonblocking(client_fd);
+                    struct epoll_event cev;
+                    cev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP;
+                    cev.data.fd = client_fd;
+                    if (epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev) < 0) {
+                        log_error("http epoll_ctl add client");
+                        close(client_fd);
+                        __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+                    }
+                }
+                continue;
+            }
+
+            if (events[i].events & (EPOLLHUP | EPOLLRDHUP | EPOLLERR)) {
+                epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                close(fd);
+                __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+                continue;
+            }
+
+            epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+            client_handler(app, fd);
+        }
+    }
+
+    close(epfd);
+    close(g_listen_fd);
+    g_listen_fd = -1;
+    log_info("HTTP server stopped");
+    return NULL;
+}
+
+/* ---- 公共接口 ---- */
+
+int http_server_start(void *arg)
+{
+    app_ctx_t *app = (app_ctx_t *)arg;
+    /* HTTP 端口可配置（config.txt 的 http_port，默认 80） */
+    g_http_port = (app && app->cfg && app->cfg->http_port > 0)
+                      ? app->cfg->http_port : HTTP_DEFAULT_PORT;
+    log_info("HTTP port = %d", g_http_port);
+    return 0;
+}
+
+void http_server_stop(void *arg)
+{
+    (void)arg;
+    if (g_listen_fd >= 0) {
+        shutdown(g_listen_fd, SHUT_RDWR);
+        close(g_listen_fd);
+        g_listen_fd = -1;
+    }
+}

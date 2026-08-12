@@ -64,8 +64,7 @@ project1/
 ├── config/                       # 运行时配置
 └── scripts/
     ├── build.sh
-    ├── deploy.sh
-    └── can_bench.sh
+    └── deploy.sh
 ```
 
 ## 依赖与构建

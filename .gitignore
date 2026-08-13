@@ -47,11 +47,34 @@ coverage/
 .ccls
 .gdbinit
 core.*
+*.stackdump
+*.d
+*.su
+*.pid
+
+# 依赖 / 本地包缓存
+node_modules/
+vendor/
+third_party/
 
 # 本地配置信息
 .env
 .env.*
 *.local
+
+# 扩展的构建/输出目录
+out/
+obj/
+debug/
+release/
+dist/
+
+# 工具链 / 生成物
+*.ninja
+*.ninja_log
+*.ninja_deps
+compile_flags.txt
+*.code-workspace
 
 # 编辑器 / IDE
 .vscode/

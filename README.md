@@ -1,17 +1,21 @@
 # rk3588-canfd-and-tcp-ip-communication
 
-基于 epoll 的 CAN 数据接收与 TCP/IP 通信解决方案，内置 Web 管理界面、视频流与 systemd 看门狗。目标平台为 Orange Pi 5 Max（RK3588）/ Linux，使用 C11 标准。
+[![Platform](https://img.shields.io/badge/Platform-RK3588-orange.svg)](https://github.com/qianruo-orange/rk3588-canfd-and-tcp-ip-communication)
+[![Language](https://img.shields.io/badge/Language-C11-blue.svg)](https://github.com/qianruo-orange/rk3588-canfd-and-tcp-ip-communication)
+[![OS](https://img.shields.io/badge/OS-Linux-green.svg)](https://github.com/qianruo-orange/rk3588-canfd-and-tcp-ip-communication)
 
-## 项目概述
+基于 epoll 的 CAN 数据接收与 TCP/IP 通信解决方案，内置 Web 管理界面、视频流与 systemd 看门狗。该项目适用于 Orange Pi 5 Max（RK3588）/ Linux 运行环境，使用 C11 实现。
 
-该项目面向 RK3588 平台设计，主要用于实现：
+## 项目简介
 
-- CAN 总线数据接收与采集
-- CAN FD 兼容处理
-- TCP/IP 连接管理
-- Web 端配置与状态查看
-- 视频流输出
-- 系统守护与看门狗监控
+本项目面向嵌入式工业场景与边缘网关场景，整合了以下核心能力：
+
+- CAN 总线数据采集与日志记录
+- CAN FD 兼容支持
+- TCP/IP 通信与连接管理
+- Web 管理界面配置与监控
+- 视频流服务
+- 运行时系统守护与 watchdog 监控
 
 ## 快速开始
 
@@ -21,22 +25,23 @@ cd /home/orangepi/project1
 ./bin/data_transport_test
 ```
 
-## 核心价值
+## 项目亮点
 
-- 适配 Orange Pi 5 Max / RK3588 平台
-- 统一处理 CAN、TCP 与 HTTP 相关任务
-- 通过 Web 页面实现远程查看和配置
-- 以 systemd 看门狗增强运行稳定性
+- 面向 RK3588 平台设计，适合工业控制与边缘设备部署
+- 同时覆盖 CAN、CAN FD、TCP、HTTP 与视频流功能
+- Web 端可查看状态、更新配置、管理日志和重启设备
+- 采用 systemd watchdog 提升稳定性与故障恢复能力
+- 支持日志按日期和大小自动轮转，便于长期运行追踪
 
 ## 功能特点
 
-- CAN 数据接收：支持经典 CAN 与 CAN FD，支持多接口管理
-- 日志记录：接收的 CAN 帧与系统事件按级别写入日志文件
-- Web 管理界面：通过 HTTP 提供仪表盘、配置、日志、重启等管理能力
-- 视频流服务：通过 V4L2 接入摄像头并输出 MJPEG 流
-- systemd 看门狗：对关键线程进行心跳监控，防止异常卡死
-- 热更新配置：Web 端修改配置后，运行时自动生效
-- 日志轮转：按日期和大小进行日志分片管理
+- CAN 数据接收：支持经典 CAN 与 CAN FD，多接口管理
+- 日志记录：接收的 CAN 帧和系统事件按级别写入日志
+- Web 管理界面：提供数据监控、配置修改、日志查看与重启控制
+- 视频流服务：通过 V4L2 接入摄像头并输出 MJPEG 视频流
+- systemd 看门狗：监控关键线程心跳，防止异常卡死
+- 热更新配置：Web 页面修改后可立即生效
+- 运行维护：日志轮转、清理脚本、部署脚本
 
 ## 系统架构
 
@@ -241,6 +246,14 @@ logs/
 > 这里可以放项目运行界面截图、Web 页面截图或设备连接示意图。
 
 ![Web UI Preview](https://via.placeholder.com/1200x600.png?text=Web+UI+Preview)
+
+## 项目亮点
+
+- 面向 RK3588 平台开发，适合工业控制和边缘网关场景
+- 同时覆盖 CAN / CAN FD / TCP / HTTP / 视频流等功能
+- 通过 Web 页面快速查看设备状态与配置参数
+- 采用 systemd 看门狗机制增强稳定性与可靠性
+- 支持日志轮转、热更新与运行时管理
 
 ## 许可证
 

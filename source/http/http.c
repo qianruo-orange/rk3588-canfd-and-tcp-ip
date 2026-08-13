@@ -485,7 +485,7 @@ void *http_server_task(void *arg)
     while (app->running) {
         int n = epoll_wait(epfd, events, sizeof(events) / sizeof(events[0]), 500);
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR) { watchdog_feed_thread(pthread_self()); continue; }
             break;
         }
 

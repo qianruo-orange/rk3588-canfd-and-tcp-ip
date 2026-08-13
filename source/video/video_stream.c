@@ -39,11 +39,13 @@ static video_ctx_t *g_ctx = NULL;
 
 /* ---- 内部函数 ---- */
 
-static int init_video_device(video_ctx_t *vs)
+static int init_video_device(video_ctx_t *vs, int verbose)
 {
     vs->fd = open(vs->device, O_RDWR | O_NONBLOCK, 0);
     if (vs->fd < 0) {
-        log_error("video_stream: open %s failed: %s", vs->device, strerror(errno));
+        /* 相机未连接是常见场景：重试时静默，仅在状态切换时详细记录，避免刷屏 */
+        if (verbose)
+            log_error("video_stream: open %s failed: %s", vs->device, strerror(errno));
         return -1;
     }
     struct v4l2_capability cap;
@@ -200,21 +202,33 @@ void *video_stream_task(void *arg)
     video_ctx_t *vs = g_ctx;
     if (!vs) return NULL;
 
+    int failed_before = 0;   /* 连续失败标记：只在状态切换时输出详细错误 */
+
     while (vs->app->running) {
         /* 会话开始：初始化设备（参数变更由 restart_req 触发重新进入本循环） */
         pthread_mutex_lock(&vs->cfg_mutex);
-        int ok = (init_video_device(vs) == 0);
+        int ok = (init_video_device(vs, !failed_before) == 0);
         pthread_mutex_unlock(&vs->cfg_mutex);
 
         if (!ok) {
-            log_error("video_stream: device init failed, waiting for restart");
+            if (!failed_before) {
+                log_error("video_stream: device init failed, entering idle retry loop (watchdog still fed)");
+                failed_before = 1;
+            }
+            /* 相机未连接：线程保持存活并持续喂狗，程序正常运行；
+               每 5 秒重试一次初始化，便于热插拔后自动恢复 */
+            int idle_ticks = 0;
             while (vs->app->running && !__atomic_load_n(&vs->restart_req, __ATOMIC_ACQUIRE)) {
                 usleep(500000);
                 watchdog_feed_thread(pthread_self());
+                if (++idle_ticks >= 10) break;
             }
+            if (__atomic_load_n(&vs->restart_req, __ATOMIC_ACQUIRE))
+                failed_before = 0;   /* 配置变更触发：下次失败重新详细记录 */
             __atomic_store_n(&vs->restart_req, 0, __ATOMIC_RELEASE);
             continue;
         }
+        failed_before = 0;
 
         struct pollfd pfd = { .fd = vs->fd, .events = POLLIN | POLLERR };
         log_info("video_stream: capturing from %s", vs->device);
@@ -222,10 +236,12 @@ void *video_stream_task(void *arg)
         while (vs->app->running && !__atomic_load_n(&vs->restart_req, __ATOMIC_ACQUIRE)) {
             int ret = poll(&pfd, 1, 500);
             if (ret < 0) {
-                if (errno == EINTR) continue;
+                if (errno == EINTR) { watchdog_feed_thread(pthread_self()); continue; }
                 log_error("video_stream: poll failed");
                 break;
             }
+            /* 无论是否有帧都保持喂狗：相机空闲/无数据时线程仍存活，避免误判卡死 */
+            watchdog_feed_thread(pthread_self());
             if (ret == 0) continue;
             if (!(pfd.revents & POLLIN)) continue;
 

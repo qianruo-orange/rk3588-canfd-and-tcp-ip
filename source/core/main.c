@@ -47,7 +47,8 @@ static module_t g_mods[] = {
     { 0, tcp_init,           tcp_cleanup,            tcp_task,         5, 3 },
     { 0, http_server_start,  http_server_stop,       http_server_task, 5, 3 },
     { 0, video_stream_init,  video_stream_shutdown,  video_stream_task, 5, 3 },
-    { 0, watchdog_init,      NULL,                   watchdog_task,    5, 3 },
+    /* watchdog 线程是监控者，不能监督自己，故 timeout=0（不注册自身） */
+    { 0, watchdog_init,      NULL,                   watchdog_task,    0, 0 },
     { 0, signal_setup,       NULL,                   NULL,             0, 0 },
 };
 #define MOD_COUNT (int)(sizeof(g_mods)/sizeof(g_mods[0]))

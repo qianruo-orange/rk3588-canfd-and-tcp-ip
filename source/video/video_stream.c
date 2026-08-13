@@ -220,7 +220,7 @@ void *video_stream_task(void *arg)
             int idle_ticks = 0;
             while (vs->app->running && !__atomic_load_n(&vs->restart_req, __ATOMIC_ACQUIRE)) {
                 usleep(500000);
-                watchdog_feed_thread(pthread_self());
+                watchdog_feed_self("video");
                 if (++idle_ticks >= 10) break;
             }
             if (__atomic_load_n(&vs->restart_req, __ATOMIC_ACQUIRE))
@@ -236,12 +236,12 @@ void *video_stream_task(void *arg)
         while (vs->app->running && !__atomic_load_n(&vs->restart_req, __ATOMIC_ACQUIRE)) {
             int ret = poll(&pfd, 1, 500);
             if (ret < 0) {
-                if (errno == EINTR) { watchdog_feed_thread(pthread_self()); continue; }
+                if (errno == EINTR) { watchdog_feed_self("video"); continue; }
                 log_error("video_stream: poll failed");
                 break;
             }
             /* 无论是否有帧都保持喂狗：相机空闲/无数据时线程仍存活，避免误判卡死 */
-            watchdog_feed_thread(pthread_self());
+            watchdog_feed_self("video");
             if (ret == 0) continue;
             if (!(pfd.revents & POLLIN)) continue;
 
@@ -270,7 +270,7 @@ void *video_stream_task(void *arg)
                     if (old) { free(old->data); free(old); }
                     pthread_mutex_unlock(&vs->frame_mutex);
                     __atomic_fetch_add(&vs->seq, 1, __ATOMIC_SEQ_CST);
-                    watchdog_feed_thread(pthread_self());
+                    watchdog_feed_self("video");
                 }
             }
 

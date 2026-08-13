@@ -366,7 +366,7 @@ static void *client_handler(app_ctx_t *app, int fd)
     }
 
     /* 认证页面（文件服务 + auth）—— 认证涉及 crypt()，可能阻塞，先喂狗 */
-    watchdog_feed_thread(pthread_self());
+    watchdog_feed_self("http");
     if (strcmp(uri, "/") == 0 || strcmp(uri, "/index.html") == 0) {
         if (!http_check_auth_user(buf, fd)) goto close;
         http_serve_file(fd, "/index.html"); goto close;
@@ -485,11 +485,11 @@ void *http_server_task(void *arg)
     while (app->running) {
         int n = epoll_wait(epfd, events, sizeof(events) / sizeof(events[0]), 500);
         if (n < 0) {
-            if (errno == EINTR) { watchdog_feed_thread(pthread_self()); continue; }
+            if (errno == EINTR) { watchdog_feed_self("http"); continue; }
             break;
         }
 
-        watchdog_feed_thread(pthread_self());
+        watchdog_feed_self("http");
 
         for (int i = 0; i < n; i++) {
             int fd = events[i].data.fd;

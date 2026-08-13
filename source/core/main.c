@@ -19,6 +19,7 @@
 #include "video/video_stream.h"
 
 typedef struct {
+    const char *name;
     pthread_t    tid;
     int  (*mod_init_t)(void *arg);
     void (*mod_dtor_t)(void *arg);
@@ -44,13 +45,13 @@ static int signal_setup(void *arg)
 static app_ctx_t g_app;
 
 static module_t g_mods[] = {
-    { 0, can_init,           can_cleanup,            can_task,         3, 3 },
-    { 0, tcp_init,           tcp_cleanup,            tcp_task,         5, 3 },
-    { 0, http_server_start,  http_server_stop,       http_server_task, 5, 3 },
-    { 0, video_stream_init,  video_stream_shutdown,  video_stream_task, 5, 3 },
+    { "can",      0, can_init,          can_cleanup,           can_task,         3, 3 },
+    { "tcp",      0, tcp_init,          tcp_cleanup,           tcp_task,         5, 3 },
+    { "http",     0, http_server_start, http_server_stop,      http_server_task, 5, 3 },
+    { "video",    0, video_stream_init, video_stream_shutdown, video_stream_task, 5, 3 },
     /* watchdog 线程是监控者，不能监督自己，故 timeout=0（不注册自身） */
-    { 0, watchdog_init,      NULL,                   watchdog_task,    0, 0 },
-    { 0, signal_setup,       NULL,                   NULL,             0, 0 },
+    { "watchdog", 0, watchdog_init,     NULL,                  watchdog_task,    0, 0 },
+    { "signal",   0, signal_setup,      NULL,                  NULL,             0, 0 },
 };
 #define MOD_COUNT (int)(sizeof(g_mods)/sizeof(g_mods[0]))
 
@@ -88,6 +89,15 @@ static void wait_threads_exit(void)
  */
 static void shutdown_modules_safe(void)
 {
+    log_info("Shutting down modules...");
+    for (int i = 0; i < MOD_COUNT; i++) {
+        module_t *m = &g_mods[i];
+        if (m->mod_dtor_t) {
+            log_info("Shutting down module %s...", m->name);
+            m->mod_dtor_t(&g_app);
+        }
+    }
+    log_info("Modules shut down successfully.");
     g_app.running = 0;
     http_server_stop(&g_app);
     video_stream_shutdown(&g_app);
@@ -134,12 +144,12 @@ int main(void)
             pthread_attr_destroy(&attr);
             if (rc != 0) goto fail;
             if (m->thread && m->timeout > 0)
-                watchdog_register_thread(m->tid, m->timeout, m->max_miss);
+                watchdog_register_thread(m->tid, m->name, m->timeout, m->max_miss);
         }
     }
 
-    watchdog_register_thread(pthread_self(), 15, 1);
-    while (g_app.running) { watchdog_feed_thread(pthread_self()); sleep(1); }
+    watchdog_register_thread(pthread_self(), "main", 15, 1);
+    while (g_app.running) { watchdog_feed_self("main"); sleep(1); }
 
     /* 通知各模块停止，让工作线程尽快退出 */
     shutdown_modules_safe();

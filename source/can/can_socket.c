@@ -340,10 +340,10 @@ void *can_task(void *arg)
         struct epoll_event events[64];
         int nfds = epoll_wait(ctx->epfd, events, 64, 500);
         if (nfds < 0) {
-            if (errno == EINTR) { watchdog_feed_thread(pthread_self()); continue; }
+            if (errno == EINTR) { watchdog_feed_self("can"); continue; }
             log_error("can epoll_wait"); break;
         }
-        watchdog_feed_thread(pthread_self());
+        watchdog_feed_self("can");
         for (int i = 0; i < nfds; i++) {
             uint32_t tag = events[i].data.u32;
             if (tag < 1 || tag > (uint32_t)ctx->count) continue;

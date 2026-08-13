@@ -185,7 +185,7 @@ static void serve_log_pack(int fd)
         write(fd, buf, n);
         total += n;
         if (total > LOG_PACK_MAX) break;   /* 限制打包体积，避免长时间阻塞 HTTP 服务器 */
-        watchdog_feed_thread(pthread_self());            /* 打包耗时较长，持续喂狗防止看门狗误杀 */
+        watchdog_feed_self("http");            /* 打包耗时较长，持续喂狗防止看门狗误杀 */
     }
     pclose(tar);
 }

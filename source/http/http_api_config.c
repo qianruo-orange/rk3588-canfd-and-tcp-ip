@@ -159,7 +159,7 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         can_iface_t *iface = &can->ifaces[i];
         int old_fd = iface->sock_fd;
 
-        watchdog_feed_thread(pthread_self());   /* 配置可能执行 ip 命令较慢，避免 HTTP 看门狗误杀 */
+        watchdog_feed_self("http");   /* 配置可能执行 ip 命令较慢，避免 HTTP 看门狗误杀 */
 
         /* 从 CAN epoll 移除旧 fd */
         if (old_fd >= 0 && can->epfd >= 0)

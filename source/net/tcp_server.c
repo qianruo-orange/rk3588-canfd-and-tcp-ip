@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <stdint.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <netinet/in.h>
@@ -49,6 +50,40 @@ int tcp_accept(int listen_fd)
     return client_fd;
 }
 
+/* 超时收发共用的 epoll 实例：复用避免每次临时创建/销毁；
+   互斥保护以支持多线程调用（当前主要被 tcp_task 在 client_mutex 下调用） */
+static pthread_mutex_t g_io_epoll_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int g_io_epfd = -1;
+
+static int tcp_io_epoll_wait(int fd, uint32_t events, int timeout_ms)
+{
+    pthread_mutex_lock(&g_io_epoll_mutex);
+
+    if (g_io_epfd < 0) {
+        g_io_epfd = epoll_create1(EPOLL_CLOEXEC);
+        if (g_io_epfd < 0) {
+            pthread_mutex_unlock(&g_io_epoll_mutex);
+            return -1;
+        }
+    }
+
+    struct epoll_event ev;
+    ev.events = events;
+    ev.data.fd = fd;
+
+    if (epoll_ctl(g_io_epfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        /* 已有残留注册（并发调用或 fd 号复用），改为 MOD 即可 */
+        if (errno == EEXIST)
+            epoll_ctl(g_io_epfd, EPOLL_CTL_MOD, fd, &ev);
+    }
+
+    int rc = epoll_wait(g_io_epfd, &ev, 1, timeout_ms < 0 ? 0 : timeout_ms);
+    /* 用后即删，保持实例干净；fd 已关闭时 DEL 失败无害 */
+    epoll_ctl(g_io_epfd, EPOLL_CTL_DEL, fd, NULL);
+    pthread_mutex_unlock(&g_io_epoll_mutex);
+    return rc;
+}
+
 ssize_t tcp_recv_data(int fd, void *buf, size_t len, int timeout_ms)
 {
     if (fd < 0 || !buf || len == 0) {
@@ -56,22 +91,9 @@ ssize_t tcp_recv_data(int fd, void *buf, size_t len, int timeout_ms)
         return -1;
     }
 
-    int wait_ms = timeout_ms < 0 ? 0 : timeout_ms;
-    int efd = epoll_create1(EPOLL_CLOEXEC);
-    if (efd < 0) return -1;
-
-    struct epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.fd = fd;
-    if (epoll_ctl(efd, EPOLL_CTL_ADD, fd, &ev) < 0) {
-        close(efd);
-        return -1;
-    }
-
-    int nfds = epoll_wait(efd, &ev, 1, wait_ms);
-    close(efd);
-    if (nfds < 0) return -1;
-    if (nfds == 0) return 0;
+    int rc = tcp_io_epoll_wait(fd, EPOLLIN, timeout_ms);
+    if (rc < 0) return -1;
+    if (rc == 0) return 0;
 
     return recv(fd, buf, len, 0);
 }
@@ -83,22 +105,9 @@ ssize_t tcp_send_data(int fd, const void *buf, size_t len, int timeout_ms)
         return -1;
     }
 
-    int wait_ms = timeout_ms < 0 ? 0 : timeout_ms;
-    int efd = epoll_create1(EPOLL_CLOEXEC);
-    if (efd < 0) return -1;
-
-    struct epoll_event ev;
-    ev.events = EPOLLOUT;
-    ev.data.fd = fd;
-    if (epoll_ctl(efd, EPOLL_CTL_ADD, fd, &ev) < 0) {
-        close(efd);
-        return -1;
-    }
-
-    int nfds = epoll_wait(efd, &ev, 1, wait_ms);
-    close(efd);
-    if (nfds < 0) return -1;
-    if (nfds == 0) return 0;
+    int rc = tcp_io_epoll_wait(fd, EPOLLOUT, timeout_ms);
+    if (rc < 0) return -1;
+    if (rc == 0) return 0;
 
     return send(fd, buf, len, 0);
 }

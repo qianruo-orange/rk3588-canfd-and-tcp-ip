@@ -95,9 +95,7 @@ rk3588-canfd-and-tcp-ip-communication/
 ├── scripts/
 │   ├── build.sh
 │   └── deploy.sh
-├── data/
-├── .gitignore
-└── LICENSE
+└── .gitignore
 ```
 
 ## 依赖要求

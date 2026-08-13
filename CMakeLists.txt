@@ -94,7 +94,7 @@ set(SOURCES
 
 add_executable(rk3588-canfd-and-tcp-ip-communication ${SOURCES})
 
-target_include_directories(rk3588-canfd-and-tcp-ip-communication PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/generated)
+target_include_directories(rk3588-canfd-and-tcp-ip-communication PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include)
 
 # libnl3 headers are under /usr/include/libnl3
 target_include_directories(rk3588-canfd-and-tcp-ip-communication PRIVATE /usr/include/libnl3)

@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 /**
  * main.c — 线程表框架：{ name, mod_init_t, mod_dtor_t, thread, thread_arg }
  */
@@ -19,7 +21,8 @@
 #include "video/video_stream.h"
 
 typedef struct {
-    const char *name;
+    const char *wd_name;
+    const char *os_name;
     pthread_t    tid;
     int  (*mod_init_t)(void *arg);
     void (*mod_dtor_t)(void *arg);
@@ -29,6 +32,14 @@ typedef struct {
 } module_t;
 
 static void sig_handler(int sig);
+
+static void set_current_thread_name(const char *name)
+{
+    if (!name || !*name) return;
+    char short_name[16];
+    safe_strncpy(short_name, sizeof(short_name), name);
+    (void)pthread_setname_np(pthread_self(), short_name);
+}
 
 static int signal_setup(void *arg)
 {
@@ -45,13 +56,13 @@ static int signal_setup(void *arg)
 static app_ctx_t g_app;
 
 static module_t g_mods[] = {
-    { "can",      0, can_init,          can_cleanup,           can_task,         3, 3 },
-    { "tcp",      0, tcp_init,          tcp_cleanup,           tcp_task,         5, 3 },
-    { "http",     0, http_server_start, http_server_stop,      http_server_task, 5, 3 },
-    { "video",    0, video_stream_init, video_stream_shutdown, video_stream_task, 5, 3 },
+    { "can",      "can",      0, can_init,          can_cleanup,           can_task,         3, 3 },
+    { "tcp",      "tcp",      0, tcp_init,          tcp_cleanup,           tcp_task,         5, 3 },
+    { "http",     "http",     0, http_server_start, http_server_stop,      http_server_task, 5, 3 },
+    { "video",    "video",    0, video_stream_init, video_stream_shutdown, video_stream_task, 5, 3 },
     /* watchdog 线程是监控者，不能监督自己，故 timeout=0（不注册自身） */
-    { "watchdog", 0, watchdog_init,     NULL,                  watchdog_task,    0, 0 },
-    { "signal",   0, signal_setup,      NULL,                  NULL,             0, 0 },
+    { "watchdog", "watchdog", 0, watchdog_init,     NULL,                  watchdog_task,    0, 0 },
+    { "signal",   "signal",   0, signal_setup,      NULL,                  NULL,             0, 0 },
 };
 #define MOD_COUNT (int)(sizeof(g_mods)/sizeof(g_mods[0]))
 
@@ -68,7 +79,9 @@ static void sig_handler(int sig) { (void)sig; g_app.running = 0; }
 static void *thread_wrapper(void *arg)
 {
     module_t *m = (module_t *)arg;
+    set_current_thread_name(m->os_name);
     if (m->thread) m->thread(&g_app);
+    watchdog_unregister_self(m->wd_name);
     __atomic_fetch_sub(&g_app.threads_running, 1, __ATOMIC_RELEASE);
     return NULL;
 }
@@ -93,7 +106,7 @@ static void shutdown_modules_safe(void)
     for (int i = 0; i < MOD_COUNT; i++) {
         module_t *m = &g_mods[i];
         if (m->mod_dtor_t) {
-            log_info("Shutting down module %s...", m->name);
+            log_info("Shutting down module %s...", m->wd_name);
             m->mod_dtor_t(&g_app);
         }
     }
@@ -129,6 +142,7 @@ int main(void)
 
     /* 注册数据流虚函数实现（默认各域数据流独立、不做桥接；业务可整体替换或逐项覆盖） */
     data_flow_register(&g_app, data_flow_default_ops());
+    set_current_thread_name("main");
 
     for (int i = 0; i < MOD_COUNT; i++) {
         module_t *m = &g_mods[i];
@@ -144,12 +158,13 @@ int main(void)
             pthread_attr_destroy(&attr);
             if (rc != 0) goto fail;
             if (m->thread && m->timeout > 0)
-                watchdog_register_thread(m->tid, m->name, m->timeout, m->max_miss);
+                watchdog_register_thread(m->tid, m->wd_name, m->timeout, m->max_miss);
         }
     }
 
     watchdog_register_thread(pthread_self(), "main", 15, 1);
     while (g_app.running) { watchdog_feed_self("main"); sleep(1); }
+    watchdog_unregister_self("main");
 
     /* 通知各模块停止，让工作线程尽快退出 */
     shutdown_modules_safe();
@@ -159,6 +174,7 @@ int main(void)
     log_close(); return 0;
 
 fail:
+    watchdog_unregister_self("main");
     shutdown_modules_safe();
     for (int i = MOD_COUNT-1; i >= 0; i--)
         if (g_mods[i].mod_dtor_t) g_mods[i].mod_dtor_t(&g_app);

@@ -9,8 +9,13 @@
 #define WD_NAME_MAX 32
 
 int watchdog_register_thread(pthread_t tid, const char *name, int timeout, int max_miss);
-int watchdog_unregister_thread(pthread_t tid);
+int watchdog_unregister_thread(pthread_t tid, const char *name);
 int watchdog_feed_thread(pthread_t tid, const char *name);
+
+static inline int watchdog_unregister_self(const char *name)
+{
+    return watchdog_unregister_thread(pthread_self(), name);
+}
 
 static inline int watchdog_feed_self(const char *name)
 {

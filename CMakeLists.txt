@@ -78,6 +78,7 @@ set(SOURCES
     source/core/main.c
     source/core/log.c
     source/core/config.c
+    source/core/data_flow.c
     source/can/can_socket.c
     source/net/tcp_server.c
     source/http/http.c

@@ -13,6 +13,7 @@
 #include <arpa/inet.h>
 #include "net/tcp_server.h"
 #include "core/common.h"
+#include "core/data_flow.h"
 #include "core/log.h"
 #include "watchdog/watchdog.h"
 
@@ -21,17 +22,34 @@ int tcp_listen(int port)
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { log_error("tcp socket"); return -1; }
     int optval = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        log_error("tcp setsockopt SO_REUSEADDR: %s", strerror(errno));
+        close(fd);
+        return -1;
+    }
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval)) < 0) {
+        log_error("tcp setsockopt SO_REUSEPORT: %s", strerror(errno));
+        close(fd);
+        return -1;
+    }
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { log_error("tcp bind :%d", port); close(fd); return -1; }
-    if (listen(fd, SOMAXCONN) < 0) { log_error("tcp listen :%d", port); close(fd); return -1; }
+    addr.sin_port = htons((uint16_t)port);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        log_error("tcp bind :%d: %s", port, strerror(errno));
+        close(fd); return -1;
+    }
+    if (listen(fd, SOMAXCONN) < 0) {
+        log_error("tcp listen :%d: %s", port, strerror(errno));
+        close(fd); return -1;
+    }
     int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        log_error("tcp fcntl O_NONBLOCK: %s", strerror(errno));
+        close(fd); return -1;
+    }
     log_info("TCP listening on port %d", port);
     return fd;
 }
@@ -41,11 +59,21 @@ int tcp_accept(int listen_fd)
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
     int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &addr_len);
-    if (client_fd < 0) return -1;
+    if (client_fd < 0) {
+        /* 非阻塞监听 fd 下 EAGAIN/EWOULDBLOCK 属正常无连接，不刷错误日志 */
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+            log_error("tcp accept: %s", strerror(errno));
+        return -1;
+    }
     int flags = fcntl(client_fd, F_GETFL, 0);
-    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+    if (flags < 0 || fcntl(client_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        log_error("tcp client fcntl O_NONBLOCK: %s", strerror(errno));
+        close(client_fd);
+        return -1;
+    }
     char ip_str[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
+    if (inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str)) == NULL)
+        safe_strncpy(ip_str, sizeof(ip_str), "?");
     log_info("TCP client connected: %s:%d  fd=%d", ip_str, ntohs(client_addr.sin_port), client_fd);
     return client_fd;
 }
@@ -112,14 +140,20 @@ ssize_t tcp_send_data(int fd, const void *buf, size_t len, int timeout_ms)
     return send(fd, buf, len, 0);
 }
 
-static int handle_tcp_input(tcp_ctx_t *ctx, int client_idx)
+static int handle_tcp_input(app_ctx_t *app, tcp_ctx_t *ctx, int client_idx)
 {
     client_t *c = &ctx->clients[client_idx];
     if (c->fd < 0) return 1;
-    char dummy[256];
-    ssize_t n = tcp_recv_data(c->fd, dummy, sizeof(dummy), 10);
+    char buf[WBUF_SIZE];
+    ssize_t n = tcp_recv_data(c->fd, buf, sizeof(buf) - 1, 10);
     if (n == 0) return 1;
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return 1;
+    /* 数据流：交给 TCP 域钩子（默认空实现，不转发 CAN；业务可覆盖处理） */
+    if (n > 0) {
+        buf[n] = '\0';
+        if (app->flow && app->flow->on_tcp_rx)
+            app->flow->on_tcp_rx(app, client_idx, buf, (size_t)n);
+    }
     return 0;
 }
 
@@ -176,7 +210,7 @@ void *tcp_task(void *arg)
             pthread_mutex_lock(&ctx->client_mutex);
             int dead = 0;
             if (events[i].events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR))
-                dead = handle_tcp_input(ctx, client_idx);
+                dead = handle_tcp_input(app, ctx, client_idx);
             if (!dead && (events[i].events & EPOLLOUT))
                 dead = flush_client(ctx, client_idx);
             pthread_mutex_unlock(&ctx->client_mutex);
@@ -191,6 +225,9 @@ int tcp_init(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;
     tcp_ctx_t *ctx = app->tcp;
+    if (!ctx) return -1;
+    memset(ctx, 0, sizeof(*ctx));             /* 栈上创建，显式清零 */
+    pthread_mutex_init(&ctx->client_mutex, NULL);
     ctx->port        = app->cfg->gw_args.tcp_port;
     ctx->max_clients = app->cfg->gw_args.max_clients;
     ctx->listen_fd = tcp_listen(ctx->port);

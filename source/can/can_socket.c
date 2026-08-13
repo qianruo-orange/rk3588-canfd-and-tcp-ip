@@ -19,6 +19,7 @@
 
 #include "can/can_socket.h"
 #include "core/common.h"
+#include "core/data_flow.h"
 #include "core/log.h"
 #include "watchdog/watchdog.h"
 
@@ -293,6 +294,9 @@ static void handle_can_input(app_ctx_t *app, int can_idx)
             log_info("CAN recv: %s id=%X len=%d",
                      ctx->ifaces[can_idx].ifname,
                      frame.can_id & CAN_EFF_MASK, frame.len);
+            /* 数据流：交给 CAN 域钩子（默认空实现，仅日志；业务可覆盖处理） */
+            if (app->flow && app->flow->on_can_rx)
+                app->flow->on_can_rx(app, ctx->ifaces[can_idx].ifname, &frame);
         } else if (n == 0) {
             break;
         } else {

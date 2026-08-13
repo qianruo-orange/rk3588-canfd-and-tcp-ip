@@ -117,13 +117,35 @@ rk3588-canfd-and-tcp-ip-communication/
 apt install gcc cmake libsystemd-dev libnl-3-dev libnl-route-3-dev
 ```
 
-## 构建
+## 构建与版本信息
 
 ```bash
 cd /home/orangepi/project1
 ./scripts/build.sh -R   # Release（默认）
 ./scripts/build.sh -D   # Debug
 ./scripts/build.sh -C   # 清理构建产物与 logs
+```
+
+当前版本信息由 CMake 统一管理，工程版本号和构建信息会在配置阶段生成到头文件：
+
+```text
+include/core/version.h
+```
+
+生成的宏包括：
+
+- `APP_NAME`
+- `APP_VERSION`
+- `APP_GIT_COMMIT`
+- `APP_GIT_BRANCH`
+- `APP_GIT_DIRTY`
+- `APP_BUILD_TYPE`
+- `APP_BUILD_DATE`
+
+构建脚本会在编译完成后输出当前版本与构建模式，例如：
+
+```text
+[BUILD] version=1.0.0 build_type=Release
 ```
 
 构建产物：
@@ -237,7 +259,7 @@ logs/
 
 - `build/`
 - `bin/`
-- `cmake/`
+- `include/core/version.h`（由 CMake 生成的版本头）
 - CMake 生成文件（`CMakeCache.txt`、`CMakeFiles`、`cmake_install.cmake`、`Makefile`）
 - 并重建空 `logs/`
 

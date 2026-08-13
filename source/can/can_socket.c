@@ -22,6 +22,11 @@
 #include "core/log.h"
 #include "watchdog/watchdog.h"
 
+/**
+ * ifname_valid - 检查 CAN 接口名是否合法，避免无效名称导致 netlink 或 socket 配置失败。
+ * @name: 待校验的接口名。
+ * @return: 合法返回 1，否则返回 0。
+ */
 static int ifname_valid(const char *name)
 {
     if (!name || !*name) return 0;
@@ -34,6 +39,12 @@ static int ifname_valid(const char *name)
     return 1;
 }
 
+/**
+ * apply_dbitrate - 使用 netlink 设置 CAN FD 数据位时钟参数，确保接口工作在指定数据速率。
+ * @sk: netlink socket。
+ * @ifname: 目标 CAN 接口名。
+ * @dbitrate: 数据位速率（bps）。
+ */
 static void apply_dbitrate(struct nl_sock *sk, const char *ifname, uint32_t dbitrate)
 {
     struct rtnl_link *live = NULL;
@@ -55,6 +66,16 @@ static void apply_dbitrate(struct nl_sock *sk, const char *ifname, uint32_t dbit
     rtnl_link_put(live);
 }
 
+/**
+ * can_socket_configure - 配置指定 CAN 设备的比特率、FD 模式和上电状态。
+ * @ifname: CAN 接口名。
+ * @bitrate: 普通 CAN 比特率。
+ * @dbitrate: CAN FD 数据比特率。
+ * @fd_mode: 是否启用 CAN FD。
+ * @restart_ms: 自动重启等待时间。
+ * @bring_up: 是否启动接口。
+ * @return: 成功返回 0，失败返回 -1。
+ */
 int can_socket_configure(const char *ifname, int bitrate, int dbitrate,
                          int fd_mode, int restart_ms, int bring_up)
 {
@@ -146,6 +167,12 @@ int can_socket_configure(const char *ifname, int bitrate, int dbitrate,
     return 0;
 }
 
+/**
+ * can_socket_open - 打开一个原始 CAN socket，并绑定到指定接口。
+ * @ifname: CAN 接口名。
+ * @fd_mode: 是否启用 CAN FD 模式。
+ * @return: 成功返回 socket fd，失败返回 -1。
+ */
 int can_socket_open(const char *ifname, int fd_mode)
 {
     if (!ifname_valid(ifname)) { log_error("invalid CAN interface name: '%s'", ifname?ifname:"(null)"); return -1; }
@@ -170,8 +197,19 @@ int can_socket_open(const char *ifname, int fd_mode)
     return s;
 }
 
+/**
+ * can_socket_close - 关闭已打开的 CAN socket fd。
+ * @fd: socket 文件描述符。
+ */
 void can_socket_close(int fd) { if (fd >= 0) close(fd); }
 
+/**
+ * can_recv_frame - 在指定等待时间内读取一帧 CAN 数据，支持 epoll 超时控制。
+ * @fd: CAN socket fd。
+ * @frame: 输出缓冲区。
+ * @timeout_ms: 等待超时时间（ms）。
+ * @return: 成功返回读取字节数，超时返回 0，失败返回 -1。
+ */
 ssize_t can_recv_frame(int fd, struct canfd_frame *frame, int timeout_ms)
 {
     if (fd < 0 || !frame) {
@@ -204,6 +242,13 @@ ssize_t can_recv_frame(int fd, struct canfd_frame *frame, int timeout_ms)
     return n;
 }
 
+/**
+ * can_send_frame - 在指定等待时间内发送一帧 CAN 数据，支持 epoll 可写检测。
+ * @fd: CAN socket fd。
+ * @frame: 待发送帧。
+ * @timeout_ms: 等待超时时间（ms）。
+ * @return: 成功返回发送字节数，超时返回 0，失败返回 -1。
+ */
 ssize_t can_send_frame(int fd, const struct canfd_frame *frame, int timeout_ms)
 {
     if (fd < 0 || !frame) {
@@ -231,6 +276,11 @@ ssize_t can_send_frame(int fd, const struct canfd_frame *frame, int timeout_ms)
     return write(fd, frame, sizeof(*frame));
 }
 
+/**
+ * handle_can_input - 处理单个 CAN 接口上的输入事件，读取帧并在失败时自动重建 socket。
+ * @app: 全局应用上下文。
+ * @can_idx: CAN 接口索引。
+ */
 static void handle_can_input(app_ctx_t *app, int can_idx)
 {
     can_ctx_t *ctx = app->can;

@@ -52,9 +52,16 @@ static module_t g_mods[] = {
 };
 #define MOD_COUNT (int)(sizeof(g_mods)/sizeof(g_mods[0]))
 
+/**
+ * sig_handler - 处理退出信号，通知主循环停止服务。
+ * @sig: 接收到的信号编号。
+ */
 static void sig_handler(int sig) { (void)sig; g_app.running = 0; }
 
-/* 线程包装器：线程退出时递减活跃计数，供主线程有界等待 */
+/**
+ * thread_wrapper - 线程入口函数，执行模块线程并在退出时递减活跃线程计数。
+ * @arg: 指向模块描述符的指针。
+ */
 static void *thread_wrapper(void *arg)
 {
     module_t *m = (module_t *)arg;
@@ -63,8 +70,9 @@ static void *thread_wrapper(void *arg)
     return NULL;
 }
 
-/* 有界等待工作线程退出：避免 dtor 与线程并发访问资源；
-   卡死线程无法等待时由 systemd WatchdogSec 兜底重启 */
+/**
+ * wait_threads_exit - 在有限时间内等待所有工作线程退出，避免析构与线程并发访问资源。
+ */
 static void wait_threads_exit(void)
 {
     for (int i = 0; i < 50; i++) {
@@ -73,6 +81,9 @@ static void wait_threads_exit(void)
     }
 }
 
+/**
+ * shutdown_modules_safe - 安全关闭各模块并等待线程退出，避免在关闭时出现竞争或卡死。
+ */
 static void shutdown_modules_safe(void)
 {
     g_app.running = 0;
@@ -81,6 +92,9 @@ static void shutdown_modules_safe(void)
     wait_threads_exit();
 }
 
+/**
+ * main - 初始化所有模块、创建线程、进入主循环，并在退出时统一清理资源。
+ */
 int main(void)
 {
     can_ctx_t           can_ctx;

@@ -31,15 +31,43 @@ static _Atomic int g_http_active = 0;   /* 活跃 HTTP 连接数 */
 
 typedef void (*api_fn)(app_ctx_t *, int, const char *, const char *, const char *);
 
+/**
+ * http_system_api_wrap - 包装 /api/system 处理函数，忽略不需要的 HTTP 参数并转发到实际实现。
+ */
 static void http_system_api_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_system_api(app, fd); }
+
+/**
+ * http_can_status_wrap - 包装 CAN 状态查询接口，统一调用底层 API。
+ */
 static void http_can_status_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_status(app, fd); }
+
+/**
+ * http_can_toggle_wrap - 包装 CAN 开关接口，保留请求体参数用于切换逻辑。
+ */
 static void http_can_toggle_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; http_can_toggle(app, fd, req); }
+
+/**
+ * http_reboot_wrap - 包装重启接口，执行系统级重启动作。
+ */
 static void http_reboot_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_reboot(app, fd); }
+
+/**
+ * http_shutdown_wrap - 包装关机接口，执行系统级关机动作。
+ */
 static void http_shutdown_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_shutdown(app, fd); }
+
+/**
+ * http_network_api_wrap - 包装网络统计 API，统一走通用网络处理逻辑。
+ */
 static void http_network_api_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_network_api(app, fd); }
 
 /* ---- 工具函数 ---- */
 
+/**
+ * http_mime_type - 根据文件扩展名返回对应的 HTTP Content-Type。
+ * @path: 目标资源路径。
+ * @return: MIME 类型字符串。
+ */
 const char *http_mime_type(const char *path)
 {
     const char *ext = strrchr(path, '.');
@@ -54,6 +82,15 @@ const char *http_mime_type(const char *path)
     return "text/plain";
 }
 
+/**
+ * http_send_response - 向客户端发送标准 HTTP 响应头和响应体。
+ * @fd: 客户端 socket。
+ * @code: HTTP 状态码。
+ * @status: 状态描述文本。
+ * @mime: Content-Type。
+ * @body: 响应体指针。
+ * @len: 响应体长度。
+ */
 void http_send_response(int fd, int code, const char *status,
                         const char *mime, const void *body, size_t len)
 {
@@ -69,6 +106,11 @@ void http_send_response(int fd, int code, const char *status,
         write(fd, body, len);
 }
 
+/**
+ * http_handle_404 - 处理未找到的静态资源请求，并返回 404 页面。
+ * @fd: 客户端 socket。
+ * @path: 请求路径。
+ */
 void http_handle_404(int fd, const char *path)
 {
     char msg[256];
@@ -88,6 +130,13 @@ static time_t g_auth_fail_win = 0;
 #define AUTH_FAIL_LIMIT  20   /* 窗口内允许的最大失败次数 */
 
 /* internal helper: check basic auth; if require_root==1 require uid==0 */
+/**
+ * http_check_auth_common - 采用 Basic Auth 进行认证，支持普通用户和 root 用户要求。
+ * @req: HTTP 请求头。
+ * @fd: 客户端 socket。
+ * @require_root: 是否要求 root 权限。
+ * @return: 认证成功返回 1，否则返回 0。
+ */
 static int http_check_auth_common(const char *req, int fd, int require_root)
 {
     /* 暴力破解熔断：窗口内失败超限直接拒绝（不执行 crypt，避免 CPU DoS） */
@@ -174,13 +223,25 @@ deny:
     return 0;
 }
 
+/**
+ * http_check_auth_user - 检查普通用户权限的 Basic Auth。
+ */
 int http_check_auth_user(const char *req, int fd) { return http_check_auth_common(req, fd, 0); }
+
+/**
+ * http_check_auth_root - 检查 root 权限的 Basic Auth。
+ */
 int http_check_auth_root(const char *req, int fd) { return http_check_auth_common(req, fd, 1); }
 
 /* ---- 静态文件服务 ---- */
 
 static void http_video_client_closed(int fd);
 
+/**
+ * http_serve_file - 根据 URI 提供静态文件服务，支持 HTML/CSS/JS 等前端资源。
+ * @fd: 客户端 socket。
+ * @uri: 请求路径。
+ */
 void http_serve_file(int fd, const char *uri)
 {
     if (strstr(uri, "..")) { http_handle_404(fd, uri); return; }
@@ -226,6 +287,12 @@ void http_serve_file(int fd, const char *uri)
 
 /* ---- 每连接处理线程 ---- */
 
+/**
+ * client_handler - 处理单个 HTTP 客户端连接，解析请求并分发到对应 API 或静态文件逻辑。
+ * @app: 应用上下文。
+ * @fd: 客户端连接描述符。
+ * @return: 线程退出时返回 NULL。
+ */
 static void *client_handler(app_ctx_t *app, int fd)
 {
     (void)app;

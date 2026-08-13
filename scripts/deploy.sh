@@ -2,10 +2,11 @@
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DEPLOY_DIR="/opt/data_transport_test"
-BINARY="$PROJECT_DIR/bin/data_transport_test"
-SERVICE_SRC="$PROJECT_DIR/data_transport_test.service"
-SERVICE_NAME="data_transport_test"
+APP_NAME="rk3588-canfd-and-tcp-ip-communication"
+DEPLOY_DIR="/opt/$APP_NAME"
+BINARY="$PROJECT_DIR/bin/$APP_NAME"
+SERVICE_SRC="$PROJECT_DIR/$APP_NAME.service"
+SERVICE_NAME="$APP_NAME"
 
 usage() {
     echo "Usage: $0 [-i | -u | -r]"
@@ -17,7 +18,7 @@ usage() {
 }
 
 do_uninstall() {
-    echo "=== uninstall data_transport_test ==="
+    echo "=== uninstall $APP_NAME ==="
     
     echo "[STOP] $SERVICE_NAME"
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
@@ -36,7 +37,7 @@ do_uninstall() {
 }
 
 do_install() {
-    echo "=== deploy data_transport_test ==="
+    echo "=== deploy $APP_NAME ==="
 
     if [ "$(id -u)" -ne 0 ]; then
         echo "[ERROR] must run as root"
@@ -54,8 +55,8 @@ do_install() {
 
     echo "[INSTALL] $BINARY -> $DEPLOY_DIR/bin/"
     mkdir -p "$DEPLOY_DIR/bin"
-    cp "$BINARY" "$DEPLOY_DIR/bin/data_transport_test"
-    chmod 755 "$DEPLOY_DIR/bin/data_transport_test"
+    cp "$BINARY" "$DEPLOY_DIR/bin/$APP_NAME"
+    chmod 755 "$DEPLOY_DIR/bin/$APP_NAME"
 
     echo "[INSTALL] config/"
     mkdir -p "$DEPLOY_DIR/config"

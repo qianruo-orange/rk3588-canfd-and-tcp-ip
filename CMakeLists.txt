@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(data_transport_test VERSION 1.0.0 LANGUAGES C)
+project(rk3588-canfd-and-tcp-ip-communication VERSION 1.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -92,24 +92,24 @@ set(SOURCES
     source/watchdog/watchdog.c
 )
 
-add_executable(data_transport_test ${SOURCES})
+add_executable(rk3588-canfd-and-tcp-ip-communication ${SOURCES})
 
-target_include_directories(data_transport_test PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/generated)
+target_include_directories(rk3588-canfd-and-tcp-ip-communication PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/generated)
 
 # libnl3 headers are under /usr/include/libnl3
-target_include_directories(data_transport_test PRIVATE /usr/include/libnl3)
+target_include_directories(rk3588-canfd-and-tcp-ip-communication PRIVATE /usr/include/libnl3)
 
-set_target_properties(data_transport_test PROPERTIES
+set_target_properties(rk3588-canfd-and-tcp-ip-communication PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin"
 )
 
-target_link_libraries(data_transport_test PRIVATE pthread crypt)
+target_link_libraries(rk3588-canfd-and-tcp-ip-communication PRIVATE pthread crypt)
 
 find_library(LIBSYSTEMD systemd REQUIRED)
-target_link_libraries(data_transport_test PRIVATE ${LIBSYSTEMD})
+target_link_libraries(rk3588-canfd-and-tcp-ip-communication PRIVATE ${LIBSYSTEMD})
 
 find_library(LIBNL3 nl-3 REQUIRED)
-target_link_libraries(data_transport_test PRIVATE ${LIBNL3})
+target_link_libraries(rk3588-canfd-and-tcp-ip-communication PRIVATE ${LIBNL3})
 
 find_library(LIBNLROUTE3 nl-route-3 REQUIRED)
-target_link_libraries(data_transport_test PRIVATE ${LIBNLROUTE3})
+target_link_libraries(rk3588-canfd-and-tcp-ip-communication PRIVATE ${LIBNLROUTE3})

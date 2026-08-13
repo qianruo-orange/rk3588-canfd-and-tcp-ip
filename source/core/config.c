@@ -11,6 +11,7 @@
 #include "can/can_socket.h"
 #include "net/tcp_server.h"
 #include "core/log.h"
+#include "core/version.h"
 
 #define CONFIG_PATH PATH_CONFIG
 
@@ -101,7 +102,7 @@ void config_save(app_ctx_t *app)
     FILE *fp = fopen(CONFIG_PATH, "w");
     if (!fp) { log_error("config: cannot write %s", CONFIG_PATH); return; }
 
-    fprintf(fp, "# data_transport_test — auto-saved\n");
+    fprintf(fp, "# %s — auto-saved\n", APP_NAME);
     for (int i = 0; i < can->count; i++)
         fprintf(fp, "can_ifname %s\n", can->ifaces[i].ifname);
 

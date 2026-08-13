@@ -22,7 +22,7 @@
 ```bash
 cd /home/orangepi/project1
 ./scripts/build.sh -R
-./bin/data_transport_test
+./bin/rk3588-canfd-and-tcp-ip-communication
 ```
 
 ## 项目亮点
@@ -72,7 +72,7 @@ CAN bus ──► rx_task ──► 日志记录 / TCP 处理 / 配置更新
 rk3588-canfd-and-tcp-ip-communication/
 ├── CMakeLists.txt
 ├── README.md
-├── data_transport_test.service      # systemd 服务单元
+├── rk3588-canfd-and-tcp-ip-communication.service      # systemd 服务单元
 ├── bin/                            # 可执行输出
 ├── build/                          # CMake 构建目录
 ├── include/                        # 头文件
@@ -151,14 +151,14 @@ include/core/version.h
 构建产物：
 
 ```bash
-./bin/data_transport_test
+./bin/rk3588-canfd-and-tcp-ip-communication
 ```
 
 ## 运行方式
 
 ```bash
 cd /home/orangepi/project1
-./bin/data_transport_test
+./bin/rk3588-canfd-and-tcp-ip-communication
 ```
 
 > 请在项目根目录运行，确保 `config/`、`html/` 和 `logs/` 目录可用。
@@ -171,15 +171,15 @@ sudo ./scripts/deploy.sh -u     # 卸载
 sudo ./scripts/deploy.sh -r     # 重装
 ```
 
-默认安装路径：`/opt/data_transport_test/`
+默认安装路径：`/opt/rk3588-canfd-and-tcp-ip-communication/`
 
-服务名称：`data_transport_test`
+服务名称：`rk3588-canfd-and-tcp-ip-communication`
 
 查看服务状态：
 
 ```bash
-systemctl status data_transport_test
-journalctl -u data_transport_test -f
+systemctl status rk3588-canfd-and-tcp-ip-communication
+journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 ```
 
 部署要点：
@@ -249,8 +249,8 @@ HTTP 写操作接口要求 root 权限。
 
 ```text
 logs/
-├── data_transport_test_info_YYYYMMDD.log
-└── data_transport_test_error_YYYYMMDD.log
+├── rk3588-canfd-and-tcp-ip-communication_info_YYYYMMDD.log
+└── rk3588-canfd-and-tcp-ip-communication_error_YYYYMMDD.log
 ```
 
 ## 清理说明

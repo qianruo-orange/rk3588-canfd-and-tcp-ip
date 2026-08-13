@@ -11,6 +11,7 @@
 
 #include "core/log.h"
 #include "core/common.h"
+#include "core/version.h"
 
 typedef struct {
     FILE    *fp_info;
@@ -44,8 +45,8 @@ static void rotate_check(int is_error)
     if (fstat(fileno(*fpp), &st) != 0 || st.st_size <= LOG_MAX_SIZE) return;
 
     char path[PATH_MAX], bak[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/data_transport_test_%s_%s.log",
-             g_log.dir, is_error ? "error" : "info", g_log.date);
+    snprintf(path, sizeof(path), "%s/%s_%s_%s.log",
+             g_log.dir, APP_NAME, is_error ? "error" : "info", g_log.date);
     snprintf(bak, sizeof(bak), "%s.1", path);
     fclose(*fpp);
     rename(path, bak);
@@ -65,10 +66,10 @@ static void ensure_date(void)
     if (g_log.fp_error && g_log.fp_error != stderr) fclose(g_log.fp_error);
 
     char path[512];
-    snprintf(path, sizeof(path), "%s/data_transport_test_info_%s.log",  g_log.dir, g_log.date);
+    snprintf(path, sizeof(path), "%s/%s_info_%s.log", g_log.dir, APP_NAME, g_log.date);
     rotate_if_needed(path);
     g_log.fp_info = fopen(path, "a"); if (!g_log.fp_info) g_log.fp_info = stderr;
-    snprintf(path, sizeof(path), "%s/data_transport_test_error_%s.log", g_log.dir, g_log.date);
+    snprintf(path, sizeof(path), "%s/%s_error_%s.log", g_log.dir, APP_NAME, g_log.date);
     rotate_if_needed(path);
     g_log.fp_error = fopen(path, "a"); if (!g_log.fp_error) g_log.fp_error = stderr;
 }

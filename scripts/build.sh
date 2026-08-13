@@ -4,7 +4,8 @@ set -e
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build"
 BIN_DIR="$PROJECT_DIR/bin"
-BIN_PATH="$BIN_DIR/data_transport_test"
+BIN_NAME="rk3588-canfd-and-tcp-ip-communication"
+BIN_PATH="$BIN_DIR/$BIN_NAME"
 CMAKE_DIR="$PROJECT_DIR/cmake"
 LOGS_DIR="$PROJECT_DIR/logs"
 
@@ -72,7 +73,7 @@ clean_build() {
 
 case "${1:-}" in
     -D|--debug)
-        echo "=== build data_transport_test ==="
+        echo "=== build $BIN_NAME ==="
         echo "[BUILD] DEBUG mode (-O0 -g)"
         mkdir -p "$BIN_DIR"
         cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" \
@@ -80,7 +81,7 @@ case "${1:-}" in
             -DDEBUG=ON
         ;;
     -R|--release|"")
-        echo "=== build data_transport_test ==="
+        echo "=== build $BIN_NAME ==="
         echo "[BUILD] RELEASE mode (-O3 -DNDEBUG)"
         mkdir -p "$BIN_DIR"
         cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" \
@@ -98,4 +99,4 @@ esac
 make -C "$BUILD_DIR" -j"$(nproc)"
 print_version_info
 
-echo "[BUILD] done -> $PROJECT_DIR/bin/data_transport_test"
+echo "[BUILD] done -> $BIN_PATH"

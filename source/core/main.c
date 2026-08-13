@@ -18,11 +18,12 @@
 #include "video/video_stream.h"
 
 typedef struct {
-    const char  *name;
+    pthread_t    tid;
     int  (*mod_init_t)(void *arg);
     void (*mod_dtor_t)(void *arg);
     void       *(*thread)(void *);
-    pthread_t    tid;
+    int timeout;
+    int max_miss;
 } module_t;
 
 static void sig_handler(int sig);
@@ -42,12 +43,12 @@ static int signal_setup(void *arg)
 static app_ctx_t g_app;
 
 static module_t g_mods[] = {
-    { "can",      can_init,           can_cleanup,            can_task, 0 },
-    { "tcp",      tcp_init,           tcp_cleanup,            tcp_task, 0 },
-    { "http",     http_server_start,  http_server_stop,       http_server_task, 0 },
-    { "video",    video_stream_init,  video_stream_shutdown,  video_stream_task, 0 },
-    { "watchdog", watchdog_init,      NULL,                   watchdog_task, 0 },
-    { "signal",   signal_setup,       NULL,                   NULL, 0 },
+    { 0, can_init,           can_cleanup,            can_task,         3, 3 },
+    { 0, tcp_init,           tcp_cleanup,            tcp_task,         5, 3 },
+    { 0, http_server_start,  http_server_stop,       http_server_task, 5, 3 },
+    { 0, video_stream_init,  video_stream_shutdown,  video_stream_task, 5, 3 },
+    { 0, watchdog_init,      NULL,                   watchdog_task,    5, 3 },
+    { 0, signal_setup,       NULL,                   NULL,             0, 0 },
 };
 #define MOD_COUNT (int)(sizeof(g_mods)/sizeof(g_mods[0]))
 
@@ -113,10 +114,13 @@ int main(void)
             int rc = pthread_create(&m->tid, &attr, thread_wrapper, m);
             pthread_attr_destroy(&attr);
             if (rc != 0) goto fail;
+            if (m->thread && m->timeout > 0)
+                watchdog_register_thread(m->tid, m->timeout, m->max_miss);
         }
     }
 
-    while (g_app.running) { watchdog_feed(WD_MAIN); sleep(1); }
+    watchdog_register_thread(pthread_self(), 15, 1);
+    while (g_app.running) { watchdog_feed_thread(pthread_self()); sleep(1); }
 
     /* 通知各模块停止，让工作线程尽快退出 */
     shutdown_modules_safe();

@@ -10,19 +10,73 @@
 #include "core/log.h"
 
 typedef struct {
-    const char *name;
+    pthread_t tid;
     int    beat, timeout, max_miss, miss_count, last_beat;
+    int    active;
     time_t last_advance;
 } wd_entry_t;
 
-static wd_entry_t g_wd_slots[WD_MAX_SLOTS] = {
-    [WD_CAN]   ={.name="can",   .timeout=3,  .max_miss=3},
-    [WD_TCP]   ={.name="tcp",   .timeout=5,  .max_miss=3},
-    [WD_HTTP]  ={.name="http",  .timeout=5,  .max_miss=3},
-    [WD_VIDEO] ={.name="video", .timeout=5,  .max_miss=3},
-    [WD_MAIN]  ={.name="main",  .timeout=15, .max_miss=1},
-};
+static wd_entry_t g_wd_slots[WD_MAX_SLOTS];
 static int wd_notify_sec;
+
+static int watchdog_find_slot_by_tid(pthread_t tid)
+{
+    for (int i = 0; i < WD_MAX_SLOTS; i++) {
+        if (g_wd_slots[i].active && pthread_equal(g_wd_slots[i].tid, tid))
+            return i;
+    }
+    return -1;
+}
+
+int watchdog_register_thread(pthread_t tid, int timeout, int max_miss)
+{
+    int slot = watchdog_find_slot_by_tid(tid);
+    if (slot >= 0) {
+        g_wd_slots[slot].timeout = timeout > 0 ? timeout : 1;
+        g_wd_slots[slot].max_miss = max_miss > 0 ? max_miss : 1;
+        g_wd_slots[slot].last_advance = time(NULL);
+        return slot;
+    }
+    for (int i = 0; i < WD_MAX_SLOTS; i++) {
+        if (g_wd_slots[i].active) continue;
+        g_wd_slots[i].tid = tid;
+        g_wd_slots[i].timeout = timeout > 0 ? timeout : 1;
+        g_wd_slots[i].max_miss = max_miss > 0 ? max_miss : 1;
+        g_wd_slots[i].beat = 0;
+        g_wd_slots[i].last_beat = 0;
+        g_wd_slots[i].miss_count = 0;
+        g_wd_slots[i].last_advance = time(NULL);
+        g_wd_slots[i].active = 1;
+        log_info("watchdog: thread tid=%lu registered timeout=%ds miss=%d",
+                 (unsigned long)tid, g_wd_slots[i].timeout, g_wd_slots[i].max_miss);
+        return i;
+    }
+    log_error("watchdog: register failed for tid=%lu (slot full)", (unsigned long)tid);
+    return -1;
+}
+
+int watchdog_unregister_thread(pthread_t tid)
+{
+    int slot = watchdog_find_slot_by_tid(tid);
+    if (slot < 0) return -1;
+    g_wd_slots[slot].active = 0;
+    g_wd_slots[slot].tid = (pthread_t)0;
+    g_wd_slots[slot].beat = 0;
+    g_wd_slots[slot].last_beat = 0;
+    g_wd_slots[slot].timeout = 0;
+    g_wd_slots[slot].max_miss = 0;
+    g_wd_slots[slot].miss_count = 0;
+    g_wd_slots[slot].last_advance = 0;
+    return 0;
+}
+
+int watchdog_feed_thread(pthread_t tid)
+{
+    int slot = watchdog_find_slot_by_tid(tid);
+    if (slot < 0) return -1;
+    __atomic_add_fetch(&g_wd_slots[slot].beat, 1, __ATOMIC_RELAXED);
+    return slot;
+}
 
 int watchdog_init(void *arg)
 {
@@ -37,7 +91,7 @@ void *watchdog_task(void *arg)
     app_ctx_t *app = (app_ctx_t *)arg;
     time_t now = time(NULL);
     for (int i = 0; i < WD_MAX_SLOTS; i++) {
-        if (!g_wd_slots[i].name) continue;
+        if (!g_wd_slots[i].active) continue;
         g_wd_slots[i].last_beat = __atomic_load_n(&g_wd_slots[i].beat, __ATOMIC_RELAXED);
         g_wd_slots[i].last_advance = now;
     }
@@ -48,15 +102,15 @@ void *watchdog_task(void *arg)
     while (app->running) {
         sleep(1); now = time(NULL);
         for (int i = 0; i < WD_MAX_SLOTS; i++) {
-            if (!g_wd_slots[i].name) continue;
+            if (!g_wd_slots[i].active) continue;
             int timeout = g_wd_slots[i].timeout; if (timeout <= 0) continue;
             int cur = __atomic_load_n(&g_wd_slots[i].beat, __ATOMIC_RELAXED);
             if (cur != g_wd_slots[i].last_beat) { g_wd_slots[i].last_beat = cur; g_wd_slots[i].last_advance = now; g_wd_slots[i].miss_count = 0; }
             else if (now - g_wd_slots[i].last_advance >= timeout) {
                 g_wd_slots[i].miss_count++; g_wd_slots[i].last_advance = now;
                 if (g_wd_slots[i].miss_count >= g_wd_slots[i].max_miss) {
-                    log_error("watchdog: %s STUCK (missed %d/%d, beat=%d)",
-                        g_wd_slots[i].name, g_wd_slots[i].miss_count,
+                    log_error("watchdog: tid=%lu STUCK (missed %d/%d, beat=%d)",
+                        (unsigned long)g_wd_slots[i].tid, g_wd_slots[i].miss_count,
                         g_wd_slots[i].max_miss, cur);
                     /* 优雅退出：通知主循环与各工作线程结束，尽量在清理窗口内落盘和关闭资源；
                        若仍然卡死，最终由 systemd Restart=on-failure 兜底重启 */
@@ -65,7 +119,7 @@ void *watchdog_task(void *arg)
                     usleep(200000);   /* 给健康线程 200ms 清理窗口（日志落盘 / 设备关闭） */
                     break;
                 }
-                else log_error("watchdog: %s timeout #%d/%d", g_wd_slots[i].name, g_wd_slots[i].miss_count, g_wd_slots[i].max_miss);
+                else log_error("watchdog: tid=%lu timeout #%d/%d", (unsigned long)g_wd_slots[i].tid, g_wd_slots[i].miss_count, g_wd_slots[i].max_miss);
             }
         }
         if (wd_notify_sec > 0 && now >= next_notify) {
@@ -77,4 +131,3 @@ void *watchdog_task(void *arg)
     log_info("watchdog stopped"); return NULL;
 }
 
-void watchdog_feed(int slot) { if (slot >= 0 && slot < WD_MAX_SLOTS) __atomic_add_fetch(&g_wd_slots[slot].beat, 1, __ATOMIC_RELAXED); }

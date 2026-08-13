@@ -79,10 +79,10 @@ void *tcp_task(void *arg)
         struct epoll_event events[MAX_EVENTS];
         int nfds = epoll_wait(ctx->epfd, events, MAX_EVENTS, 500);
         if (nfds < 0) {
-            if (errno == EINTR) { watchdog_feed(WD_TCP); continue; }
+            if (errno == EINTR) { watchdog_feed_thread(pthread_self()); continue; }
             log_error("tcp epoll_wait"); break;
         }
-        watchdog_feed(WD_TCP);
+        watchdog_feed_thread(pthread_self());
         for (int i = 0; i < nfds; i++) {
             uint32_t tag = events[i].data.u32;
             if (tag == 0) {

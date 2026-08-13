@@ -210,7 +210,7 @@ void *video_stream_task(void *arg)
             log_error("video_stream: device init failed, waiting for restart");
             while (vs->app->running && !__atomic_load_n(&vs->restart_req, __ATOMIC_ACQUIRE)) {
                 usleep(500000);
-                watchdog_feed(WD_VIDEO);
+                watchdog_feed_thread(pthread_self());
             }
             __atomic_store_n(&vs->restart_req, 0, __ATOMIC_RELEASE);
             continue;
@@ -254,7 +254,7 @@ void *video_stream_task(void *arg)
                     if (old) { free(old->data); free(old); }
                     pthread_mutex_unlock(&vs->frame_mutex);
                     __atomic_fetch_add(&vs->seq, 1, __ATOMIC_SEQ_CST);
-                    watchdog_feed(WD_VIDEO);
+                    watchdog_feed_thread(pthread_self());
                 }
             }
 

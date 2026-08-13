@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <ctype.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/epoll.h>
@@ -19,6 +20,7 @@
 #include "can/can_socket.h"
 #include "core/common.h"
 #include "core/log.h"
+#include "watchdog/watchdog.h"
 
 static int ifname_valid(const char *name)
 {
@@ -169,6 +171,134 @@ int can_socket_open(const char *ifname, int fd_mode)
 }
 
 void can_socket_close(int fd) { if (fd >= 0) close(fd); }
+
+ssize_t can_recv_frame(int fd, struct canfd_frame *frame, int timeout_ms)
+{
+    if (fd < 0 || !frame) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int wait_ms = timeout_ms < 0 ? 0 : timeout_ms;
+    int efd = epoll_create1(EPOLL_CLOEXEC);
+    if (efd < 0) return -1;
+
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = fd;
+    if (epoll_ctl(efd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        close(efd);
+        return -1;
+    }
+
+    int nfds = epoll_wait(efd, &ev, 1, wait_ms);
+    close(efd);
+    if (nfds < 0) return -1;
+    if (nfds == 0) return 0;
+
+    ssize_t n = read(fd, frame, sizeof(*frame));
+    if (n == (ssize_t)sizeof(*frame) || n == (ssize_t)CAN_MTU)
+        return n;
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        return 0;
+    return n;
+}
+
+ssize_t can_send_frame(int fd, const struct canfd_frame *frame, int timeout_ms)
+{
+    if (fd < 0 || !frame) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int wait_ms = timeout_ms < 0 ? 0 : timeout_ms;
+    int efd = epoll_create1(EPOLL_CLOEXEC);
+    if (efd < 0) return -1;
+
+    struct epoll_event ev;
+    ev.events = EPOLLOUT;
+    ev.data.fd = fd;
+    if (epoll_ctl(efd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        close(efd);
+        return -1;
+    }
+
+    int nfds = epoll_wait(efd, &ev, 1, wait_ms);
+    close(efd);
+    if (nfds < 0) return -1;
+    if (nfds == 0) return 0;
+
+    return write(fd, frame, sizeof(*frame));
+}
+
+static void handle_can_input(app_ctx_t *app, int can_idx)
+{
+    can_ctx_t *ctx = app->can;
+    pthread_mutex_lock(&app->can_mutex);
+    int fd = ctx->ifaces[can_idx].sock_fd;
+    while (1) {
+        struct canfd_frame frame;
+        ssize_t n = can_recv_frame(fd, &frame, 10);
+        if (n > 0) {
+            log_info("CAN recv: %s id=%X len=%d",
+                     ctx->ifaces[can_idx].ifname,
+                     frame.can_id & CAN_EFF_MASK, frame.len);
+        } else if (n == 0) {
+            break;
+        } else {
+            if (errno != 0)
+                log_error("can read %s: %s", ctx->ifaces[can_idx].ifname, strerror(errno));
+            can_socket_close(fd);
+            int new_fd = can_socket_open(ctx->ifaces[can_idx].ifname,
+                                          ctx->ifaces[can_idx].fd_mode);
+            if (new_fd >= 0) {
+                ctx->ifaces[can_idx].sock_fd = new_fd;
+                for (int k = 0; k < ctx->ifaces[can_idx].filter_count; k++)
+                    can_socket_set_filter(new_fd,
+                        ctx->ifaces[can_idx].filters[k].id,
+                        ctx->ifaces[can_idx].filters[k].mask);
+                struct epoll_event nev;
+                nev.events = EPOLLIN;
+                nev.data.u32 = (uint32_t)(can_idx + 1);
+                epoll_ctl(ctx->epfd, EPOLL_CTL_ADD, new_fd, &nev);
+                log_info("CAN %s reconnected", ctx->ifaces[can_idx].ifname);
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&app->can_mutex);
+}
+
+void *can_task(void *arg)
+{
+    app_ctx_t *app = (app_ctx_t *)arg;
+    can_ctx_t *ctx = app->can;
+    if (!ctx) return NULL;
+
+    for (int i = 0; i < ctx->count; i++) {
+        struct epoll_event ev;
+        ev.events = EPOLLIN;
+        ev.data.u32 = (uint32_t)(i + 1);
+        epoll_ctl(ctx->epfd, EPOLL_CTL_ADD, ctx->ifaces[i].sock_fd, &ev);
+    }
+    log_info("can_task started (%d iface(s))", ctx->count);
+    while (app->running) {
+        struct epoll_event events[64];
+        int nfds = epoll_wait(ctx->epfd, events, 64, 500);
+        if (nfds < 0) {
+            if (errno == EINTR) { watchdog_feed_thread(pthread_self()); continue; }
+            log_error("can epoll_wait"); break;
+        }
+        watchdog_feed_thread(pthread_self());
+        for (int i = 0; i < nfds; i++) {
+            uint32_t tag = events[i].data.u32;
+            if (tag < 1 || tag > (uint32_t)ctx->count) continue;
+            handle_can_input(app, (int)(tag - 1));
+        }
+    }
+    log_info("can_task stopped");
+    return NULL;
+}
 
 int can_socket_set_filter(int fd, canid_t id, canid_t mask)
 {

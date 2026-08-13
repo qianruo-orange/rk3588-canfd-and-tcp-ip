@@ -13,6 +13,7 @@
 #include "net/tcp_server.h"
 #include "core/common.h"
 #include "core/log.h"
+#include "watchdog/watchdog.h"
 
 int tcp_listen(int port)
 {
@@ -46,6 +47,135 @@ int tcp_accept(int listen_fd)
     inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str));
     log_info("TCP client connected: %s:%d  fd=%d", ip_str, ntohs(client_addr.sin_port), client_fd);
     return client_fd;
+}
+
+ssize_t tcp_recv_data(int fd, void *buf, size_t len, int timeout_ms)
+{
+    if (fd < 0 || !buf || len == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int wait_ms = timeout_ms < 0 ? 0 : timeout_ms;
+    int efd = epoll_create1(EPOLL_CLOEXEC);
+    if (efd < 0) return -1;
+
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = fd;
+    if (epoll_ctl(efd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        close(efd);
+        return -1;
+    }
+
+    int nfds = epoll_wait(efd, &ev, 1, wait_ms);
+    close(efd);
+    if (nfds < 0) return -1;
+    if (nfds == 0) return 0;
+
+    return recv(fd, buf, len, 0);
+}
+
+ssize_t tcp_send_data(int fd, const void *buf, size_t len, int timeout_ms)
+{
+    if (fd < 0 || !buf || len == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int wait_ms = timeout_ms < 0 ? 0 : timeout_ms;
+    int efd = epoll_create1(EPOLL_CLOEXEC);
+    if (efd < 0) return -1;
+
+    struct epoll_event ev;
+    ev.events = EPOLLOUT;
+    ev.data.fd = fd;
+    if (epoll_ctl(efd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        close(efd);
+        return -1;
+    }
+
+    int nfds = epoll_wait(efd, &ev, 1, wait_ms);
+    close(efd);
+    if (nfds < 0) return -1;
+    if (nfds == 0) return 0;
+
+    return send(fd, buf, len, 0);
+}
+
+static int handle_tcp_input(tcp_ctx_t *ctx, int client_idx)
+{
+    client_t *c = &ctx->clients[client_idx];
+    if (c->fd < 0) return 1;
+    char dummy[256];
+    ssize_t n = tcp_recv_data(c->fd, dummy, sizeof(dummy), 10);
+    if (n == 0) return 1;
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return 1;
+    return 0;
+}
+
+static int flush_client(tcp_ctx_t *ctx, int client_idx)
+{
+    client_t *c = &ctx->clients[client_idx];
+    if (c->fd < 0) return 1;
+    if (c->wlen == 0) return 0;
+    ssize_t ret = tcp_send_data(c->fd, c->wbuf, (size_t)c->wlen, 10);
+    if (ret < 0) return 1;
+    if (ret == c->wlen) { c->wlen = 0; }
+    else if (ret > 0) { memmove(c->wbuf, c->wbuf + ret, c->wlen - ret); c->wlen -= ret; }
+    return 0;
+}
+
+void *tcp_task(void *arg)
+{
+    app_ctx_t *app = (app_ctx_t *)arg;
+    tcp_ctx_t *ctx = app->tcp;
+    if (!ctx) return NULL;
+
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.u32 = 0;
+    if (ctx->listen_fd >= 0)
+        epoll_ctl(ctx->epfd, EPOLL_CTL_ADD, ctx->listen_fd, &ev);
+
+    pthread_mutex_lock(&ctx->client_mutex);
+    for (int i = 0; i < TCP_MAX_CLIENTS; i++) {
+        if (ctx->clients[i].fd < 0) continue;
+        ev.events = EPOLLIN;
+        ev.data.u32 = (uint32_t)(0x80000000 | (i + 1));
+        epoll_ctl(ctx->epfd, EPOLL_CTL_ADD, ctx->clients[i].fd, &ev);
+    }
+    pthread_mutex_unlock(&ctx->client_mutex);
+
+    log_info("tcp_task started");
+    while (app->running) {
+        struct epoll_event events[64];
+        int nfds = epoll_wait(ctx->epfd, events, 64, 500);
+        if (nfds < 0) {
+            if (errno == EINTR) { watchdog_feed_thread(pthread_self()); continue; }
+            log_error("tcp epoll_wait"); break;
+        }
+        watchdog_feed_thread(pthread_self());
+        for (int i = 0; i < nfds; i++) {
+            uint32_t tag = events[i].data.u32;
+            if (tag == 0) {
+                while (1) { int fd = tcp_accept(ctx->listen_fd); if (fd < 0) break; tcp_client_add(ctx, fd); }
+                continue;
+            }
+            int client_idx = (int)(tag & 0x7FFFFFFF) - 1;
+            if (client_idx < 0 || client_idx >= TCP_MAX_CLIENTS) continue;
+            pthread_mutex_lock(&ctx->client_mutex);
+            int dead = 0;
+            if (events[i].events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR))
+                dead = handle_tcp_input(ctx, client_idx);
+            if (!dead && (events[i].events & EPOLLOUT))
+                dead = flush_client(ctx, client_idx);
+            pthread_mutex_unlock(&ctx->client_mutex);
+            if (dead) tcp_client_del(ctx, client_idx);
+        }
+    }
+    log_info("tcp_task stopped");
+    return NULL;
 }
 
 int tcp_init(void *arg)

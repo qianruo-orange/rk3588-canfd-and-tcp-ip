@@ -14,6 +14,10 @@ typedef struct can_ctx {
 /* CAN 数据接收线程（独立 epoll 管理所有 CAN 接口） */
 void *can_task(void *arg);
 
+/* CAN 收发接口预留：统一收发入口，供后续业务逻辑复用 */
+ssize_t can_recv_frame(int fd, struct canfd_frame *frame, int timeout_ms);
+ssize_t can_send_frame(int fd, const struct canfd_frame *frame, int timeout_ms);
+
 /* 打开/关闭单个 CAN 套接字（can_init 内部使用） */
 int  can_socket_open(const char *ifname, int fd_mode);
 void can_socket_close(int fd);

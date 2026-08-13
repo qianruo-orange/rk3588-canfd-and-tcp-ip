@@ -1,8 +1,8 @@
 /**
  * version.c — 版本信息辅助函数。
  *
- * 版本号 / git 提交 / 构建信息由 CMake configure 阶段生成到
- * ${CMAKE_BINARY_DIR}/generated/core/version.h，本文件仅做格式化输出。
+ * 版本号 / git 提交 / 构建信息由 CMake 直接生成到
+ * include/core/version.h，本文件仅做格式化输出。
  */
 
 #include <stdio.h>

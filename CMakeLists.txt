@@ -1,11 +1,73 @@
 cmake_minimum_required(VERSION 3.10)
-project(data_transport_test C)
+project(data_transport_test VERSION 1.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+set(APP_NAME "${PROJECT_NAME}")
+set(APP_VERSION "${PROJECT_VERSION}")
+set(APP_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+if(NOT APP_BUILD_TYPE)
+    set(APP_BUILD_TYPE "Release")
+endif()
+
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE APP_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT APP_GIT_COMMIT)
+    set(APP_GIT_COMMIT "")
+endif()
+
+execute_process(
+    COMMAND git rev-parse --abbrev-ref HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE APP_GIT_BRANCH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT APP_GIT_BRANCH)
+    set(APP_GIT_BRANCH "")
+endif()
+
+execute_process(
+    COMMAND git status --porcelain
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE APP_GIT_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(APP_GIT_STATUS)
+    set(APP_GIT_DIRTY 1)
+else()
+    set(APP_GIT_DIRTY 0)
+endif()
+
+string(TIMESTAMP APP_BUILD_DATE "%Y-%m-%d %H:%M:%S" UTC)
+
+file(MAKE_DIRECTORY "${PROJECT_SOURCE_DIR}/include/core")
+file(WRITE "${PROJECT_SOURCE_DIR}/include/core/version.h"
+    "#pragma once\n\n"
+    "#define APP_NAME \"${APP_NAME}\"\n"
+    "#define APP_VERSION \"${APP_VERSION}\"\n"
+    "#define APP_GIT_COMMIT \"${APP_GIT_COMMIT}\"\n"
+    "#define APP_GIT_BRANCH \"${APP_GIT_BRANCH}\"\n"
+    "#define APP_GIT_DIRTY ${APP_GIT_DIRTY}\n"
+    "#define APP_BUILD_TYPE \"${APP_BUILD_TYPE}\"\n"
+    "#define APP_BUILD_DATE \"${APP_BUILD_DATE}\"\n"
+)
+
 set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG" CACHE STRING "Release flags")
 set(CMAKE_C_FLAGS_DEBUG   "-O0 -g"      CACHE STRING "Debug flags")
+
+if(CMAKE_BUILD_TYPE)
+    add_compile_definitions(APP_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+else()
+    add_compile_definitions(APP_BUILD_TYPE="Release")
+endif()
 
 option(DEBUG "Enable debug output to terminal" OFF)
 if(DEBUG)
@@ -16,8 +78,6 @@ set(SOURCES
     source/core/main.c
     source/core/log.c
     source/core/config.c
-    source/core/receive_data.c
-    source/core/send_data.c
     source/can/can_socket.c
     source/net/tcp_server.c
     source/http/http.c
@@ -34,7 +94,7 @@ set(SOURCES
 
 add_executable(data_transport_test ${SOURCES})
 
-target_include_directories(data_transport_test PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(data_transport_test PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/generated)
 
 # libnl3 headers are under /usr/include/libnl3
 target_include_directories(data_transport_test PRIVATE /usr/include/libnl3)

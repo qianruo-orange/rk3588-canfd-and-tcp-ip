@@ -16,6 +16,19 @@ usage() {
     exit 1
 }
 
+print_version_info() {
+    local version_header="$PROJECT_DIR/include/core/version.h"
+
+    if [ -f "$version_header" ]; then
+        local app_version app_build_type
+        app_version=$(grep '^#define APP_VERSION ' "$version_header" | head -n 1 | cut -d'"' -f2)
+        app_build_type=$(grep '^#define APP_BUILD_TYPE ' "$version_header" | head -n 1 | cut -d'"' -f2)
+        echo "[BUILD] version=${app_version:-unknown} build_type=${app_build_type:-unknown}"
+    else
+        echo "[BUILD] version header not generated yet"
+    fi
+}
+
 clean_build() {
     echo "[CLEAN] removing $BUILD_DIR"
     rm -rf "$BUILD_DIR"
@@ -41,6 +54,13 @@ clean_build() {
         rm -rf "$CMAKE_DIR"
     else
         echo "[CLEAN] no $CMAKE_DIR to remove"
+    fi
+
+    if [ -f "$PROJECT_DIR/include/core/version.h" ]; then
+        echo "[CLEAN] removing $PROJECT_DIR/include/core/version.h"
+        rm -f "$PROJECT_DIR/include/core/version.h"
+    else
+        echo "[CLEAN] no version header to remove"
     fi
 
     echo "[CLEAN] removing $LOGS_DIR"
@@ -76,4 +96,6 @@ case "${1:-}" in
 esac
 
 make -C "$BUILD_DIR" -j"$(nproc)"
+print_version_info
+
 echo "[BUILD] done -> $PROJECT_DIR/bin/data_transport_test"

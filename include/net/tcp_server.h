@@ -25,6 +25,10 @@ typedef struct tcp_ctx {
     int           epfd;   /* TCP 数据收发专用 epoll */
 } tcp_ctx_t;
 
+/* TCP 收发接口预留：统一收发入口，供后续业务逻辑复用 */
+ssize_t tcp_recv_data(int fd, void *buf, size_t len, int timeout_ms);
+ssize_t tcp_send_data(int fd, const void *buf, size_t len, int timeout_ms);
+
 int tcp_listen(int port);
 int tcp_accept(int listen_fd);
 

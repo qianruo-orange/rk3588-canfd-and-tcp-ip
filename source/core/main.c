@@ -34,7 +34,7 @@ static int signal_setup(void *arg)
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
     /* 写已断开 socket 会触发 SIGPIPE，默认会终止进程；统一忽略，
-       由 write() 的返回值处理错误（见 send_data.c / http.c） */
+       由 write() 的返回值处理错误（见 tcp_server.c / http.c） */
     signal(SIGPIPE, SIG_IGN);
     return 0;
 }

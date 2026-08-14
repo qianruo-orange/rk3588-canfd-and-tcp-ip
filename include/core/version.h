@@ -2,8 +2,8 @@
 
 #define APP_NAME "rk3588-canfd-and-tcp-ip-communication"
 #define APP_VERSION "1.0.0"
-#define APP_GIT_COMMIT "123d63f"
+#define APP_GIT_COMMIT "56504ab"
 #define APP_GIT_BRANCH "main"
 #define APP_GIT_DIRTY 1
 #define APP_BUILD_TYPE "Release"
-#define APP_BUILD_DATE "2026-08-13 17:50:21"
+#define APP_BUILD_DATE "2026-08-14 18:01:01"

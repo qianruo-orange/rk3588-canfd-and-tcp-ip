@@ -46,9 +46,10 @@ cd /home/orangepi/project1
 ## 系统架构
 
 ```text
-CAN bus ──► rx_task ──► 日志记录 / TCP 处理 / 配置更新
+CAN bus ──► can_task ──► 日志记录 / 数据流处理
+TCP     ──► tcp_task ──► 日志记录 / 数据流处理
                  │
-                 ├──► HTTP Server ──► Web 管理界面
+                 ├──► http_server_task ──► Web 管理界面
                  │
                  ├──► video_stream_task ──► MJPEG 视频流
                  │
@@ -59,12 +60,22 @@ CAN bus ──► rx_task ──► 日志记录 / TCP 处理 / 配置更新
 
 | 线程 | 职责 |
 | --- | --- |
-| `main` | 初始化、配置加载、退出编排 |
-| `rx_task` | epoll 读：CAN 帧读取、TCP accept、TCP 数据读取 |
-| `tx_task` | epoll 写：TCP 下行写入（预留） |
-| `http_server_task` | HTTP :80 主循环与请求处理 |
-| `video_stream_task` | V4L2 MJPEG 采集与帧发布 |
-| `watchdog_task` | 线程心跳监控与 `sd_notify` |
+| `main` | 初始化、配置加载、退出编排、喂狗 |
+| `can` | CAN 帧接收与日志记录 |
+| `tcp` | TCP 监听、连接管理与数据收发 |
+| `http` | HTTP 管理服务主循环与请求处理 |
+| `video` | V4L2 MJPEG 采集与帧发布 |
+| `watchdog` | 线程心跳监控与 `sd_notify` |
+
+各模块通过 `source/core/main.c` 中的模块总表 `g_modules[]` 统一注册，每个 `module_t` 条目包含：
+
+- `name`：模块名（同时用于 watchdog 注册与 Linux 原生线程名）
+- `tid`：运行时线程句柄（`pthread_create` 后回填）
+- `ops`：生命周期函数 `init` / `dtor` / `task`
+- `wd`：看门狗参数 `timeout` / `max_miss`
+- `thr`：线程创建属性 `stack_size` / `priority` / `cpu`
+
+新增模块只需在总表中追加一行，并实现对应的 `init` / `dtor` / `task` 函数。
 
 ## 目录结构
 
@@ -237,9 +248,11 @@ HTTP 写操作接口要求 root 权限。
 
 ## 看门狗机制
 
-- `can`、`tcp`、`http`、`video`、`main` 五个关键线程进行心跳监控
+- 通过模块总表 `g_modules[]` 为 `can`、`tcp`、`http`、`video`、`main` 注册心跳监控
+- 每个模块带 `timeout` / `max_miss` 参数；`watchdog` 线程自身 `timeout=0`，不监督自己
+- 线程以名字注册 / 喂狗 / 注销，超时日志可直接定位到具体线程名（如 `thread 'http'`）
 - 心跳超时将触发整体退出
-- 每 5 秒调用 `sd_notify("WATCHDOG=1")`
+- 每 5 秒调用 `sd_notify("WATCHDOG=1")`（`WatchdogSec=10` 的一半）
 
 ## 日志管理
 

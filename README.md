@@ -47,33 +47,34 @@ cd /home/orangepi/project1
 
 ## 系统架构
 
-```text
-CAN bus ──► can_task ──► DBC 解析 ──► 日志记录 / Web 展示
-TCP     ──► tcp_task ──► 日志记录 / 数据流处理
-                 │
-                 ├──► http_server_task ──► Web 管理界面
-                 │
-                 ├──► video_stream_task ──► MJPEG 视频流
-                 │
-                 └──► watchdog_task ──► systemd watchdog / 线程监控
-```
+单进程多线程架构，所有线程由 `source/core/main.c` 的模块总表 `g_modules[]` 统一注册并拉起：
 
-单进程多线程架构如下：
+```text
+        ┌─► can_task      ──► SocketCAN 收帧 ──► DBC 解码 ──► 日志 / 解码缓存
+ main ──┼─► tcp_task      ──► TCP 监听 / 收发
+        ├─► http_task     ──► Web 管理 + REST API + MJPEG 推流
+        ├─► video_task    ──► V4L2 采集
+        └─► watchdog_task ──► 心跳监控 + sd_notify
+
+CAN 数据流：CAN 帧 ─► can_task ─► DBC 解码 ─► 解码缓存 ─► /api/can/decoded ─► /dbc 页面
+```
 
 | 线程 | 职责 |
 | --- | --- |
-| `main` | 初始化、配置加载、退出编排、喂狗 |
-| `can` | CAN 帧接收与日志记录 |
+| `main` | 初始化、配置加载、DBC 加载、退出编排、喂狗 |
+| `can` | CAN 帧接收、DBC 信号解码与缓存 |
 | `tcp` | TCP 监听、连接管理与数据收发 |
-| `http` | HTTP 管理服务主循环与请求处理 |
+| `http` | HTTP 管理服务主循环、REST API、MJPEG 推流 |
 | `video` | V4L2 MJPEG 采集与帧发布 |
 | `watchdog` | 线程心跳监控与 `sd_notify` |
 
-各模块通过 `source/core/main.c` 中的模块总表 `g_modules[]` 统一注册，每个 `module_t` 条目包含：
+> 注：`signal` 模块仅注册信号处理（`init`），`task` 为空，不创建线程。
+
+每个 `module_t` 条目包含：
 
 - `name`：模块名（同时用于 watchdog 注册与 Linux 原生线程名）
 - `tid`：运行时线程句柄（`pthread_create` 后回填）
-- `ops`：生命周期函数 `init` / `dtor` / `task`
+- `ops`：生命周期函数 `init` / `dtor` / `task`（`task` 为空则不创建线程）
 - `wd`：看门狗参数 `timeout` / `max_miss`
 - `thr`：线程创建属性 `stack_size` / `priority` / `cpu`
 
@@ -85,29 +86,74 @@ TCP     ──► tcp_task ──► 日志记录 / 数据流处理
 rk3588-canfd-and-tcp-ip-communication/
 ├── CMakeLists.txt
 ├── README.md
-├── rk3588-canfd-and-tcp-ip-communication.service      # systemd 服务单元
-├── bin/                            # 可执行输出
-├── build/                          # CMake 构建目录
-├── include/                        # 头文件
+├── rk3588-canfd-and-tcp-ip-communication.service  # systemd 服务单元
+├── include/                          # 头文件
 │   ├── core/
+│   │   ├── common.h                  # 应用上下文与数据流虚接口
+│   │   ├── config.h                  # 配置结构
+│   │   ├── data_flow.h               # 数据流钩子
+│   │   ├── log.h                     # 日志接口
+│   │   ├── queue.h                   # 内存池队列
+│   │   └── version.h                 # 版本（CMake 生成）
 │   ├── can/
+│   │   ├── can_socket.h              # SocketCAN 接口
+│   │   └── dbc_parser.h              # DBC 解析接口
 │   ├── net/
+│   │   └── tcp_server.h              # TCP 服务接口
 │   ├── http/
+│   │   ├── http.h                    # HTTP 服务接口
+│   │   └── http_internal.h           # HTTP 内部定义
 │   ├── video/
+│   │   └── video_stream.h            # V4L2 视频流接口
 │   └── watchdog/
-├── source/                         # 源代码
+│       └── watchdog.h                # 看门狗接口
+├── source/                           # 源代码
 │   ├── core/
+│   │   ├── main.c                    # 入口、模块总表、线程编排
+│   │   ├── config.c                  # 配置读写
+│   │   ├── data_flow.c               # 数据流默认实现与 DBC 解码缓存
+│   │   ├── log.c                     # 日志实现
+│   │   ├── queue.c                   # 内存池队列实现
+│   │   └── version.c                 # 版本
 │   ├── can/
+│   │   ├── can_socket.c              # SocketCAN 收发
+│   │   └── dbc_parser.c              # DBC 解析实现
 │   ├── net/
+│   │   └── tcp_server.c              # TCP 服务实现
 │   ├── http/
+│   │   ├── http.c                    # HTTP 路由与静态文件
+│   │   ├── http_api_can.c            # CAN 相关 API
+│   │   ├── http_api_config.c         # 配置 API
+│   │   ├── http_api_network.c        # 网络 API
+│   │   ├── http_api_system.c         # 系统 API
+│   │   ├── http_api_video.c          # 视频 API
+│   │   ├── http_logs.c               # 日志查看
+│   │   └── http_reboot.c             # 重启 / 关机
 │   ├── video/
+│   │   └── video_stream.c            # V4L2 视频流实现
 │   └── watchdog/
-├── html/                           # Web 前端静态资源
-├── logs/                           # 运行日志
-├── config/                         # 运行时配置
+│       └── watchdog.c                # 看门狗实现
+├── html/                             # Web 前端
+│   ├── index.html                    # 监控页
+│   ├── config.html                   # 配置页
+│   ├── dbc.html                      # DBC 解析页
+│   ├── css/
+│   │   ├── common.css                # 全局共享样式
+│   │   ├── monitor.css               # 监控页样式
+│   │   └── config.css                # 配置页样式
+│   └── js/
+│       ├── monitor.js                # 监控页脚本
+│       ├── config.js                 # 配置页脚本
+│       └── dbc.js                    # DBC 页脚本
+├── config/                           # 运行时配置
+│   ├── config.txt                    # 主配置
+│   └── example.dbc                   # DBC 示例数据库
 ├── scripts/
-│   ├── build.sh
-│   └── deploy.sh
+│   ├── build.sh                      # 构建脚本
+│   └── deploy.sh                     # 部署脚本
+├── bin/                              # 可执行输出（构建生成）
+├── build/                            # CMake 构建目录（构建生成）
+├── logs/                             # 运行日志
 └── .gitignore
 ```
 

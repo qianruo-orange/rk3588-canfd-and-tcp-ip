@@ -142,27 +142,52 @@ int data_flow_decode_frame(const char *text, char *ifname, size_t ifname_size,
 
 /* ---- 默认回调：域内钩子 ---- */
 
+/* 按接口名查找 CAN 通道索引 */
+static int find_can_index(app_ctx_t *app, const char *ifname)
+{
+    if (!app || !app->can || !ifname) return -1;
+    for (int i = 0; i < app->can->count; i++)
+        if (strcmp(app->can->ifaces[i].ifname, ifname) == 0) return i;
+    return -1;
+}
+
 static int default_on_can_rx(app_ctx_t *app, const char *ifname,
                              const struct canfd_frame *frame)
 {
-    /* 加载了 DBC 时，按报文定义解码信号并记录；否则仅保留原始帧日志 */
-    if (!app || !app->dbc || app->dbc->msg_count == 0) return 0;
-    int mi = dbc_find_message(app->dbc, frame->can_id);
-    if (mi < 0) return 0;
+    /* 该通道加载了 DBC 时，按报文定义解码信号并记录；否则仅保留原始帧日志 */
+    if (!app || !app->dbcs || !ifname) return 0;
+    int idx = find_can_index(app, ifname);
+    if (idx < 0) return 0;
 
     char text[FLOW_FRAME_TEXT_MAX];
-    int n = dbc_decode_message(app->dbc, mi, frame, text, sizeof(text));
-    if (n <= 0) return 0;
+    char name[DBC_MAX_NAME_LEN];
+    canid_t can_id = frame->can_id & CAN_EFF_MASK;
+    int mi = -1;
 
-    log_info("CAN %s id=%X: %s", ifname, frame->can_id & CAN_EFF_MASK, text);
+    /* dbc_mutex 保护 dbcs[idx]：上传/重载与解码互斥 */
+    pthread_mutex_lock(&app->dbc_mutex);
+    dbc_t *dbc = &app->dbcs[idx];
+    if (dbc->msg_count > 0) {
+        mi = dbc_find_message(dbc, frame->can_id);
+        if (mi >= 0) {
+            int n = dbc_decode_message(dbc, mi, frame, text, sizeof(text));
+            if (n <= 0) mi = -1;
+            else safe_strncpy(name, sizeof(name), dbc->messages[mi].name);
+        }
+    }
+    pthread_mutex_unlock(&app->dbc_mutex);
+
+    if (mi < 0) return 0;
+
+    log_info("CAN %s id=%X: %s", ifname, can_id, text);
 
     /* 写入环形缓冲，供 Web 页展示 */
     pthread_mutex_lock(&g_decode_mutex);
     int pos = (int)(__atomic_fetch_add(&g_decode_count, 1, __ATOMIC_RELAXED) % DECODE_RING_MAX);
     decode_entry_t *e = &g_decode_ring[pos];
     safe_strncpy(e->ifname, sizeof(e->ifname), ifname);
-    e->can_id = frame->can_id & CAN_EFF_MASK;
-    safe_strncpy(e->name, sizeof(e->name), app->dbc->messages[mi].name);
+    e->can_id = can_id;
+    safe_strncpy(e->name, sizeof(e->name), name);
     safe_strncpy(e->text, sizeof(e->text), text);
     pthread_mutex_unlock(&g_decode_mutex);
 

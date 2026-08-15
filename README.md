@@ -4,7 +4,7 @@
 [![Language](https://img.shields.io/badge/Language-C11-blue.svg)](https://github.com/qianruo-orange/rk3588-canfd-and-tcp-ip-communication)
 [![OS](https://img.shields.io/badge/OS-Linux-green.svg)](https://github.com/qianruo-orange/rk3588-canfd-and-tcp-ip-communication)
 
-基于 epoll 的 CAN 数据接收与 TCP/IP 通信解决方案，内置 Web 管理界面、视频流与 systemd 看门狗。该项目适用于 Orange Pi 5 Max（RK3588）/ Linux 运行环境，使用 C11 实现。
+基于 epoll 的 CAN/CAN FD 数据采集、DBC 信号解析与 TCP/IP 通信解决方案，内置 Web 管理界面、视频流与 systemd 看门狗，支持按系统信息自动识别可配置 CAN 通道。该项目适用于 Orange Pi 5 Max（RK3588）/ Linux 运行环境，使用 C11 实现。
 
 ## 项目简介
 
@@ -243,7 +243,7 @@ sudo ./scripts/deploy.sh -h     # 查看帮助
 
 > 注：`config/config.txt` **不会**被复制，首次部署使用程序内置默认值，后续通过 Web 配置页保存到部署目录。
 
-部署后启用 DBC：在配置中设置 `dbc_path config/example.dbc`（相对部署目录，即指向已复制的 `/opt/.../config/example.dbc`）。
+部署后启用 DBC：在配置中设置 `can_dbc <通道名> config/example.dbc`（相对部署目录，即指向已复制的 `/opt/.../config/example.dbc`），或在 Web 配置页上传。
 
 服务名称：`rk3588-canfd-and-tcp-ip-communication`
 
@@ -277,7 +277,7 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 | `max_clients` | `<n>` | 最大客户端数，默认 16 |
 | `video_device` | `<path>` | 视频设备，默认 `/dev/video0` |
 | `video_width` / `video_height` | `<n>` | 分辨率，默认 640×480 |
-| `dbc_path` | `<path>` | DBC 数据库文件路径，留空则不启用信号解码 |
+| `can_dbc` | `<name> <path>` | 按 CAN 通道配置 DBC 数据库文件路径，留空则不启用该通道信号解码 |
 | `http_port` | `<port>` | HTTP 管理端口，默认 80 |
 
 未提供配置文件时，将使用内置默认值。
@@ -298,6 +298,7 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 | GET | `/api/system` | 无 | 系统监控数据 |
 | GET | `/api/can` | 无 | CAN 状态 |
 | GET | `/api/can/decoded` | 无 | DBC 解析后的最近 CAN 信号（JSON） |
+| POST | `/api/can/dbc?ifname=` | root | 上传某通道的 DBC 文件 |
 | POST | `/api/can/toggle` | root | 切换 CAN 接口 |
 | GET/POST | `/api/config` | root | 读取/写入配置 |
 | GET | `/api/network` | 无 | 网络统计 |
@@ -343,9 +344,7 @@ logs/
 
 ## 预览截图
 
-> 这里可以放项目运行界面截图、Web 页面截图或设备连接示意图。
-
-![Web UI Preview](https://via.placeholder.com/1200x600.png?text=Web+UI+Preview)
+![Web 界面截图](docs/ScreenShot_2026-08-15_144854_676.png)
 
 ## 项目亮点
 

@@ -2,6 +2,7 @@
 #define CAN_SOCKET_H
 
 #include <linux/can.h>
+#include <linux/if.h>
 #include "core/config.h"
 
 /* ---- CAN 子系统上下文 ---- */
@@ -32,5 +33,8 @@ int  can_socket_configure(const char *ifname, int bitrate, int dbitrate,
 /* 根据配置初始化所有 CAN 接口 */
 int  can_init(void *arg);
 void can_cleanup(void *ctx);
+
+/* 枚举系统中实际存在的 CAN 接口（netlink 路由，kind=="can"），返回写入的数量 */
+int  can_enumerate_system(char names[][IFNAMSIZ], int max);
 
 #endif /* CAN_SOCKET_H */

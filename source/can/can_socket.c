@@ -367,6 +367,31 @@ int can_socket_set_filter(int fd, canid_t id, canid_t mask)
     return 0;
 }
 
+int can_enumerate_system(char names[][IFNAMSIZ], int max)
+{
+    int count = 0;
+    struct nl_sock *sk = nl_socket_alloc();
+    if (!sk) return 0;
+    if (nl_connect(sk, NETLINK_ROUTE) < 0) { nl_socket_free(sk); return 0; }
+
+    for (int idx = 1; ; idx++) {
+        struct rtnl_link *link = NULL;
+        if (rtnl_link_get_kernel(sk, idx, NULL, &link) != 0) break;
+        if (!link) break;
+
+        const char *kind = rtnl_link_get_type(link);
+        if (!kind || strcmp(kind, "can") != 0) { rtnl_link_put(link); continue; }
+
+        const char *name = rtnl_link_get_name(link);
+        if (name && ifname_valid(name) && count < max)
+            safe_strncpy(names[count++], IFNAMSIZ, name);
+        rtnl_link_put(link);
+    }
+
+    nl_socket_free(sk);
+    return count;
+}
+
 int can_init(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;

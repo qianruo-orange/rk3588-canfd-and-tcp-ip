@@ -12,6 +12,7 @@
 
 #include "http/http_internal.h"
 #include "core/data_flow.h"
+#include "can/can_socket.h"
 
 void http_can_decoded(app_ctx_t *app, int fd)
 {
@@ -156,5 +157,87 @@ void http_can_toggle(app_ctx_t *app, int fd, const char *body)
 
     char msg[64];
     snprintf(msg, sizeof(msg), "{\"result\":\"%s %s\"}", ifname, action);
+    http_send_response(fd, 200, "OK", "application/json", msg, strlen(msg));
+}
+
+/* DBC 文件上传：POST /api/can/dbc?ifname=can0，body 为 DBC 文本内容 */
+void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body)
+{
+    (void)method;
+    if (!app || !app->cfg || !app->can || !uri || !body) {
+        http_send_response(fd, 400, "Bad Request", "text/plain", "", 0);
+        return;
+    }
+
+    /* 从 query string 解析目标通道名 */
+    char ifname[32] = {0};
+    const char *q = strchr(uri, '?');
+    if (!q || !url_get_param(q, "ifname=", ifname, sizeof(ifname)) || !ifname_valid(ifname)) {
+        http_send_response(fd, 400, "Bad Request", "text/plain", "bad ifname", 10);
+        return;
+    }
+
+    can_ctx_t *can = app->can;
+    int idx = -1;
+    for (int i = 0; i < can->count; i++)
+        if (strcmp(can->ifaces[i].ifname, ifname) == 0) { idx = i; break; }
+    if (idx < 0) {
+        http_send_response(fd, 404, "Not Found", "text/plain", "iface not found", 15);
+        return;
+    }
+
+    /* 定位 body 与长度 */
+    long cl = 0;
+    const char *cl_hdr = strstr(body, "Content-Length:");
+    if (!cl_hdr) cl_hdr = strstr(body, "content-length:");
+    if (cl_hdr) {
+        char *end = NULL;
+        cl = strtol(cl_hdr + 15, &end, 10);
+        if (end == cl_hdr + 15 || cl < 0) cl = 0;
+    }
+    const char *sep = strstr(body, "\r\n\r\n");
+    if (!sep) sep = strstr(body, "\n\n");
+    const char *content = sep ? sep + (sep[0] == '\r' ? 4 : 2) : body;
+    long content_len = cl > 0 ? cl : (long)strlen(content);
+    if (content_len <= 0 || content_len > 256 * 1024) {
+        http_send_response(fd, 413, "Payload Too Large", "text/plain", "empty or too large", 19);
+        return;
+    }
+
+    /* 落盘到 config/dbc_<ifname>.dbc */
+    char path[320];
+    snprintf(path, sizeof(path), "config/dbc_%s.dbc", ifname);
+    FILE *fp = fopen(path, "w");
+    if (!fp) {
+        http_send_response(fd, 500, "Error", "text/plain", "cannot write file", 17);
+        return;
+    }
+    size_t w = fwrite(content, 1, (size_t)content_len, fp);
+    fclose(fp);
+    if (w != (size_t)content_len) {
+        http_send_response(fd, 500, "Error", "text/plain", "write failed", 12);
+        return;
+    }
+
+    /* 重新加载该通道 DBC（与解码互斥） */
+    pthread_mutex_lock(&app->dbc_mutex);
+    int rc = dbc_load(&app->dbcs[idx], path);
+    int msg_count = app->dbcs[idx].msg_count;
+    int sig_count = app->dbcs[idx].sig_count;
+    pthread_mutex_unlock(&app->dbc_mutex);
+
+    if (rc < 0) {
+        http_send_response(fd, 400, "Bad Request", "text/plain", "invalid dbc", 12);
+        return;
+    }
+
+    /* 更新运行时配置并落盘 */
+    safe_strncpy(can->ifaces[idx].dbc_path, sizeof(can->ifaces[idx].dbc_path), path);
+    config_save(app);
+
+    char msg[160];
+    snprintf(msg, sizeof(msg),
+             "{\"result\":\"ok\",\"ifname\":\"%s\",\"messages\":%d,\"signals\":%d}",
+             ifname, msg_count, sig_count);
     http_send_response(fd, 200, "OK", "application/json", msg, strlen(msg));
 }

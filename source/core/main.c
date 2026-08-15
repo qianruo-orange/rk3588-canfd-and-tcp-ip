@@ -82,8 +82,8 @@ static int signal_setup(void *arg)
 /* 文件级应用上下文（仅本文件直接访问；其他模块通过指针参数获得） */
 static app_ctx_t g_app;
 
-/* DBC 数据库（静态分配，约 190KB；仅本文件持有，其他模块经 g_app.dbc 访问） */
-static dbc_t g_dbc;
+/* DBC 数据库数组（每个 CAN 通道一个，静态分配；其他模块经 g_app.dbcs 访问） */
+static dbc_t g_dbc[CAN_MAX_IFACES];
 
 static module_t g_modules[] = {
     /* can */
@@ -200,22 +200,25 @@ int main(void)
     memset(&g_app, 0, sizeof(g_app));
     g_app.running = 1;
     pthread_mutex_init(&g_app.can_mutex, NULL);
+    pthread_mutex_init(&g_app.dbc_mutex, NULL);
     g_app.can = &can_ctx;
     g_app.tcp = &tcp_ctx;
     g_app.cfg = &cfg;
-    g_app.dbc = &g_dbc;
+    g_app.dbcs = g_dbc;
 
     log_init(PATH_LOGS);
     config_load(&cfg);
     log_close(); log_init(cfg.log_dir);
 
-    /* 加载 DBC（可选）：失败不阻塞启动，仅记录日志 */
-    if (cfg.dbc_path[0]) {
-        if (dbc_load(&g_dbc, cfg.dbc_path) < 0)
-            log_error("dbc: load '%s' failed", cfg.dbc_path);
+    /* 按 CAN 通道加载 DBC（可选）：失败不阻塞启动，仅记录日志 */
+    for (int i = 0; i < cfg.gw_args.can_count; i++) {
+        const char *path = cfg.gw_args.can_ifaces[i].dbc_path;
+        if (!path[0]) continue;
+        if (dbc_load(&g_dbc[i], path) < 0)
+            log_error("dbc: load '%s' for %s failed", path, cfg.gw_args.can_ifaces[i].ifname);
         else
-            log_info("dbc: loaded '%s' (%d message(s), %d signal(s))",
-                     cfg.dbc_path, g_dbc.msg_count, g_dbc.sig_count);
+            log_info("dbc: loaded '%s' for %s (%d message(s), %d signal(s))",
+                     path, cfg.gw_args.can_ifaces[i].ifname, g_dbc[i].msg_count, g_dbc[i].sig_count);
     }
 
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);

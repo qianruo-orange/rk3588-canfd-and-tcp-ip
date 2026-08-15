@@ -6,27 +6,19 @@
 
 <form id="f">
 <div class="can-grid">
-<div class="card" id="card_can0"><h3>CAN0 <span id="st0"></span> <label class="toggle"><input type="checkbox" id="tg0" onchange="toggleCan(0,this.checked)"><span class="slider"></span></label></h3>
-<div id="cfg0">
-<div class="row"><label>波特率</label><input name="br0" id="br0" type="number"><span class="unit">bps</span></div>
-<div class="row"><label>CAN FD</label><select name="fd0" id="fd0" onchange="chkFd(0)"><option value="on">on</option><option value="off">off</option></select></div>
-<div class="row" id="dbr0"><label>FD波特率</label><input name="db0" id="db0" type="number"><span class="unit">bps</span></div>
-<div class="filters">
-<h4><span>CAN-ID 过滤器</span><button type="button" class="add-btn" onclick="addFilter(0)">+ 添加</button></h4>
-<div id="fil0"></div>
+<div class="card" id="card_can"><h3><select id="canSel" onchange="onCanSel()"></select> <span id="st"></span> <label class="toggle"><input type="checkbox" id="tg" onchange="toggleCan(this.checked)"><span class="slider"></span></label></h3>
+<div id="cfg">
+<div class="cfg-grid">
+<div class="row"><label>波特率</label><input name="br" id="br" type="number"><span class="unit">bps</span></div>
+<div class="row"><label>CAN FD</label><select name="fd" id="fd" onchange="chkFd()"><option value="on">on</option><option value="off">off</option></select></div>
+<div class="row" id="dbr"><label>FD波特率</label><input name="db" id="db" type="number"><span class="unit">bps</span></div>
 </div>
-</div><div class="hint" id="hint0">接口已关闭，开启后可配置</div></div>
-
-<div class="card" id="card_can1"><h3>CAN1 <span id="st1"></span> <label class="toggle"><input type="checkbox" id="tg1" onchange="toggleCan(1,this.checked)"><span class="slider"></span></label></h3>
-<div id="cfg1">
-<div class="row"><label>波特率</label><input name="br1" id="br1" type="number"><span class="unit">bps</span></div>
-<div class="row"><label>CAN FD</label><select name="fd1" id="fd1" onchange="chkFd(1)"><option value="on">on</option><option value="off">off</option></select></div>
-<div class="row" id="dbr1"><label>FD波特率</label><input name="db1" id="db1" type="number"><span class="unit">bps</span></div>
 <div class="filters">
-<h4><span>CAN-ID 过滤器</span><button type="button" class="add-btn" onclick="addFilter(1)">+ 添加</button></h4>
-<div id="fil1"></div>
+<h4><span>CAN-ID 过滤器</span><button type="button" class="add-btn" onclick="addFilter()">+ 添加</button></h4>
+<div id="fil"></div>
 </div>
-</div><div class="hint" id="hint1">接口已关闭，开启后可配置</div></div>
+<div class="row"><label>DBC 文件</label><input type="file" id="dbc" accept=".dbc" style="flex:1"><button type="button" class="add-btn" onclick="uploadDbc()">上传</button></div>
+</div><div class="hint" id="hint">接口已关闭，开启后可配置</div></div>
 
 <div class="card" id="card_net"><h3>网络</h3>
 <div class="row"><label>TCP端口</label><input name="tp" id="tp" type="number"></div>

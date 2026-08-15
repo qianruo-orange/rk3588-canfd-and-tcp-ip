@@ -10,7 +10,7 @@
 #include "core/log.h"
 #include "core/config.h"
 
-#define HTTP_BUF_SIZE 4096
+#define HTTP_BUF_SIZE 262144  /* 请求缓冲：需容纳 header + DBC 文件上传 body */
 #define HTTP_ROOT     PATH_WEBROOT
 #define HTTP_URI_MAX  256
 
@@ -28,6 +28,7 @@ void http_system_api(app_ctx_t *app, int fd);
 void http_can_status(app_ctx_t *app, int fd);
 void http_can_toggle(app_ctx_t *app, int fd, const char *body);
 void http_can_decoded(app_ctx_t *app, int fd);
+void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body);
 void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req);
 void http_config_post(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body);
 void http_reboot(app_ctx_t *app, int fd);

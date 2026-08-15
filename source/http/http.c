@@ -52,6 +52,11 @@ static void http_can_toggle_wrap(app_ctx_t *app, int fd, const char *method, con
 static void http_can_decoded_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_decoded(app, fd); }
 
 /**
+ * http_can_dbc_upload_wrap - 包装 DBC 文件上传接口，保留 method/uri/body 供上传处理。
+ */
+static void http_can_dbc_upload_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { http_can_dbc_upload(app, fd, method, uri, req); }
+
+/**
  * http_reboot_wrap - 包装重启接口，执行系统级重启动作。
  */
 static void http_reboot_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_reboot(app, fd); }
@@ -278,7 +283,7 @@ void http_serve_file(int fd, const char *uri)
                        http_mime_type(path), size);
     if (write(fd, header, off) < 0) { fclose(fp); return; }
 
-    char buf[HTTP_BUF_SIZE];
+    char buf[8192];
     size_t remain = size;
     while (remain > 0) {
         size_t n = (remain > sizeof(buf)) ? sizeof(buf) : remain;
@@ -392,6 +397,7 @@ static void *client_handler(app_ctx_t *app, int fd)
         { "/api/system",    0, NULL,   http_system_api_wrap,   NULL },
         { "/api/can",       0, NULL,   http_can_status_wrap,   NULL },
         { "/api/can/decoded",0,NULL,   http_can_decoded_wrap,  NULL },
+        { "/api/can/dbc",    0, "POST", http_can_dbc_upload_wrap, http_check_auth_root },
         { "/api/can/toggle",0, NULL,   http_can_toggle_wrap,   http_check_auth_root },
         { "/api/config",    0, "POST", http_config_post,  http_check_auth_root },
         { "/api/config",    0, NULL,   http_config_get,   http_check_auth_root },

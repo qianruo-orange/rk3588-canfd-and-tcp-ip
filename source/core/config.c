@@ -28,17 +28,24 @@ void config_defaults(struct app_config_t *cfg)
     args->tcp_port    = 6666;
     args->max_clients = 16;
 
-    can_iface_t *c0 = &args->can_ifaces[args->can_count++];
-    memset(c0, 0, sizeof(*c0)); c0->sock_fd = -1;
-    snprintf(c0->ifname, sizeof(c0->ifname), "%s", "can0");
-    c0->bitrate = 500000; c0->dbitrate = 2000000; c0->fd_mode = 1; c0->up = 1;
+    /* 可配置 CAN 通道：优先从系统读取实际存在的 CAN 接口 */
+    char names[CAN_MAX_IFACES][IFNAMSIZ];
+    int n = can_enumerate_system(names, CAN_MAX_IFACES);
+    if (n <= 0) {
+        /* 无法枚举系统接口时回退到 can0/can1，保证默认可用 */
+        snprintf(names[0], sizeof(names[0]), "%s", "can0");
+        snprintf(names[1], sizeof(names[1]), "%s", "can1");
+        n = 2;
+    }
 
-    can_iface_t *c1 = &args->can_ifaces[args->can_count++];
-    memset(c1, 0, sizeof(*c1)); c1->sock_fd = -1;
-    snprintf(c1->ifname, sizeof(c1->ifname), "%s", "can1");
-    c1->bitrate = 500000; c1->dbitrate = 2000000; c1->fd_mode = 1; c1->up = 1;
+    for (int i = 0; i < n && args->can_count < CAN_MAX_IFACES; i++) {
+        can_iface_t *c = &args->can_ifaces[args->can_count++];
+        memset(c, 0, sizeof(*c)); c->sock_fd = -1;
+        snprintf(c->ifname, sizeof(c->ifname), "%s", names[i]);
+        c->bitrate = 500000; c->dbitrate = 2000000; c->fd_mode = 1; c->up = 1;
+    }
 
-    log_info("config: defaults loaded");
+    log_info("config: defaults loaded (%d can iface(s))", args->can_count);
 }
 
 int config_load(struct app_config_t *cfg)
@@ -83,8 +90,11 @@ int config_load(struct app_config_t *cfg)
         else if (strcmp(key, "video_device") == 0) safe_strncpy(cfg->video_device, sizeof(cfg->video_device), val);
         else if (strcmp(key, "video_width") == 0) cfg->video_width = parse_int_clamped(val, 1, 4096, 640);
         else if (strcmp(key, "video_height") == 0) cfg->video_height = parse_int_clamped(val, 1, 4096, 480);
-        else if (strcmp(key, "dbc_path") == 0) safe_strncpy(cfg->dbc_path, sizeof(cfg->dbc_path), val);
-        else if (strcmp(key, "http_port") == 0) cfg->http_port = parse_int_clamped(val, 1, 65535, 80);
+        else if (strcmp(key, "can_dbc") == 0) {
+            char nm[64], path[256];
+            if (sscanf(val, "%63s %255s", nm, path) == 2)
+                for (int i = 0; i < a->can_count; i++) if (!strcmp(a->can_ifaces[i].ifname, nm)) { safe_strncpy(a->can_ifaces[i].dbc_path, sizeof(a->can_ifaces[i].dbc_path), path); break; }
+        } else if (strcmp(key, "http_port") == 0) cfg->http_port = parse_int_clamped(val, 1, 65535, 80);
     }
     fclose(fp);
     if (a->can_count == 0) { config_defaults(cfg); return 0; }
@@ -122,7 +132,9 @@ void config_save(app_ctx_t *app)
     fprintf(fp, "video_width %d\n", cfg->video_width);
     fprintf(fp, "video_height %d\n", cfg->video_height);
     fprintf(fp, "\n# --- DBC ---\n");
-    if (cfg->dbc_path[0]) fprintf(fp, "dbc_path %s\n", cfg->dbc_path);
+    for (int i = 0; i < can->count; i++)
+        if (can->ifaces[i].dbc_path[0])
+            fprintf(fp, "can_dbc %s %s\n", can->ifaces[i].ifname, can->ifaces[i].dbc_path);
     fprintf(fp, "\n# --- HTTP ---\n");
     fprintf(fp, "http_port %d\n", cfg->http_port);
 

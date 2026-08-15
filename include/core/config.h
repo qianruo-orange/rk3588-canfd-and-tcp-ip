@@ -27,6 +27,7 @@ typedef struct {
     int           fd_mode;
     int           up;
     int           restart_ms;
+    char          dbc_path[256]; /* 该通道的 DBC 文件路径（空 = 不启用解码） */
 } can_iface_t;
 
 /* ---- 网关启动参数 ---- */
@@ -45,7 +46,6 @@ struct app_config_t {
     int            video_width;
     int            video_height;
     int            http_port;   /* Web 管理端口（默认 80） */
-    char           dbc_path[256]; /* DBC 文件路径（空 = 不加载） */
 };
 
 int  config_load(struct app_config_t *cfg);

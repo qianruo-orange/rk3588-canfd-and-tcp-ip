@@ -38,7 +38,8 @@ typedef struct {
     struct tcp_ctx        *tcp;
     struct app_config_t   *cfg;
     const data_flow_ops_t *flow;      /* 数据流虚函数实现（默认各域独立，不做桥接） */
-    dbc_t                 *dbc;       /* DBC 数据库（可空；为空则不启用信号解码） */
+    dbc_t                 *dbcs;      /* DBC 数据库数组（按 CAN 通道索引；空则该通道不解码） */
+    pthread_mutex_t        dbc_mutex; /* DBC 数组并发访问互斥锁 */
     _Atomic int            threads_running; /* 活跃工作线程数（线程退出时递减） */
 } app_ctx_t;
 

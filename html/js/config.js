@@ -1,8 +1,14 @@
 /* config.js — 配置页面逻辑 */
 (function() {
 
-  function chkFd(i) {
-    document.getElementById('dbr' + i).style.display = document.getElementById('fd' + i).value === 'on' ? 'flex' : 'none';
+  var curCan = 0;      /* 当前选中的 CAN 通道索引 */
+  var canNames = [];   /* 通道名列表（由 /api/config 动态读取） */
+  var cansCfg = {};    /* 各通道配置缓存 { can0:{...}, ... } */
+
+  function curName() { return canNames[curCan] || ('can' + curCan); }
+
+  function chkFd() {
+    document.getElementById('dbr').style.display = document.getElementById('fd').value === 'on' ? 'flex' : 'none';
   }
 
   function show(t, c) {
@@ -11,16 +17,64 @@
     m.textContent = c;
   }
 
-  function setSwitch(i, up) {
-    document.getElementById('st' + i).textContent = up ? '\ud83d\udfe2' : '\ud83d\udd34';
-    document.getElementById('tg' + i).checked = up;
-    document.getElementById('cfg' + i).style.display = up ? 'block' : 'none';
-    document.getElementById('hint' + i).style.display = up ? 'none' : 'block';
+  function setSwitch(up) {
+    document.getElementById('st').textContent = up ? '\ud83d\udfe2' : '\ud83d\udd34';
+    document.getElementById('tg').checked = up;
+    document.getElementById('cfg').style.display = up ? 'block' : 'none';
+    document.getElementById('hint').style.display = up ? 'none' : 'block';
   }
 
-  window.toggleCan = async function(i, on) {
-    var n = (i === 0) ? 'can0' : 'can1';
-    var tg = document.getElementById('tg' + i);
+  function setFilters(filters) {
+    var el = document.getElementById('fil');
+    el.innerHTML = '';
+    if (!filters) return;
+    filters.forEach(function(f) {
+      var r = document.createElement('div');
+      r.className = 'filter-row';
+      r.innerHTML = '<input type="text" value="' + f.id + '" style="width:80px">'
+        + '<span style="color:#484f58;font-size:12px">:</span>'
+        + '<input type="text" value="' + f.mask + '" style="width:80px">'
+        + '<button type="button" class="del-btn" onclick="this.parentElement.remove()">\u2715</button>';
+      el.appendChild(r);
+    });
+  }
+
+  /* 把当前表单内容写入 cansCfg[curName()] */
+  function collectCan() {
+    var f = cansCfg[curName()] || (cansCfg[curName()] = {});
+    f.bitrate = document.getElementById('br').value;
+    f.fd = document.getElementById('fd').value;
+    f.dbitrate = document.getElementById('db').value;
+    f.up = document.getElementById('tg').checked ? 'on' : 'off';
+    f.filters = [];
+    var rows = document.getElementById('fil').children;
+    for (var k = 0; k < rows.length; k++) {
+      var inputs = rows[k].querySelectorAll('input');
+      if (inputs.length >= 2) f.filters.push({id: inputs[0].value, mask: inputs[1].value});
+    }
+  }
+
+  /* 用 cansCfg[curName()] 渲染当前通道 */
+  function renderCan() {
+    var f = cansCfg[curName()] || {};
+    document.getElementById('br').value = f.bitrate || '';
+    document.getElementById('fd').value = f.fd || 'off';
+    document.getElementById('db').value = f.dbitrate || '';
+    setSwitch(f.up === 'on');
+    chkFd();
+    setFilters(f.filters || []);
+    document.getElementById('dbc').value = '';
+  }
+
+  window.onCanSel = function() {
+    collectCan();
+    curCan = parseInt(document.getElementById('canSel').value, 10) || 0;
+    renderCan();
+  };
+
+  window.toggleCan = async function(on) {
+    var n = curName();
+    var tg = document.getElementById('tg');
     tg.disabled = true;
     try {
       await fetch('/api/can/toggle', {
@@ -29,11 +83,34 @@
         body: 'ifname=' + n + '&action=' + (on ? 'up' : 'down')
       });
     } catch(e) {}
-    setSwitch(i, on);
+    setSwitch(on);
+    cansCfg[n] = cansCfg[n] || {};
+    cansCfg[n].up = on ? 'on' : 'off';
     tg.disabled = false;
   };
 
   window.chkFd = chkFd;
+
+  window.uploadDbc = async function() {
+    var input = document.getElementById('dbc');
+    var file = input.files && input.files[0];
+    if (!file) { show('err', '请先选择 DBC 文件'); return; }
+    var n = curName();
+    try {
+      var r = await fetch('/api/can/dbc?ifname=' + n, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/octet-stream'},
+        body: file
+      });
+      var j = r.ok ? await r.json() : null;
+      if (j && j.result === 'ok') {
+        show('ok', '✓ ' + n + ' DBC 已上传（' + j.messages + ' 报文 / ' + j.signals + ' 信号）');
+      } else {
+        show('err', '上传失败(' + r.status + ')');
+      }
+    } catch(e) { show('err', '上传失败'); }
+    setTimeout(function() { document.getElementById('msg').className = ''; }, 3000);
+  };
 
   var capsData = null;
 
@@ -94,32 +171,18 @@
     document.getElementById('vw').value = s.w;
     document.getElementById('vh').value = s.h;
   };
-  window.addFilter = function(canIdx) {
-    var cnt = document.getElementById('fil' + canIdx).children.length;
-    if (cnt >= 16) return;
+
+  window.addFilter = function() {
+    var el = document.getElementById('fil');
+    if (el.children.length >= 16) return;
     var r = document.createElement('div');
     r.className = 'filter-row';
     r.innerHTML = '<input type="text" placeholder="ID (hex)" style="width:80px">'
       + '<span style="color:#484f58;font-size:12px">:</span>'
       + '<input type="text" placeholder="Mask (hex)" style="width:80px">'
       + '<button type="button" class="del-btn" onclick="this.parentElement.remove()">\u2715</button>';
-    document.getElementById('fil' + canIdx).appendChild(r);
+    el.appendChild(r);
   };
-
-  function setFilters(canIdx, filters) {
-    var el = document.getElementById('fil' + canIdx);
-    el.innerHTML = '';
-    if (!filters) return;
-    filters.forEach(function(f) {
-      var r = document.createElement('div');
-      r.className = 'filter-row';
-      r.innerHTML = '<input type="text" value="' + f.id + '" style="width:80px">'
-        + '<span style="color:#484f58;font-size:12px">:</span>'
-        + '<input type="text" value="' + f.mask + '" style="width:80px">'
-        + '<button type="button" class="del-btn" onclick="this.parentElement.remove()">\u2715</button>';
-      el.appendChild(r);
-    });
-  }
 
   async function loadCfg() {
     try {
@@ -132,50 +195,58 @@
       document.getElementById('vw').value = cfg.video_width || 640;
       document.getElementById('vh').value = cfg.video_height || 480;
 
-      var names = ['can0', 'can1'];
-      for (var i = 0; i < 2; i++) {
-        var f = (cfg.cans || {})[names[i]];
-        if (!f) continue;
-        document.getElementById('br' + i).value = f.bitrate || '';
-        document.getElementById('fd' + i).value = f.fd || 'off';
-        document.getElementById('db' + i).value = f.dbitrate || '';
-        setSwitch(i, f.up === 'on');
-        chkFd(i);
-        setFilters(i, f.filters);
+      canNames = Object.keys(cfg.cans || {});
+      if (canNames.length === 0) canNames = ['can0', 'can1'];
+
+      /* 动态生成通道下拉框 */
+      var sel = document.getElementById('canSel');
+      sel.innerHTML = '';
+      for (var i = 0; i < canNames.length; i++)
+        sel.innerHTML += '<option value="' + i + '">' + canNames[i] + '</option>';
+      if (curCan >= canNames.length) curCan = 0;
+      sel.value = String(curCan);
+
+      cansCfg = {};
+      for (var i = 0; i < canNames.length; i++) {
+        var f = (cfg.cans || {})[canNames[i]] || {};
+        cansCfg[canNames[i]] = {
+          bitrate: f.bitrate || '',
+          fd: f.fd || 'off',
+          dbitrate: f.dbitrate || '',
+          up: f.up === 'on' ? 'on' : 'off',
+          filters: f.filters || []
+        };
       }
+      renderCan();
     } catch(e) {}
   }
   window.loadCfg = loadCfg;
 
   document.getElementById('f').addEventListener('submit', async function(e) {
     e.preventDefault();
+    collectCan();
+
     var d = {};
-    d['ifname0'] = 'can0';
-    d['bitrate0'] = document.getElementById('br0').value;
-    d['fd0'] = document.getElementById('fd0').value;
-    d['dbitrate0'] = document.getElementById('db0').value;
-    d['up0'] = document.getElementById('tg0').checked ? 'on' : 'off';
-    d['ifname1'] = 'can1';
-    d['bitrate1'] = document.getElementById('br1').value;
-    d['fd1'] = document.getElementById('fd1').value;
-    d['dbitrate1'] = document.getElementById('db1').value;
-    d['up1'] = document.getElementById('tg1').checked ? 'on' : 'off';
+    for (var i = 0; i < canNames.length; i++) {
+      var name = canNames[i];
+      var f = cansCfg[name] || {bitrate: '', fd: 'off', dbitrate: '', up: 'off', filters: []};
+      d['ifname' + i] = name;
+      d['bitrate' + i] = f.bitrate;
+      d['fd' + i] = f.fd;
+      d['dbitrate' + i] = f.dbitrate;
+      d['up' + i] = f.up;
+      var filters = f.filters || [];
+      for (var k = 0; k < filters.length; k++) {
+        d['filter_id_' + i + '_' + k] = filters[k].id;
+        d['filter_mask_' + i + '_' + k] = filters[k].mask;
+      }
+    }
+
     d['tcp_port'] = document.getElementById('tp').value;
     d['max_clients'] = document.getElementById('mc').value;
     d['video_device'] = document.getElementById('vd').value;
     d['video_width'] = document.getElementById('vw').value;
     d['video_height'] = document.getElementById('vh').value;
-
-    for (var i = 0; i < 2; i++) {
-      var rows = document.getElementById('fil' + i).children;
-      for (var k = 0; k < rows.length; k++) {
-        var inputs = rows[k].querySelectorAll('input');
-        if (inputs.length >= 2) {
-          d['filter_id_' + i + '_' + k] = inputs[0].value;
-          d['filter_mask_' + i + '_' + k] = inputs[1].value;
-        }
-      }
-    }
 
     try {
       var r = await fetch('/api/config', {method: 'POST', body: new URLSearchParams(d)});

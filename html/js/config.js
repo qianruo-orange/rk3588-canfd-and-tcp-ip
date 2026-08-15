@@ -31,9 +31,8 @@
     filters.forEach(function(f) {
       var r = document.createElement('div');
       r.className = 'filter-row';
-      r.innerHTML = '<input type="text" value="' + f.id + '" style="width:80px">'
-        + '<span style="color:#484f58;font-size:12px">:</span>'
-        + '<input type="text" value="' + f.mask + '" style="width:80px">'
+      r.innerHTML = '<input type="text" value="' + f.id + '" placeholder="ID (hex)">'
+        + '<input type="text" value="' + f.mask + '" placeholder="Mask (hex)">'
         + '<button type="button" class="del-btn" onclick="this.parentElement.remove()">\u2715</button>';
       el.appendChild(r);
     });
@@ -177,9 +176,8 @@
     if (el.children.length >= 16) return;
     var r = document.createElement('div');
     r.className = 'filter-row';
-    r.innerHTML = '<input type="text" placeholder="ID (hex)" style="width:80px">'
-      + '<span style="color:#484f58;font-size:12px">:</span>'
-      + '<input type="text" placeholder="Mask (hex)" style="width:80px">'
+    r.innerHTML = '<input type="text" placeholder="ID (hex)">'
+      + '<input type="text" placeholder="Mask (hex)">'
       + '<button type="button" class="del-btn" onclick="this.parentElement.remove()">\u2715</button>';
     el.appendChild(r);
   };

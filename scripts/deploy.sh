@@ -63,6 +63,11 @@ do_install() {
     rm -f "$DEPLOY_DIR/config/config.txt"
     echo "  (using defaults — configure via web UI)"
 
+    if [ -f "$PROJECT_DIR/config/example.dbc" ]; then
+        echo "[INSTALL] config/example.dbc"
+        cp "$PROJECT_DIR/config/example.dbc" "$DEPLOY_DIR/config/example.dbc"
+    fi
+
     echo "[INSTALL] html/"
     rm -rf "$DEPLOY_DIR/html"
     cp -r "$PROJECT_DIR/html" "$DEPLOY_DIR/html"

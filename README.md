@@ -222,13 +222,28 @@ cd /home/orangepi/project1
 
 ## systemd 部署
 
+前置条件：已通过 `./scripts/build.sh -R` 生成可执行文件。
+
 ```bash
-sudo ./scripts/deploy.sh        # 安装并启动
-sudo ./scripts/deploy.sh -u     # 卸载
-sudo ./scripts/deploy.sh -r     # 重装
+sudo ./scripts/deploy.sh        # 安装并启动（默认动作，等同 -i）
+sudo ./scripts/deploy.sh -i     # 安装并启动
+sudo ./scripts/deploy.sh -u     # 卸载（停止服务、删除 systemd 文件与安装目录）
+sudo ./scripts/deploy.sh -r     # 重装（卸载后重新安装）
+sudo ./scripts/deploy.sh -h     # 查看帮助
 ```
 
-默认安装路径：`/opt/rk3588-canfd-and-tcp-ip-communication/`
+`deploy.sh` 需 root 权限，安装目录为 `/opt/rk3588-canfd-and-tcp-ip-communication/`，部署内容如下：
+
+| 源 | 目标 |
+| --- | --- |
+| `bin/<可执行文件>` | `/opt/.../bin/` |
+| `html/` | `/opt/.../html/` |
+| `config/example.dbc` | `/opt/.../config/example.dbc` |
+| systemd 服务单元 | `/etc/systemd/system/` |
+
+> 注：`config/config.txt` **不会**被复制，首次部署使用程序内置默认值，后续通过 Web 配置页保存到部署目录。
+
+部署后启用 DBC：在配置中设置 `dbc_path config/example.dbc`（相对部署目录，即指向已复制的 `/opt/.../config/example.dbc`）。
 
 服务名称：`rk3588-canfd-and-tcp-ip-communication`
 
@@ -243,8 +258,9 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 
 - `Type=notify`
 - `WatchdogSec=10`
+- `Restart=on-failure`（失败自动重启，间隔 5s）
 - `AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW`
-- `ProtectSystem=strict`
+- `ProtectSystem=strict`（文件系统只读，仅 `config/`、`logs/` 可写，`html/` 只读）
 
 ## 配置说明
 

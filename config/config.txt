@@ -31,6 +31,3 @@ video_height 480
 # 示例数据库见 config/example.dbc，取消下面注释即可为该通道启用：
 # can_dbc can0 config/example.dbc
 # can_dbc can1 config/example.dbc
-
-# --- HTTP Web 管理端口 ---
-http_port 80

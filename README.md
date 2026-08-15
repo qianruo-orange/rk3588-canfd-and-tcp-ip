@@ -280,7 +280,6 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 | `video_device` | `<path>` | 视频设备，默认 `/dev/video0` |
 | `video_width` / `video_height` | `<n>` | 分辨率，默认 640×480 |
 | `can_dbc` | `<name> <path>` | 按 CAN 通道配置 DBC 数据库文件路径，留空则不启用该通道信号解码 |
-| `http_port` | `<port>` | HTTP 管理端口，默认 80 |
 
 未提供配置文件时，将从系统枚举实际存在的 CAN 接口（netlink 路由，`kind=="can"`）并套用默认参数；若系统无法枚举到接口，则回退到 `can0` / `can1`。
 

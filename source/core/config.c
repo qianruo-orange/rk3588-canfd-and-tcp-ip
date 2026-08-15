@@ -22,7 +22,6 @@ void config_defaults(struct app_config_t *cfg)
     safe_strncpy(cfg->video_device, sizeof(cfg->video_device), "/dev/video0");
     cfg->video_width  = 640;
     cfg->video_height = 480;
-    cfg->http_port    = 80;   /* 与 http.h 的 HTTP_DEFAULT_PORT 一致 */
 
     gateway_args_t *args = &cfg->gw_args;
     args->tcp_port    = 6666;
@@ -56,7 +55,6 @@ int config_load(struct app_config_t *cfg)
     memset(cfg, 0, sizeof(*cfg));
     safe_strncpy(cfg->log_dir, sizeof(cfg->log_dir), PATH_LOGS);
     cfg->video_width = 640; cfg->video_height = 480;
-    cfg->http_port   = 80;   /* 与 http.h 的 HTTP_DEFAULT_PORT 一致 */
     gateway_args_t *a = &cfg->gw_args;
 
     char line[256];
@@ -94,7 +92,7 @@ int config_load(struct app_config_t *cfg)
             char nm[64], path[256];
             if (sscanf(val, "%63s %255s", nm, path) == 2)
                 for (int i = 0; i < a->can_count; i++) if (!strcmp(a->can_ifaces[i].ifname, nm)) { safe_strncpy(a->can_ifaces[i].dbc_path, sizeof(a->can_ifaces[i].dbc_path), path); break; }
-        } else if (strcmp(key, "http_port") == 0) cfg->http_port = parse_int_clamped(val, 1, 65535, 80);
+        }
     }
     fclose(fp);
     if (a->can_count == 0) { config_defaults(cfg); return 0; }
@@ -135,8 +133,6 @@ void config_save(app_ctx_t *app)
     for (int i = 0; i < can->count; i++)
         if (can->ifaces[i].dbc_path[0])
             fprintf(fp, "can_dbc %s %s\n", can->ifaces[i].ifname, can->ifaces[i].dbc_path);
-    fprintf(fp, "\n# --- HTTP ---\n");
-    fprintf(fp, "http_port %d\n", cfg->http_port);
 
     fclose(fp);
     log_info("config: saved to %s", CONFIG_PATH);

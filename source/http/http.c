@@ -25,7 +25,6 @@
 
 /* ---- 全局变量 ---- */
 static int g_listen_fd = -1;
-static int g_http_port;
 static _Atomic int g_http_active = 0;   /* 活跃 HTTP 连接数 */
 #define HTTP_MAX_CONN 64
 
@@ -466,14 +465,14 @@ void *http_server_task(void *arg)
     memset(&addr, 0, sizeof(addr));
     addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port        = htons(g_http_port);
+    addr.sin_port        = htons(HTTP_DEFAULT_PORT);
 
     if (bind(g_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        log_error("http bind :%d", g_http_port);
+        log_error("http bind :%d", HTTP_DEFAULT_PORT);
         close(g_listen_fd); g_listen_fd = -1; return NULL;
     }
     if (listen(g_listen_fd, 10) < 0) {
-        log_error("http listen :%d", g_http_port);
+        log_error("http listen :%d", HTTP_DEFAULT_PORT);
         close(g_listen_fd); g_listen_fd = -1; return NULL;
     }
 
@@ -496,7 +495,7 @@ void *http_server_task(void *arg)
         return NULL;
     }
 
-    log_info("HTTP server listening on port %d", g_http_port);
+    log_info("HTTP server listening on port %d", HTTP_DEFAULT_PORT);
 
     struct epoll_event events[64];
     while (app->running) {
@@ -566,11 +565,9 @@ void *http_server_task(void *arg)
 
 int http_server_start(void *arg)
 {
-    app_ctx_t *app = (app_ctx_t *)arg;
-    /* HTTP 端口可配置（config.txt 的 http_port，默认 80） */
-    g_http_port = (app && app->cfg && app->cfg->http_port > 0)
-                      ? app->cfg->http_port : HTTP_DEFAULT_PORT;
-    log_info("HTTP port = %d", g_http_port);
+    (void)arg;
+    /* HTTP 端口固定为 80（见 http.h 的 HTTP_DEFAULT_PORT） */
+    log_info("HTTP port = %d", HTTP_DEFAULT_PORT);
     return 0;
 }
 

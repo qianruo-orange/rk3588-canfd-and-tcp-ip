@@ -45,7 +45,6 @@ struct app_config_t {
     char           video_device[128];
     int            video_width;
     int            video_height;
-    int            http_port;   /* Web 管理端口（默认 80） */
 };
 
 int  config_load(struct app_config_t *cfg);

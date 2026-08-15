@@ -392,6 +392,7 @@ static void *client_handler(app_ctx_t *app, int fd)
 
     static const struct { const char *uri; int pre; const char *method; api_fn fn; int (*auth)(const char*,int); }
     rt[] = {
+        { "/api/logs",      0, NULL,   http_logs_handler, http_check_auth_root },
         { "/logs",          1, NULL,   http_logs_handler, http_check_auth_root },
         { "/logfile/",      1, NULL,   http_logs_handler, http_check_auth_root },
         { "/api/system",    0, NULL,   http_system_api_wrap,   NULL },

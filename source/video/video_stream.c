@@ -41,6 +41,10 @@ static video_ctx_t *g_ctx = NULL;
 
 static int init_video_device(video_ctx_t *vs, int verbose)
 {
+    /* 设备初始化期间持续喂狗：部分 V4L2 驱动的 open/ioctl 可能较慢，
+       整段初始化若耗时过长会被看门狗误判为 video 线程卡死。 */
+    watchdog_feed_self("video");
+
     vs->fd = open(vs->device, O_RDWR | O_NONBLOCK, 0);
     if (vs->fd < 0) {
         /* 相机未连接是常见场景：重试时静默，仅在状态切换时详细记录，避免刷屏 */
@@ -48,6 +52,8 @@ static int init_video_device(video_ctx_t *vs, int verbose)
             log_error("video_stream: open %s failed: %s", vs->device, strerror(errno));
         return -1;
     }
+    watchdog_feed_self("video");
+
     struct v4l2_capability cap;
     if (ioctl(vs->fd, VIDIOC_QUERYCAP, &cap) < 0) {
         log_error("video_stream: VIDIOC_QUERYCAP failed");
@@ -57,6 +63,8 @@ static int init_video_device(video_ctx_t *vs, int verbose)
         log_error("video_stream: device %s is not video capture", vs->device);
         goto fail_close;
     }
+    watchdog_feed_self("video");
+
     struct v4l2_format fmt = {0};
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     fmt.fmt.pix.width       = vs->width;
@@ -76,6 +84,8 @@ static int init_video_device(video_ctx_t *vs, int verbose)
                 goto fail_close;
         }
     }
+    watchdog_feed_self("video");
+
     /* 记录实际使用的参数 */
     vs->width  = fmt.fmt.pix.width;
     vs->height = fmt.fmt.pix.height;
@@ -85,6 +95,7 @@ static int init_video_device(video_ctx_t *vs, int verbose)
         (char)((fmt.fmt.pix.pixelformat >> 16) & 0xFF),
         (char)((fmt.fmt.pix.pixelformat >> 24) & 0xFF),
         vs->width, vs->height);
+
     struct v4l2_requestbuffers req = {0};
     req.count  = 4;
     req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -93,6 +104,8 @@ static int init_video_device(video_ctx_t *vs, int verbose)
         log_error("video_stream: VIDIOC_REQBUFS failed");
         goto fail_close;
     }
+    watchdog_feed_self("video");
+
     vs->buffers = calloc(req.count, sizeof(*vs->buffers));
     if (!vs->buffers) {
         log_error("video_stream: calloc buffers failed");
@@ -121,6 +134,7 @@ static int init_video_device(video_ctx_t *vs, int verbose)
             log_error("video_stream: VIDIOC_QBUF failed");
             goto fail_buffers;
         }
+        watchdog_feed_self("video");
     }
 
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -128,6 +142,7 @@ static int init_video_device(video_ctx_t *vs, int verbose)
         log_error("video_stream: VIDIOC_STREAMON failed");
         goto fail_buffers;
     }
+    watchdog_feed_self("video");
     return 0;
 
 fail_buffers:

@@ -287,14 +287,15 @@ static void handle_can_input(app_ctx_t *app, int can_idx)
     can_ctx_t *ctx = app->can;
     pthread_mutex_lock(&app->can_mutex);
     int fd = ctx->ifaces[can_idx].sock_fd;
-    while (1) {
+    /* 每次 epoll 事件最多排空 64 帧就返回：避免 CAN 总线持续有数据时无限排水，
+       导致 can_task 无法回到下一次 epoll_wait 前的 watchdog_feed_self("can")，
+       从而被看门狗误判为卡死。 */
+    for (int i = 0; i < 64; i++) {
         struct canfd_frame frame;
         ssize_t n = can_recv_frame(fd, &frame, 10);
         if (n > 0) {
-            log_info("CAN recv: %s id=%X len=%d",
-                     ctx->ifaces[can_idx].ifname,
-                     frame.can_id & CAN_EFF_MASK, frame.len);
-            /* 数据流：交给 CAN 域钩子（默认空实现，仅日志；业务可覆盖处理） */
+            /* 数据流：交给 CAN 域钩子（默认空实现；业务可覆盖处理）。
+               这里不再逐帧打印日志，避免大流量下刷屏并拖慢接收循环。 */
             if (app->flow && app->flow->on_can_rx)
                 app->flow->on_can_rx(app, ctx->ifaces[can_idx].ifname, &frame);
         } else if (n == 0) {

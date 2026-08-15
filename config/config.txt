@@ -28,6 +28,7 @@ video_width 640
 video_height 480
 
 # --- DBC（可选，留空则不启用信号解码） ---
+# 示例数据库见 config/example.dbc，取消下面注释即可启用：
 # dbc_path config/example.dbc
 
 # --- HTTP Web 管理端口 ---

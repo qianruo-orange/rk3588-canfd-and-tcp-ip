@@ -47,9 +47,11 @@ static int parse_message(dbc_t *dbc, const char *line)
     if (dbc->msg_count >= DBC_MAX_MESSAGES) return -1;
 
     char name[DBC_MAX_NAME_LEN];
-    int id, dlc;
-    /* BO_ <id(十进制)> <name>: <dlc> <transmitter> */
-    if (sscanf(line, "BO_ %d %63[^:] : %d", &id, name, &dlc) != 3)
+    unsigned int id;
+    int dlc;
+    /* BO_ <id(十进制)> <name>: <dlc> <transmitter>
+       扩展帧按 Vector 约定：ID = 0x80000000 | (29 位 ID)。 */
+    if (sscanf(line, "BO_ %u %63[^:] : %d", &id, name, &dlc) != 3)
         return -1;
 
     dbc_message_t *msg = &dbc->messages[dbc->msg_count];

@@ -11,6 +11,16 @@
 #include <linux/can/netlink.h>
 
 #include "http/http_internal.h"
+#include "core/data_flow.h"
+
+void http_can_decoded(app_ctx_t *app, int fd)
+{
+    (void)app;
+    char json[8192];
+    int n = data_flow_recent_decoded_json(json, sizeof(json));
+    if (n < 0) n = 0;
+    http_send_response(fd, 200, "OK", "application/json", json, (size_t)n);
+}
 
 void http_can_status(app_ctx_t *app, int fd)
 {

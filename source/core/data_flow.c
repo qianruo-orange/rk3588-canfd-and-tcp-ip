@@ -24,6 +24,21 @@
 #include "can/dbc_parser.h"
 #include "net/tcp_server.h"
 
+/* ---- DBC 解码结果环形缓冲（供 Web 页 /api/can/decoded 展示） ---- */
+
+#define DECODE_RING_MAX 32
+
+typedef struct {
+    char    ifname[16];
+    canid_t can_id;
+    char    name[DBC_MAX_NAME_LEN];
+    char    text[FLOW_FRAME_TEXT_MAX];
+} decode_entry_t;
+
+static decode_entry_t  g_decode_ring[DECODE_RING_MAX];
+static _Atomic int     g_decode_count = 0;   /* 累计写入条数 */
+static pthread_mutex_t g_decode_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /* ---- 默认发送原语 ---- */
 
 static ssize_t default_tx_can(app_ctx_t *app, const char *ifname,
@@ -137,8 +152,20 @@ static int default_on_can_rx(app_ctx_t *app, const char *ifname,
 
     char text[FLOW_FRAME_TEXT_MAX];
     int n = dbc_decode_message(app->dbc, mi, frame, text, sizeof(text));
-    if (n > 0)
-        log_info("CAN %s id=%X: %s", ifname, frame->can_id & CAN_EFF_MASK, text);
+    if (n <= 0) return 0;
+
+    log_info("CAN %s id=%X: %s", ifname, frame->can_id & CAN_EFF_MASK, text);
+
+    /* 写入环形缓冲，供 Web 页展示 */
+    pthread_mutex_lock(&g_decode_mutex);
+    int pos = (int)(__atomic_fetch_add(&g_decode_count, 1, __ATOMIC_RELAXED) % DECODE_RING_MAX);
+    decode_entry_t *e = &g_decode_ring[pos];
+    safe_strncpy(e->ifname, sizeof(e->ifname), ifname);
+    e->can_id = frame->can_id & CAN_EFF_MASK;
+    safe_strncpy(e->name, sizeof(e->name), app->dbc->messages[mi].name);
+    safe_strncpy(e->text, sizeof(e->text), text);
+    pthread_mutex_unlock(&g_decode_mutex);
+
     return 0;
 }
 
@@ -171,4 +198,30 @@ void data_flow_register(app_ctx_t *app, const data_flow_ops_t *ops)
 const data_flow_ops_t *data_flow_default_ops(void)
 {
     return &g_default_ops;
+}
+
+int data_flow_recent_decoded_json(char *out, size_t out_size)
+{
+    if (!out || out_size == 0) return -1;
+
+    int total = __atomic_load_n(&g_decode_count, __ATOMIC_RELAXED);
+    int count = total > DECODE_RING_MAX ? DECODE_RING_MAX : total;
+
+    int off = snprintf(out, out_size, "[");
+
+    pthread_mutex_lock(&g_decode_mutex);
+    for (int i = 0; i < count; i++) {
+        int pos = (total - 1 - i) % DECODE_RING_MAX;   /* 最新在前 */
+        decode_entry_t *e = &g_decode_ring[pos];
+        int n = snprintf(out + off, out_size - (size_t)off,
+                         "%s{\"ifname\":\"%s\",\"id\":\"0x%X\",\"name\":\"%s\",\"text\":\"%s\"}",
+                         i > 0 ? "," : "", e->ifname, e->can_id, e->name, e->text);
+        if (n < 0 || (size_t)n >= out_size - (size_t)off) { off = (int)out_size - 1; break; }
+        off += n;
+    }
+    pthread_mutex_unlock(&g_decode_mutex);
+
+    if (off < (int)out_size - 1)
+        off += snprintf(out + off, out_size - (size_t)off, "]");
+    return off;
 }

@@ -12,6 +12,7 @@
 
 - CAN 总线数据采集与日志记录
 - CAN FD 兼容支持
+- DBC 信号解析与物理量解码
 - TCP/IP 通信与连接管理
 - Web 管理界面配置与监控
 - 视频流服务
@@ -36,6 +37,7 @@ cd /home/orangepi/project1
 ## 功能特点
 
 - CAN 数据接收：支持经典 CAN 与 CAN FD，多接口管理
+- DBC 信号解析：解析 DBC 数据库，将 CAN 帧解码为物理量信号
 - 日志记录：接收的 CAN 帧和系统事件按级别写入日志
 - Web 管理界面：提供数据监控、配置修改、日志查看与重启控制
 - 视频流服务：通过 V4L2 接入摄像头并输出 MJPEG 视频流
@@ -46,7 +48,7 @@ cd /home/orangepi/project1
 ## 系统架构
 
 ```text
-CAN bus ──► can_task ──► 日志记录 / 数据流处理
+CAN bus ──► can_task ──► DBC 解析 ──► 日志记录 / Web 展示
 TCP     ──► tcp_task ──► 日志记录 / 数据流处理
                  │
                  ├──► http_server_task ──► Web 管理界面
@@ -213,6 +215,7 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 | `max_clients` | `<n>` | 最大客户端数，默认 16 |
 | `video_device` | `<path>` | 视频设备，默认 `/dev/video0` |
 | `video_width` / `video_height` | `<n>` | 分辨率，默认 640×480 |
+| `dbc_path` | `<path>` | DBC 数据库文件路径，留空则不启用信号解码 |
 | `http_port` | `<port>` | HTTP 管理端口，默认 80 |
 
 未提供配置文件时，将使用内置默认值。
@@ -222,6 +225,7 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 服务默认监听 HTTP 端口 80，提供以下入口：
 
 - `/`：仪表盘
+- `/dbc`：DBC 信号解析
 - `/config`：运行配置
 - `/logs`：日志管理
 
@@ -231,6 +235,7 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 | --- | --- | --- | --- |
 | GET | `/api/system` | 无 | 系统监控数据 |
 | GET | `/api/can` | 无 | CAN 状态 |
+| GET | `/api/can/decoded` | 无 | DBC 解析后的最近 CAN 信号（JSON） |
 | POST | `/api/can/toggle` | root | 切换 CAN 接口 |
 | GET/POST | `/api/config` | root | 读取/写入配置 |
 | GET | `/api/network` | 无 | 网络统计 |

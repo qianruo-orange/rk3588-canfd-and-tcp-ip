@@ -20,4 +20,7 @@ int data_flow_encode_frame(const char *ifname, const struct canfd_frame *frame,
 int data_flow_decode_frame(const char *text, char *ifname, size_t ifname_size,
                            struct canfd_frame *frame);
 
+/* 获取最近 DBC 解码结果（JSON 数组，最新在前）；返回写入字节数 */
+int data_flow_recent_decoded_json(char *out, size_t out_size);
+
 #endif /* DATA_FLOW_H */

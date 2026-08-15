@@ -47,6 +47,11 @@ static void http_can_status_wrap(app_ctx_t *app, int fd, const char *method, con
 static void http_can_toggle_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; http_can_toggle(app, fd, req); }
 
 /**
+ * http_can_decoded_wrap - 包装 DBC 解码结果查询接口。
+ */
+static void http_can_decoded_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_decoded(app, fd); }
+
+/**
  * http_reboot_wrap - 包装重启接口，执行系统级重启动作。
  */
 static void http_reboot_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_reboot(app, fd); }
@@ -375,6 +380,10 @@ static void *client_handler(app_ctx_t *app, int fd)
         if (!http_check_auth_root(buf, fd)) goto close;
         http_serve_file(fd, "/config.html"); goto close;
     }
+    if (strcmp(uri, "/dbc") == 0 || strncmp(uri, "/dbc.html", 9) == 0) {
+        if (!http_check_auth_user(buf, fd)) goto close;
+        http_serve_file(fd, "/dbc.html"); goto close;
+    }
 
     static const struct { const char *uri; int pre; const char *method; api_fn fn; int (*auth)(const char*,int); }
     rt[] = {
@@ -382,6 +391,7 @@ static void *client_handler(app_ctx_t *app, int fd)
         { "/logfile/",      1, NULL,   http_logs_handler, http_check_auth_root },
         { "/api/system",    0, NULL,   http_system_api_wrap,   NULL },
         { "/api/can",       0, NULL,   http_can_status_wrap,   NULL },
+        { "/api/can/decoded",0,NULL,   http_can_decoded_wrap,  NULL },
         { "/api/can/toggle",0, NULL,   http_can_toggle_wrap,   http_check_auth_root },
         { "/api/config",    0, "POST", http_config_post,  http_check_auth_root },
         { "/api/config",    0, NULL,   http_config_get,   http_check_auth_root },

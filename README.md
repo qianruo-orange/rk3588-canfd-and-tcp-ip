@@ -36,7 +36,7 @@ cd /home/orangepi/project1
 
 ## 功能特点
 
-- CAN 数据接收：支持经典 CAN 与 CAN FD，多接口管理
+- CAN 数据接收：支持经典 CAN 与 CAN FD，多接口管理，自动识别系统 CAN 接口
 - DBC 信号解析：解析 DBC 数据库，将 CAN 帧解码为物理量信号
 - 日志记录：接收的 CAN 帧和系统事件按级别写入日志
 - Web 管理界面：提供数据监控、配置修改、日志查看与重启控制
@@ -148,6 +148,8 @@ rk3588-canfd-and-tcp-ip-communication/
 ├── config/                           # 运行时配置
 │   ├── config.txt                    # 主配置
 │   └── example.dbc                   # DBC 示例数据库
+├── docs/                             # 文档与截图
+│   └── ScreenShot_2026-08-15_144854_676.png  # Web 界面截图
 ├── scripts/
 │   ├── build.sh                      # 构建脚本
 │   └── deploy.sh                     # 部署脚本
@@ -268,7 +270,7 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 
 | 键 | 格式 | 说明 |
 | --- | --- | --- |
-| `can_ifname` | `<name>` | CAN 接口名称，可重复 |
+| `can_ifname` | `<name>` | CAN 接口名称，可重复；未提供时自动从系统枚举实际存在的 CAN 接口 |
 | `can_bitrate` | `<name> <bps>` | 比特率，默认 500000 |
 | `can_dbitrate` | `<name> <bps>` | FD 数据比特率，默认 2000000 |
 | `can_fd` | `<name> on\|off` | CAN FD 开关 |
@@ -280,7 +282,7 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 | `can_dbc` | `<name> <path>` | 按 CAN 通道配置 DBC 数据库文件路径，留空则不启用该通道信号解码 |
 | `http_port` | `<port>` | HTTP 管理端口，默认 80 |
 
-未提供配置文件时，将使用内置默认值。
+未提供配置文件时，将从系统枚举实际存在的 CAN 接口（netlink 路由，`kind=="can"`）并套用默认参数；若系统无法枚举到接口，则回退到 `can0` / `can1`。
 
 ## Web 管理界面
 

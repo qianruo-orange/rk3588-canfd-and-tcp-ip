@@ -210,10 +210,8 @@ static int http_check_auth_common(const char *req, int fd, int require_root)
     if (ok && require_root && pw->pw_uid != 0) ok = 0;
     pthread_mutex_unlock(&g_auth_mutex);
 
-    if (ok) {
-        log_info("HTTP auth: user '%s' OK", username);
+    if (ok)
         return 1;
-    }
 
     log_info("HTTP auth: user '%s' denied", username);
     goto deny;
@@ -527,7 +525,6 @@ void *http_server_task(void *arg)
                         close(client_fd);
                         continue;
                     }
-                    log_info("HTTP connect from %s", inet_ntoa(client.sin_addr));
                     /* 置非阻塞，避免慢客户端阻塞服务端 write */
                     set_socket_nonblocking(client_fd);
                     struct epoll_event cev;

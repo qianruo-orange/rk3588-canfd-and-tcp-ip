@@ -25,6 +25,7 @@ struct can_ctx;
 struct tcp_ctx;
 struct app_config_t;
 struct app_ctx;
+struct dbc_t;
 
 /* 数据流收发虚函数表（C 风格虚函数：可整体替换或逐项覆盖）
  * 默认实现见 data_flow.c：CAN/TCP 两域经解耦队列交互，互不直接调用；
@@ -57,6 +58,7 @@ typedef struct app_ctx {
     struct tcp_ctx        *tcp;
     struct app_config_t   *cfg;
     const data_flow_ops_t *flow;      /* 数据流虚函数实现（默认各域独立，不做桥接） */
+    struct dbc_t          *dbc;       /* DBC 数据库（可空；为空则不启用信号解码） */
     _Atomic int            threads_running; /* 活跃工作线程数（线程退出时递减） */
 } app_ctx_t;
 

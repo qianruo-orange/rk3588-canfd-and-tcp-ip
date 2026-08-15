@@ -83,6 +83,7 @@ int config_load(struct app_config_t *cfg)
         else if (strcmp(key, "video_device") == 0) safe_strncpy(cfg->video_device, sizeof(cfg->video_device), val);
         else if (strcmp(key, "video_width") == 0) cfg->video_width = parse_int_clamped(val, 1, 4096, 640);
         else if (strcmp(key, "video_height") == 0) cfg->video_height = parse_int_clamped(val, 1, 4096, 480);
+        else if (strcmp(key, "dbc_path") == 0) safe_strncpy(cfg->dbc_path, sizeof(cfg->dbc_path), val);
         else if (strcmp(key, "http_port") == 0) cfg->http_port = parse_int_clamped(val, 1, 65535, 80);
     }
     fclose(fp);
@@ -120,6 +121,8 @@ void config_save(app_ctx_t *app)
     fprintf(fp, "video_device %s\n", cfg->video_device);
     fprintf(fp, "video_width %d\n", cfg->video_width);
     fprintf(fp, "video_height %d\n", cfg->video_height);
+    fprintf(fp, "\n# --- DBC ---\n");
+    if (cfg->dbc_path[0]) fprintf(fp, "dbc_path %s\n", cfg->dbc_path);
     fprintf(fp, "\n# --- HTTP ---\n");
     fprintf(fp, "http_port %d\n", cfg->http_port);
 

@@ -27,5 +27,8 @@ video_device /dev/video0
 video_width 640
 video_height 480
 
+# --- DBC（可选，留空则不启用信号解码） ---
+# dbc_path config/example.dbc
+
 # --- HTTP Web 管理端口 ---
 http_port 80

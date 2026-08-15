@@ -80,6 +80,7 @@ set(SOURCES
     source/core/config.c
     source/core/data_flow.c
     source/can/can_socket.c
+    source/can/dbc_parser.c
     source/net/tcp_server.c
     source/http/http.c
     source/http/http_logs.c

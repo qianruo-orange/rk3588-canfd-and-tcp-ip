@@ -45,6 +45,7 @@ struct app_config_t {
     int            video_width;
     int            video_height;
     int            http_port;   /* Web 管理端口（默认 80） */
+    char           dbc_path[256]; /* DBC 文件路径（空 = 不加载） */
 };
 
 int  config_load(struct app_config_t *cfg);

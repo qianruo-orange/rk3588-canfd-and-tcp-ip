@@ -21,6 +21,7 @@
 #include "core/config.h"
 #include "core/data_flow.h"
 #include "can/can_socket.h"
+#include "can/dbc_parser.h"
 #include "net/tcp_server.h"
 #include "http/http.h"
 #include "watchdog/watchdog.h"
@@ -80,6 +81,9 @@ static int signal_setup(void *arg)
 
 /* 文件级应用上下文（仅本文件直接访问；其他模块通过指针参数获得） */
 static app_ctx_t g_app;
+
+/* DBC 数据库（静态分配，约 190KB；仅本文件持有，其他模块经 g_app.dbc 访问） */
+static dbc_t g_dbc;
 
 static module_t g_modules[] = {
     /* can */
@@ -199,10 +203,20 @@ int main(void)
     g_app.can = &can_ctx;
     g_app.tcp = &tcp_ctx;
     g_app.cfg = &cfg;
+    g_app.dbc = &g_dbc;
 
     log_init(PATH_LOGS);
     config_load(&cfg);
     log_close(); log_init(cfg.log_dir);
+
+    /* 加载 DBC（可选）：失败不阻塞启动，仅记录日志 */
+    if (cfg.dbc_path[0]) {
+        if (dbc_load(&g_dbc, cfg.dbc_path) < 0)
+            log_error("dbc: load '%s' failed", cfg.dbc_path);
+        else
+            log_info("dbc: loaded '%s' (%d message(s), %d signal(s))",
+                     cfg.dbc_path, g_dbc.msg_count, g_dbc.sig_count);
+    }
 
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
     signal(SIGPIPE, SIG_IGN);

@@ -21,6 +21,7 @@
 #include "core/data_flow.h"
 #include "core/log.h"
 #include "can/can_socket.h"
+#include "can/dbc_parser.h"
 #include "net/tcp_server.h"
 
 /* ---- 默认发送原语 ---- */
@@ -129,9 +130,15 @@ int data_flow_decode_frame(const char *text, char *ifname, size_t ifname_size,
 static int default_on_can_rx(app_ctx_t *app, const char *ifname,
                              const struct canfd_frame *frame)
 {
-    (void)app; (void)ifname; (void)frame;
-    /* CAN 数据流独立：默认不转发到 TCP（帧内容已由 can_task 记录日志）。
-       业务可覆盖此钩子自行处理，如落盘、告警或转发到自定义通道。 */
+    /* 加载了 DBC 时，按报文定义解码信号并记录；否则仅保留原始帧日志 */
+    if (!app || !app->dbc || app->dbc->msg_count == 0) return 0;
+    int mi = dbc_find_message(app->dbc, frame->can_id);
+    if (mi < 0) return 0;
+
+    char text[FLOW_FRAME_TEXT_MAX];
+    int n = dbc_decode_message(app->dbc, mi, frame, text, sizeof(text));
+    if (n > 0)
+        log_info("CAN %s id=%X: %s", ifname, frame->can_id & CAN_EFF_MASK, text);
     return 0;
 }
 

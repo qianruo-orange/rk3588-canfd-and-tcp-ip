@@ -486,6 +486,13 @@ void *can_task(void *arg)
         watchdog_feed_self("can");
         for (int i = 0; i < nfds; i++) {
             uint32_t tag = events[i].data.u32;
+            if (tag == 0) {
+                /* TX eventfd：有帧压入 TX 队列，尽力排空所有接口 */
+                eventfd_consume(ctx->tx_efd);
+                for (int k = 0; k < ctx->count; k++)
+                    handle_can_output(app, k);
+                continue;
+            }
             if (tag < 1 || tag > (uint32_t)ctx->count) continue;
             int idx = (int)(tag - 1);
             uint32_t ev = events[i].events;
@@ -542,14 +549,32 @@ int can_init(void *arg)
     app_ctx_t *app = (app_ctx_t *)arg;
     gateway_args_t *args = &app->cfg->gw_args;
     can_ctx_t *ctx = app->can;
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->epfd  = -1;
+    ctx->rx_efd = -1;
+    ctx->tx_efd = -1;
     ctx->ifaces = args->can_ifaces;
     ctx->count  = args->can_count;
-    /* 发送队列清零 */
+    /* 收发队列清零 */
+    rxq_reset(&ctx->rxq);
     for (int i = 0; i < CAN_MAX_IFACES; i++)
         txq_reset(&ctx->txq[i]);
-    /* CAN 数据收发专用 epoll（EPOLLIN + 按需 EPOLLOUT，与 TCP 分开管理） */
+    pthread_mutex_init(&ctx->rx_mutex, NULL);
+    /* CAN 数据收发专用 epoll（socket + TX eventfd，与 TCP 分开管理） */
     ctx->epfd = epoll_create1(0);
     if (ctx->epfd < 0) { log_error("can: epoll_create1 failed"); return -1; }
+    /* RX/TX 两个 eventfd：跨线程唤醒，让 epoll 检测“有数据压入/弹出” */
+    ctx->rx_efd = eventfd(0, EFD_NONBLOCK);
+    ctx->tx_efd = eventfd(0, EFD_NONBLOCK);
+    if (ctx->rx_efd < 0 || ctx->tx_efd < 0) { log_error("can: eventfd failed"); return -1; }
+
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.u32 = 0;
+    if (epoll_ctl(ctx->epfd, EPOLL_CTL_ADD, ctx->tx_efd, &ev) < 0) {
+        log_error("can: epoll_ctl(tx_efd) failed"); return -1;
+    }
+
     for (int i = 0; i < args->can_count; i++) {
         can_iface_t *iface = &args->can_ifaces[i];
         if (can_socket_configure(iface->ifname, iface->bitrate, iface->dbitrate, iface->fd_mode, iface->restart_ms, iface->up) < 0) return -1;
@@ -559,6 +584,12 @@ int can_init(void *arg)
         for (int k = 0; k < iface->filter_count; k++)
             can_socket_set_filter(fd, iface->filters[k].id, iface->filters[k].mask);
     }
+
+    /* 独立 RX 消费线程：epoll 监听 rx_efd，弹出 RX 队列回调 on_can_rx */
+    if (pthread_create(&ctx->rx_tid, NULL, can_rx_consumer, app) != 0) {
+        log_error("can: create rx consumer thread failed"); return -1;
+    }
+
     log_info("%d CAN interface(s) initialized", args->can_count);
     for (int i = 0; i < args->can_count; i++)
         log_info("  CAN[%d]=%s filters=%d", i, args->can_ifaces[i].ifname, args->can_ifaces[i].filter_count);
@@ -570,7 +601,16 @@ void can_cleanup(void *arg)
     app_ctx_t *app = (app_ctx_t *)arg;
     can_ctx_t *ctx = app->can;
     if (!ctx) return;
+
+    /* 停止并回收 RX 消费线程 */
+    ctx->rx_stop = 1;
+    eventfd_signal(ctx->rx_efd);
+    if (ctx->rx_tid) pthread_join(ctx->rx_tid, NULL);
+
     for (int i = 0; i < ctx->count; i++)
         can_socket_close(ctx->ifaces[i].sock_fd);
+    if (ctx->rx_efd >= 0) close(ctx->rx_efd);
+    if (ctx->tx_efd >= 0) close(ctx->tx_efd);
     if (ctx->epfd >= 0) close(ctx->epfd);
+    pthread_mutex_destroy(&ctx->rx_mutex);
 }

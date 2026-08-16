@@ -4,17 +4,36 @@
 #include <pthread.h>
 #include "core/config.h"
 
-#define TCP_MAX_CLIENTS  32
-#define WBUF_SIZE        4096
+#define TCP_MAX_CLIENTS   32
+#define WBUF_SIZE         4096
+#define TCP_QUEUE_DEPTH   256
+
+/* ---- TCP 数据包（RX / TX 队列共用条目） ----
+ * client_idx：RX 表示来源客户端，TX 表示目标客户端。 */
+typedef struct {
+    int    client_idx;
+    size_t len;
+    char   data[WBUF_SIZE];
+} tcp_pkt_t;
+
+typedef struct {
+    tcp_pkt_t items[TCP_QUEUE_DEPTH];
+    int head;
+    int tail;
+    int count;
+} tcp_queue_t;
 
 /* ---- TCP 客户端状态 ---- */
 typedef struct {
     int  fd;
-    char wbuf[WBUF_SIZE];
+    char wbuf[WBUF_SIZE];   /* 单客户端正在发送的部分写缓冲 */
     int  wlen;
 } client_t;
 
-/* ---- TCP 子系统上下文 ---- */
+/* ---- TCP 子系统上下文 ----
+ * RX 队列：tcp_task 从客户端读到数据后压入，独立消费线程弹出并回调 on_tcp_rx。
+ * TX 队列：业务线程压入待发送包，tcp_task 弹出并写客户端 socket。
+ * 两侧都用 eventfd 唤醒，epoll 检测“有数据压入 / 弹出”。 */
 typedef struct tcp_ctx {
     int           listen_fd;
     int           port;
@@ -22,12 +41,22 @@ typedef struct tcp_ctx {
     client_t      clients[TCP_MAX_CLIENTS];
     int           client_count;
     pthread_mutex_t client_mutex;
-    int           epfd;   /* TCP 数据收发专用 epoll */
+    int           epfd;      /* TCP 数据收发 epoll（tcp_task 线程） */
+
+    pthread_mutex_t rx_mutex;
+    tcp_queue_t     rxq;
+    int             rx_efd;
+    volatile sig_atomic_t rx_stop;
+    pthread_t       rx_tid;
+
+    pthread_mutex_t tx_mutex;
+    tcp_queue_t     txq;
+    int             tx_efd;
 } tcp_ctx_t;
 
-/* TCP 收发接口预留：统一收发入口，供后续业务逻辑复用 */
-ssize_t tcp_recv_data(int fd, void *buf, size_t len, int timeout_ms);
-ssize_t tcp_send_data(int fd, const void *buf, size_t len, int timeout_ms);
+/* 异步发送数据到客户端：压入 TX 队列，写 eventfd 唤醒 tcp_task。
+ * client_idx < 0 表示广播所有已连接客户端。返回 0 成功，-1 失败。 */
+int tcp_tx_packet(tcp_ctx_t *ctx, int client_idx, const void *buf, size_t len);
 
 int tcp_listen(int port);
 int tcp_accept(int listen_fd);
@@ -36,7 +65,7 @@ int tcp_accept(int listen_fd);
 int  tcp_init(void *arg);
 void tcp_cleanup(void *ctx);
 
-/* TCP 数据收发线程（独立 epoll 管理 listen + 客户端读写） */
+/* TCP 数据收发线程（独立 epoll 管理 listen + 客户端读写 + TX eventfd） */
 void *tcp_task(void *arg);
 
 /* 客户端管理 */

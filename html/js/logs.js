@@ -14,14 +14,21 @@
       var data = await (await fetch('/api/logs')).json();
       var logs = data.logs || [];
       if (logs.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4">暂无日志文件</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5">暂无日志文件</td></tr>';
         return;
       }
       logs.forEach(function(f) {
+        var slash = f.name.indexOf('/');
+        var date = slash >= 0 ? f.name.slice(0, slash) : '';
+        var file = slash >= 0 ? f.name.slice(slash + 1) : f.name;
+
         var tr = document.createElement('tr');
 
+        var tdDate = document.createElement('td');
+        tdDate.textContent = date;
+
         var tdName = document.createElement('td');
-        tdName.textContent = f.name;
+        tdName.textContent = file;
 
         var tdSize = document.createElement('td');
         tdSize.textContent = fmtSize(f.size);
@@ -44,6 +51,7 @@
         tdOp.appendChild(dl);
         tdOp.appendChild(del);
 
+        tr.appendChild(tdDate);
         tr.appendChild(tdName);
         tr.appendChild(tdSize);
         tr.appendChild(tdTime);

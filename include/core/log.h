@@ -5,8 +5,9 @@
  * 初始化日志系统。
  * @param dir  日志目录路径
  *
- * info/error 分别写入按天命名的文件：
- *   socketcan_info_YYYYMMDD.log  /  socketcan_error_YYYYMMDD.log
+ * info/error 分别写入按天命名的文件，存放在按日期建立的二级目录下：
+ *   dir/YYYYMMDD/socketcan_info_YYYYMMDD.log
+ *   dir/YYYYMMDD/socketcan_error_YYYYMMDD.log
  */
 void log_init(const char *dir);
 

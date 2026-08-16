@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <errno.h>
+#include <ctype.h>
 /**
  * http_logs.c — 日志管理路由（列表 / 下载 / 删除 / 打包）。
  */
@@ -25,6 +26,43 @@ static int logs_wait_fd(int fd, uint32_t events, int timeout_ms)
     int r = epoll_wait(epfd, &out, 1, timeout_ms);
     close(epfd);
     return r;
+}
+
+/* URL 解码：前端用 encodeURIComponent 会把 '/' 编码为 %2F，这里还原 */
+static void url_decode(const char *src, char *dst, size_t dst_size)
+{
+    size_t i = 0, o = 0;
+    while (src[i] && o + 1 < dst_size) {
+        if (src[i] == '%' &&
+            isxdigit((unsigned char)src[i+1]) &&
+            isxdigit((unsigned char)src[i+2])) {
+            int hi = isdigit((unsigned char)src[i+1]) ? src[i+1] - '0'
+                                                      : (tolower((unsigned char)src[i+1]) - 'a' + 10);
+            int lo = isdigit((unsigned char)src[i+2]) ? src[i+2] - '0'
+                                                      : (tolower((unsigned char)src[i+2]) - 'a' + 10);
+            dst[o++] = (char)((hi << 4) | lo);
+            i += 3;
+        } else {
+            dst[o++] = src[i++];
+        }
+    }
+    dst[o] = '\0';
+}
+
+/* 解析日志相对路径，要求为 YYYYMMDD/filename 形式且不含 '..' */
+static int logs_resolve_rel(const char *rel, char *subdir, size_t subdir_size,
+                            char *name, size_t name_size)
+{
+    if (!rel || !*rel || strstr(rel, "..")) return -1;
+    const char *slash = strchr(rel, '/');
+    if (!slash || strchr(slash + 1, '/')) return -1;  /* 只允许一个 '/' */
+    size_t dlen = (size_t)(slash - rel);
+    if (dlen == 0 || dlen >= subdir_size) return -1;
+    memcpy(subdir, rel, dlen);
+    subdir[dlen] = '\0';
+    safe_strncpy(name, name_size, slash + 1);
+    if (!*name) return -1;
+    return 0;
 }
 
 /* 将数据完整写入非阻塞 socket（处理 EAGAIN/EWOULDBLOCK 与部分写入） */
@@ -65,22 +103,35 @@ static void serve_log_list_json(int fd)
     while ((de = readdir(dir)) != NULL) {
         if (de->d_name[0] == '.') continue;
 
-        char path[512];
-        snprintf(path, sizeof(path), "%s/%s", LOG_DIR, de->d_name);
-        struct stat st;
-        if (stat(path, &st) < 0) continue;
-        if (!S_ISREG(st.st_mode)) continue;
+        char subdir[512];
+        snprintf(subdir, sizeof(subdir), "%s/%s", LOG_DIR, de->d_name);
+        struct stat dst;
+        if (stat(subdir, &dst) < 0 || !S_ISDIR(dst.st_mode)) continue;
 
-        char time_str[32];
-        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M",
-                 localtime(&st.st_mtime));
+        DIR *sd = opendir(subdir);
+        if (!sd) continue;
+        struct dirent *fde;
+        while ((fde = readdir(sd)) != NULL) {
+            if (fde->d_name[0] == '.') continue;
 
-        int n = snprintf(json + off, sizeof(json) - off,
-            "%s{\"name\":\"%s\",\"size\":%lld,\"mtime\":\"%s\"}",
-            first ? "" : ",", de->d_name, (long long)st.st_size, time_str);
-        if (n < 0 || n >= (int)(sizeof(json) - off)) break;
-        off += n;
-        first = 0;
+            char path[512];
+            snprintf(path, sizeof(path), "%s/%s", subdir, fde->d_name);
+            struct stat st;
+            if (stat(path, &st) < 0 || !S_ISREG(st.st_mode)) continue;
+
+            char time_str[32];
+            strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M",
+                     localtime(&st.st_mtime));
+
+            int n = snprintf(json + off, sizeof(json) - off,
+                "%s{\"name\":\"%s/%s\",\"size\":%lld,\"mtime\":\"%s\"}",
+                first ? "" : ",", de->d_name, fde->d_name,
+                (long long)st.st_size, time_str);
+            if (n < 0 || n >= (int)(sizeof(json) - off)) break;
+            off += n;
+            first = 0;
+        }
+        closedir(sd);
     }
     closedir(dir);
 
@@ -89,18 +140,19 @@ static void serve_log_list_json(int fd)
 }
 
 /* 下载单个日志文件 */
-static void serve_log_download(int fd, const char *filename)
+static void serve_log_download(int fd, const char *rel)
 {
-    if (strstr(filename, "..") || strchr(filename, '/')) {
-        http_handle_404(fd, filename);
+    char subdir[64], name[256];
+    if (logs_resolve_rel(rel, subdir, sizeof(subdir), name, sizeof(name)) != 0) {
+        http_handle_404(fd, rel);
         return;
     }
 
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s", LOG_DIR, filename);
+    snprintf(path, sizeof(path), "%s/%s/%s", LOG_DIR, subdir, name);
 
     FILE *fp = fopen(path, "rb");
-    if (!fp) { http_handle_404(fd, filename); return; }
+    if (!fp) { http_handle_404(fd, rel); return; }
 
     fseek(fp, 0, SEEK_END);
     size_t size = (size_t)ftell(fp);
@@ -113,7 +165,7 @@ static void serve_log_download(int fd, const char *filename)
         "Content-Disposition: attachment; filename=\"%s\"\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n\r\n",
-        filename, size);
+        name, size);
     if (http_write_all(fd, header, (size_t)off) < 0) { fclose(fp); return; }
 
     char buf[4096];
@@ -129,14 +181,15 @@ static void serve_log_download(int fd, const char *filename)
 }
 
 /* 删除日志文件 */
-static void serve_log_delete(int fd, const char *filename)
+static void serve_log_delete(int fd, const char *rel)
 {
-    if (strstr(filename, "..") || strchr(filename, '/')) {
+    char subdir[64], name[256];
+    if (logs_resolve_rel(rel, subdir, sizeof(subdir), name, sizeof(name)) != 0) {
         http_send_response(fd, 400, "Bad Request", "text/plain", "", 0);
         return;
     }
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s", LOG_DIR, filename);
+    snprintf(path, sizeof(path), "%s/%s/%s", LOG_DIR, subdir, name);
     if (unlink(path) == 0)
         http_send_response(fd, 200, "OK", "text/plain", "ok", 2);
     else
@@ -186,9 +239,11 @@ void http_logs_handler(app_ctx_t *app, int fd, const char *method, const char *u
     else if (strcmp(uri, "/logs/pack") == 0)
         serve_log_pack(fd);
     else if (strncmp(uri, "/logfile/", 9) == 0) {
+        char rel[512];
+        url_decode(uri + 9, rel, sizeof(rel));
         if (strcmp(method, "DELETE") == 0)
-            serve_log_delete(fd, uri + 9);
+            serve_log_delete(fd, rel);
         else
-            serve_log_download(fd, uri + 9);
+            serve_log_download(fd, rel);
     }
 }

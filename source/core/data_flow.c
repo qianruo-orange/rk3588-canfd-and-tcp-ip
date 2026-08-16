@@ -54,22 +54,11 @@ static ssize_t default_tx_can(app_ctx_t *app, const char *ifname,
 static ssize_t default_tx_tcp(app_ctx_t *app, int client_idx,
                               const void *buf, size_t len, int timeout_ms)
 {
+    (void)timeout_ms; /* 异步入队发送，无需阻塞超时 */
     if (!app || !app->tcp || !buf || len == 0) { errno = EINVAL; return -1; }
-    tcp_ctx_t *tcp = app->tcp;
-    ssize_t total = 0;
-    pthread_mutex_lock(&tcp->client_mutex);
-    if (client_idx < 0) {
-        /* 广播所有已连接客户端 */
-        for (int i = 0; i < tcp->client_count; i++) {
-            if (tcp->clients[i].fd < 0) continue;
-            ssize_t r = tcp_send_data(tcp->clients[i].fd, buf, len, timeout_ms);
-            if (r > 0) total += r;
-        }
-    } else if (client_idx < tcp->client_count && tcp->clients[client_idx].fd >= 0) {
-        total = tcp_send_data(tcp->clients[client_idx].fd, buf, len, timeout_ms);
-    }
-    pthread_mutex_unlock(&tcp->client_mutex);
-    return total;
+    /* 走 TCP 常驻 epoll 的 TX 队列：压入队列后由 tcp_task 按 eventfd 唤醒发送 */
+    int r = tcp_tx_packet(app->tcp, client_idx, buf, len);
+    return r < 0 ? -1 : (ssize_t)r;
 }
 
 /* ---- 帧文本编解码 ---- */

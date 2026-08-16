@@ -2,7 +2,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
-#include <poll.h>
+#include <sys/epoll.h>
 #include <errno.h>
 /**
  * http_logs.c — 日志管理路由（列表 / 下载 / 删除 / 打包）。
@@ -14,6 +14,19 @@
 #define LOG_DIR PATH_LOGS
 #define LOG_PACK_MAX (100UL * 1024 * 1024)  /* 日志打包体积上限 100MB，防止长时间阻塞 HTTP */
 
+/* 用 epoll 实现单 fd 带超时的事件等待（可读/可写），替代 poll */
+static int logs_wait_fd(int fd, uint32_t events, int timeout_ms)
+{
+    int epfd = epoll_create1(0);
+    if (epfd < 0) return -1;
+    struct epoll_event ev = { .events = events, .data.fd = fd };
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) { close(epfd); return -1; }
+    struct epoll_event out;
+    int r = epoll_wait(epfd, &out, 1, timeout_ms);
+    close(epfd);
+    return r;
+}
+
 /* 将数据完整写入非阻塞 socket（处理 EAGAIN/EWOULDBLOCK 与部分写入） */
 static int http_write_all(int fd, const void *data, size_t len)
 {
@@ -24,8 +37,7 @@ static int http_write_all(int fd, const void *data, size_t len)
         if (w > 0) { off += (size_t)w; continue; }
         if (w < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-                if (poll(&pfd, 1, 1000) <= 0) return -1;
+                if (logs_wait_fd(fd, EPOLLOUT, 1000) <= 0) return -1;
                 continue;
             }
             if (errno == EINTR) continue;

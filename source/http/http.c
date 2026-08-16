@@ -12,7 +12,6 @@
 #include <time.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
-#include <poll.h>
 #include <unistd.h>
 #include <shadow.h>
 #include <crypt.h>
@@ -295,6 +294,25 @@ void http_serve_file(int fd, const char *uri)
 /* ---- 每连接处理线程 ---- */
 
 /**
+ * http_wait_fd - 用 epoll 实现单 fd 带超时的事件等待（可读/可写），替代 poll。
+ * @fd: 目标描述符。
+ * @events: 关注的事件（EPOLLIN / EPOLLOUT）。
+ * @timeout_ms: 超时毫秒数。
+ * @return: 就绪事件数（1 表示就绪，0 表示超时，-1 表示错误）。
+ */
+static int http_wait_fd(int fd, uint32_t events, int timeout_ms)
+{
+    int epfd = epoll_create1(0);
+    if (epfd < 0) return -1;
+    struct epoll_event ev = { .events = events, .data.fd = fd };
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) { close(epfd); return -1; }
+    struct epoll_event out;
+    int r = epoll_wait(epfd, &out, 1, timeout_ms);
+    close(epfd);
+    return r;
+}
+
+/**
  * client_handler - 处理单个 HTTP 客户端连接，解析请求并分发到对应 API 或静态文件逻辑。
  * @app: 应用上下文。
  * @fd: 客户端连接描述符。
@@ -315,10 +333,9 @@ static void *client_handler(app_ctx_t *app, int fd)
     buf[n] = '\0';
 
     /* 持续读取直到收到完整请求（\r\n\r\n 或超时） */
-    struct pollfd pfd = { .fd = fd, .events = POLLIN };
     int tries = 0;
     while (!strstr(buf, "\r\n\r\n") && !strstr(buf, "\n\n") && tries < 5) {
-        if (poll(&pfd, 1, 100) <= 0) break;
+        if (http_wait_fd(fd, EPOLLIN, 100) <= 0) break;
         ssize_t r = read(fd, buf + n, sizeof(buf) - 1 - n);
         if (r <= 0) break;
         n += r; if (n >= (ssize_t)sizeof(buf)-1) n = (ssize_t)sizeof(buf)-1; buf[n] = '\0'; tries++;
@@ -344,8 +361,7 @@ static void *client_handler(app_ctx_t *app, int fd)
     int hdr_len = sep ? (int)(sep - buf) + (sep[0] == '\r' ? 4 : 2) : 0;
     int body_read = (n > hdr_len && hdr_len > 0) ? (int)(n - hdr_len) : 0;
     for (int t = 0; body_read < cl && t < 10; t++) {
-        struct pollfd pfd2 = { .fd = fd, .events = POLLIN };
-        if (poll(&pfd2, 1, 100) <= 0) break;
+        if (http_wait_fd(fd, EPOLLIN, 100) <= 0) break;
         size_t avail = sizeof(buf) - 1 - (size_t)n;
         if (avail == 0) break;
         ssize_t r = read(fd, buf + n, avail);

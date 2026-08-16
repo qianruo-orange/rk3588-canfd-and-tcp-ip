@@ -10,7 +10,7 @@
 #include <sys/types.h>
 #include <errno.h>
 #include <linux/videodev2.h>
-#include <poll.h>
+#include <sys/epoll.h>
 #include <pthread.h>
 #include "video/video_stream.h"
 #include "core/log.h"
@@ -245,20 +245,35 @@ void *video_stream_task(void *arg)
         }
         failed_before = 0;
 
-        struct pollfd pfd = { .fd = vs->fd, .events = POLLIN | POLLERR };
+        int epfd = epoll_create1(0);
+        if (epfd < 0) {
+            log_error("video_stream: epoll_create1 failed");
+            deinit_video_device(vs);
+            __atomic_store_n(&vs->restart_req, 0, __ATOMIC_RELEASE);
+            continue;
+        }
+        struct epoll_event vev = { .events = EPOLLIN | EPOLLERR, .data.fd = vs->fd };
+        if (epoll_ctl(epfd, EPOLL_CTL_ADD, vs->fd, &vev) < 0) {
+            log_error("video_stream: epoll_ctl add device failed");
+            close(epfd);
+            deinit_video_device(vs);
+            __atomic_store_n(&vs->restart_req, 0, __ATOMIC_RELEASE);
+            continue;
+        }
         log_info("video_stream: capturing from %s", vs->device);
 
         while (vs->app->running && !__atomic_load_n(&vs->restart_req, __ATOMIC_ACQUIRE)) {
-            int ret = poll(&pfd, 1, 500);
+            struct epoll_event out;
+            int ret = epoll_wait(epfd, &out, 1, 500);
             if (ret < 0) {
                 if (errno == EINTR) { watchdog_feed_self("video"); continue; }
-                log_error("video_stream: poll failed");
+                log_error("video_stream: epoll_wait failed");
                 break;
             }
             /* 无论是否有帧都保持喂狗：相机空闲/无数据时线程仍存活，避免误判卡死 */
             watchdog_feed_self("video");
             if (ret == 0) continue;
-            if (!(pfd.revents & POLLIN)) continue;
+            if (!(out.events & EPOLLIN)) continue;
 
             struct v4l2_buffer buf = {0};
             buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -295,6 +310,7 @@ void *video_stream_task(void *arg)
             }
         }
 
+        close(epfd);
         deinit_video_device(vs);
         __atomic_store_n(&vs->restart_req, 0, __ATOMIC_RELEASE);
     }

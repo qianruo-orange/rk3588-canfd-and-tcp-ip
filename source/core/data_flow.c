@@ -44,19 +44,11 @@ static pthread_mutex_t g_decode_mutex = PTHREAD_MUTEX_INITIALIZER;
 static ssize_t default_tx_can(app_ctx_t *app, const char *ifname,
                               const struct canfd_frame *frame, int timeout_ms)
 {
+    (void)timeout_ms; /* 异步入队发送，无需阻塞超时 */
     if (!app || !app->can || !ifname || !frame) { errno = EINVAL; return -1; }
-    can_ctx_t *can = app->can;
-    for (int i = 0; i < can->count; i++) {
-        if (strcmp(can->ifaces[i].ifname, ifname) != 0) continue;
-        /* CAN 域发送原语：供业务经虚函数 tx_can 调用；
-           发送失败由返回值体现，调用方自行重试 */
-        int fd = can->ifaces[i].sock_fd;
-        if (fd < 0) { errno = ENODEV; return -1; }
-        return can_send_frame(fd, frame, timeout_ms);
-    }
-    log_error("tx_can: unknown interface '%s'", ifname);
-    errno = ENODEV;
-    return -1;
+    /* 走 CAN 常驻 epoll 的收发队列：立即可写直接发送，否则入队由 can_task 发送 */
+    int r = can_tx_frame(app, ifname, frame);
+    return r < 0 ? -1 : (ssize_t)r;
 }
 
 static ssize_t default_tx_tcp(app_ctx_t *app, int client_idx,

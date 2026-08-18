@@ -2,7 +2,7 @@
  * http.c — HTTP 核心：主循环、路由分发、认证、静态文件服务、工具函数。
  */
 
-#define _GNU_SOURCE   /* 暴露 SO_REUSEPORT 等 GNU/Linux 扩展 */
+#define _GNU_SOURCE   /* 暴露 GNU/Linux 扩展 */
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -463,10 +463,6 @@ void *http_server_task(void *arg)
 
     g_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (g_listen_fd < 0) { log_error("http socket"); return NULL; }
-
-    int opt = 1;
-    setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 
     if (set_socket_nonblocking(g_listen_fd) < 0) {
         log_error("http set nonblocking");

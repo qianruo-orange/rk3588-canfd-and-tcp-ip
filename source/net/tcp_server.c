@@ -1,4 +1,4 @@
-#define _GNU_SOURCE   /* 暴露 SO_REUSEPORT / MSG_NOSIGNAL / eventfd 等 Linux 扩展 */
+#define _GNU_SOURCE   /* 暴露 MSG_NOSIGNAL / eventfd 等 Linux 扩展 */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,17 +26,6 @@ int tcp_listen(int port)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { log_error("tcp socket"); return -1; }
-    int optval = 1;
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
-        log_error("tcp setsockopt SO_REUSEADDR: %s", strerror(errno));
-        close(fd);
-        return -1;
-    }
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval)) < 0) {
-        log_error("tcp setsockopt SO_REUSEPORT: %s", strerror(errno));
-        close(fd);
-        return -1;
-    }
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;

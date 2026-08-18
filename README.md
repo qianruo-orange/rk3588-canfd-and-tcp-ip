@@ -89,9 +89,8 @@ rk3588-canfd-and-tcp-ip-communication/
 ├── rk3588-canfd-and-tcp-ip-communication.service  # systemd 服务单元
 ├── include/                          # 头文件
 │   ├── core/
-│   │   ├── common.h                  # 应用上下文与数据流虚接口
+│   │   ├── common.h                  # 应用上下文
 │   │   ├── config.h                  # 配置结构
-│   │   ├── data_flow.h               # 数据流钩子
 │   │   ├── log.h                     # 日志接口
 │   │   ├── queue.h                   # 内存池队列
 │   │   └── version.h                 # 版本（CMake 生成）
@@ -102,7 +101,8 @@ rk3588-canfd-and-tcp-ip-communication/
 │   │   └── tcp_server.h              # TCP 服务接口
 │   ├── http/
 │   │   ├── http.h                    # HTTP 服务接口
-│   │   └── http_internal.h           # HTTP 内部定义
+│   │   ├── http_internal.h           # HTTP 内部定义
+│   │   └── http_api_dbc.h              # DBC 解码结果 HTTP 展示
 │   ├── video/
 │   │   └── video_stream.h            # V4L2 视频流接口
 │   └── watchdog/
@@ -111,7 +111,6 @@ rk3588-canfd-and-tcp-ip-communication/
 │   ├── core/
 │   │   ├── main.c                    # 入口、模块总表、线程编排
 │   │   ├── config.c                  # 配置读写
-│   │   ├── data_flow.c               # 数据流默认实现与 DBC 解码缓存
 │   │   ├── log.c                     # 日志实现
 │   │   ├── queue.c                   # 内存池队列实现
 │   │   └── version.c                 # 版本
@@ -123,6 +122,7 @@ rk3588-canfd-and-tcp-ip-communication/
 │   ├── http/
 │   │   ├── http.c                    # HTTP 路由与静态文件
 │   │   ├── http_api_can.c            # CAN 相关 API
+│   │   ├── http_api_dbc.c              # DBC 解码结果 HTTP 展示
 │   │   ├── http_api_config.c         # 配置 API
 │   │   ├── http_api_network.c        # 网络 API
 │   │   ├── http_api_system.c         # 系统 API

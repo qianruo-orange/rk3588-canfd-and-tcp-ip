@@ -3,7 +3,9 @@
  */
 
 #include <ctype.h>
+#include <stdint.h>
 #include <linux/if.h>
+#include <linux/can.h>
 #include <netlink/netlink.h>
 #include <netlink/socket.h>
 #include <netlink/route/link.h>
@@ -11,17 +13,8 @@
 #include <linux/can/netlink.h>
 
 #include "http/http_internal.h"
-#include "core/data_flow.h"
+#include "http/http_api_can.h"
 #include "can/can_socket.h"
-
-void http_can_decoded(app_ctx_t *app, int fd)
-{
-    (void)app;
-    char json[8192];
-    int n = data_flow_recent_decoded_json(json, sizeof(json));
-    if (n < 0) n = 0;
-    http_send_response(fd, 200, "OK", "application/json", json, (size_t)n);
-}
 
 void http_can_status(app_ctx_t *app, int fd)
 {
@@ -239,5 +232,146 @@ void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char 
     snprintf(msg, sizeof(msg),
              "{\"result\":\"ok\",\"ifname\":\"%s\",\"messages\":%d,\"signals\":%d}",
              ifname, msg_count, sig_count);
+    http_send_response(fd, 200, "OK", "application/json", msg, strlen(msg));
+}
+
+/* ---- CAN 原始报文收发接口 ---- */
+
+#define CAN_RX_RING_MAX 32
+
+typedef struct {
+    char               ifname[16];
+    struct canfd_frame frame;
+} can_rx_entry_t;
+
+static can_rx_entry_t  g_can_rx_ring[CAN_RX_RING_MAX];
+static _Atomic int     g_can_rx_count = 0;
+static pthread_mutex_t g_can_rx_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void http_can_record_rx(const char *ifname, const struct canfd_frame *frame)
+{
+    if (!ifname || !frame) return;
+    pthread_mutex_lock(&g_can_rx_mutex);
+    int pos = (int)(__atomic_fetch_add(&g_can_rx_count, 1, __ATOMIC_RELAXED) % CAN_RX_RING_MAX);
+    can_rx_entry_t *e = &g_can_rx_ring[pos];
+    safe_strncpy(e->ifname, sizeof(e->ifname), ifname);
+    e->frame = *frame;
+    pthread_mutex_unlock(&g_can_rx_mutex);
+}
+
+/* 单帧序列化为 JSON 对象；返回写入字节数 */
+static int can_rx_frame_json(const can_rx_entry_t *e, char *out, size_t out_size)
+{
+    const struct canfd_frame *f = &e->frame;
+    int off = snprintf(out, out_size,
+                       "{\"ifname\":\"%s\",\"id\":\"0x%X\",\"len\":%u,\"data\":\"",
+                       e->ifname, f->can_id & CAN_EFF_MASK, (unsigned)f->len);
+    if (off < 0) return -1;
+
+    for (unsigned i = 0; i < f->len; i++) {
+        if ((size_t)off + 3 >= out_size) { off = (int)out_size - 1; break; }
+        int n = snprintf(out + off, out_size - (size_t)off, "%02X", f->data[i]);
+        if (n < 0) return -1;
+        off += n;
+    }
+
+    if ((size_t)off + 32 < out_size) {
+        off += snprintf(out + off, out_size - (size_t)off,
+                        "\",\"flags\":\"%s%s%s\"}",
+                        (f->can_id & CAN_EFF_FLAG) ? "EFF" : "SFF",
+                        (f->len > 8) ? " FD" : "",
+                        (f->can_id & CAN_RTR_FLAG) ? " RTR" : "");
+    }
+    return off;
+}
+
+void http_can_rx(app_ctx_t *app, int fd)
+{
+    (void)app;
+    char json[16384];
+    int total = __atomic_load_n(&g_can_rx_count, __ATOMIC_RELAXED);
+    int count = total > CAN_RX_RING_MAX ? CAN_RX_RING_MAX : total;
+    int off = snprintf(json, sizeof(json), "[");
+
+    pthread_mutex_lock(&g_can_rx_mutex);
+    for (int i = 0; i < count; i++) {
+        int pos = (total - 1 - i) % CAN_RX_RING_MAX;   /* 最新在前 */
+        if (i > 0 && (size_t)off < sizeof(json) - 1) json[off++] = ',';
+        int n = can_rx_frame_json(&g_can_rx_ring[pos], json + off, sizeof(json) - (size_t)off);
+        if (n < 0 || (size_t)n >= (int)(sizeof(json) - (size_t)off)) { off = (int)sizeof(json) - 1; break; }
+        off += n;
+    }
+    pthread_mutex_unlock(&g_can_rx_mutex);
+
+    if ((size_t)off < sizeof(json) - 1) json[off++] = ']';
+    http_send_response(fd, 200, "OK", "application/json", json, (size_t)off);
+}
+
+/* 发送 CAN 报文：POST /api/can/send，body 形如 ifname=can0&id=0x123&data=01 02 03 */
+void http_can_send(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body)
+{
+    (void)method; (void)uri;
+    if (!app || !body) { http_send_response(fd, 400, "Bad Request", "text/plain", "", 0); return; }
+
+    char ifname[32] = {0}, idstr[32] = {0}, datastr[512] = {0};
+    url_get_param(body, "ifname=", ifname, sizeof(ifname));
+    url_get_param(body, "id=", idstr, sizeof(idstr));
+    url_get_param(body, "data=", datastr, sizeof(datastr));
+
+    if (!ifname_valid(ifname)) {
+        http_send_response(fd, 400, "Bad Request", "text/plain", "bad ifname", 10);
+        return;
+    }
+    if (!idstr[0]) {
+        http_send_response(fd, 400, "Bad Request", "text/plain", "bad id", 6);
+        return;
+    }
+
+    char *end = NULL;
+    unsigned long id = strtoul(idstr, &end, 0);   /* base=0：支持 0x 前缀十六进制与十进制 */
+    if (!end || *end != '\0' || id > 0x1FFFFFFFUL) {
+        http_send_response(fd, 400, "Bad Request", "text/plain", "bad id", 6);
+        return;
+    }
+
+    /* 解析 data 十六进制串：空格/逗号/连字符作为分隔符，允许省略分隔符的连续 hex */
+    uint8_t data[64];
+    int len = 0, hi = -1;
+    for (const char *p = datastr; *p; p++) {
+        if (*p == ' ' || *p == ',' || *p == '-') continue;
+        int v;
+        if (*p >= '0' && *p <= '9') v = *p - '0';
+        else if (*p >= 'a' && *p <= 'f') v = *p - 'a' + 10;
+        else if (*p >= 'A' && *p <= 'F') v = *p - 'A' + 10;
+        else { len = -1; break; }
+        if (hi < 0) hi = v;
+        else {
+            if (len >= 64) { len = -1; break; }
+            data[len++] = (uint8_t)((hi << 4) | v);
+            hi = -1;
+        }
+    }
+    if (len < 0 || hi >= 0) {   /* 非法字符 / 奇数个 hex 字符 / 超长 */
+        http_send_response(fd, 400, "Bad Request", "text/plain", "bad data", 8);
+        return;
+    }
+
+    struct canfd_frame frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.can_id = (canid_t)id;
+    if (id > CAN_SFF_MASK) frame.can_id |= CAN_EFF_FLAG;
+    frame.len = (uint8_t)len;
+    memcpy(frame.data, data, (size_t)len);
+
+    int rc = can_tx_frame(app, ifname, &frame);
+    if (rc < 0) {
+        http_send_response(fd, 502, "Bad Gateway", "application/json",
+                           "{\"result\":\"error\"}", 17);
+        return;
+    }
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "{\"result\":\"%s\",\"bytes\":%d}",
+             rc == 0 ? "queued" : "sent", rc);
     http_send_response(fd, 200, "OK", "application/json", msg, strlen(msg));
 }

@@ -55,6 +55,16 @@ static void http_can_decoded_wrap(app_ctx_t *app, int fd, const char *method, co
 static void http_can_dbc_upload_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { http_can_dbc_upload(app, fd, method, uri, req); }
 
 /**
+ * http_can_send_wrap - 包装 CAN 报文发送接口，保留 body 供解析。
+ */
+static void http_can_send_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { http_can_send(app, fd, method, uri, req); }
+
+/**
+ * http_can_rx_wrap - 包装 CAN 原始报文查询接口。
+ */
+static void http_can_rx_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_rx(app, fd); }
+
+/**
  * http_reboot_wrap - 包装重启接口，执行系统级重启动作。
  */
 static void http_reboot_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_reboot(app, fd); }
@@ -412,6 +422,8 @@ static void *client_handler(app_ctx_t *app, int fd)
         { "/api/can",       0, NULL,   http_can_status_wrap,   NULL },
         { "/api/can/decoded",0,NULL,   http_can_decoded_wrap,  NULL },
         { "/api/can/dbc",    0, "POST", http_can_dbc_upload_wrap, http_check_auth_root },
+        { "/api/can/send",   0, "POST", http_can_send_wrap,   http_check_auth_root },
+        { "/api/can/frames", 0, NULL,   http_can_rx_wrap,     NULL },
         { "/api/can/toggle",0, NULL,   http_can_toggle_wrap,   http_check_auth_root },
         { "/api/config",    0, "POST", http_config_post,  http_check_auth_root },
         { "/api/config",    0, NULL,   http_config_get,   http_check_auth_root },

@@ -14,7 +14,6 @@
 #include <arpa/inet.h>
 #include "net/tcp_server.h"
 #include "core/common.h"
-#include "core/data_flow.h"
 #include "core/log.h"
 #include "watchdog/watchdog.h"
 
@@ -149,8 +148,8 @@ int tcp_tx_packet(tcp_ctx_t *ctx, int client_idx, const void *buf, size_t len)
     return pushed > 0 ? 0 : -1;
 }
 
-/* 读取单个客户端数据并直接回调处理；返回 1 表示客户端已断开 */
-static int handle_tcp_input(app_ctx_t *app, tcp_ctx_t *ctx, int client_idx)
+/* 读取单个客户端数据并丢弃（不再转发到 CAN）；返回 1 表示客户端已断开 */
+static int handle_tcp_input(tcp_ctx_t *ctx, int client_idx)
 {
     char buf[WBUF_SIZE];
 
@@ -166,11 +165,6 @@ static int handle_tcp_input(app_ctx_t *app, tcp_ctx_t *ctx, int client_idx)
 
     if (n == 0) return 1;                                   /* 对端正常关闭 */
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return 1;
-    if (n > 0) {
-        /* 直接在 tcp_task 线程中回调，不再使用 RX 队列 */
-        if (app->flow && app->flow->on_tcp_rx)
-            app->flow->on_tcp_rx(app, client_idx, buf, (size_t)n);
-    }
     return 0;
 }
 
@@ -278,7 +272,7 @@ void *tcp_task(void *arg)
             uint32_t e = events[i].events;
             int dead = 0;
             if (e & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR))
-                dead = handle_tcp_input(app, ctx, client_idx);
+                dead = handle_tcp_input(ctx, client_idx);
             if (!dead && (e & EPOLLOUT))
                 tcp_flush_tx(ctx);
             if (dead) tcp_client_del(ctx, client_idx);

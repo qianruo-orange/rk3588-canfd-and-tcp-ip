@@ -15,6 +15,7 @@
 
 #include "can/dbc_parser.h"
 #include "core/common.h"   /* safe_strncpy */
+#include "core/log.h"
 
 /* ---- 位提取 ---- */
 
@@ -246,4 +247,39 @@ int dbc_decode_message(const dbc_t *dbc, int msg_idx,
         off += n;
     }
     return off;
+}
+
+int dbc_decode_frame(struct app_ctx *app, int can_idx, const char *ifname,
+                     const struct canfd_frame *frame,
+                     canid_t *id_out, char *name_out, size_t name_size,
+                     char *text_out, size_t text_size)
+{
+    if (!app || !app->dbcs || !frame || can_idx < 0) return -1;
+
+    canid_t can_id = frame->can_id & CAN_EFF_MASK;
+    char name[DBC_MAX_NAME_LEN];
+    char text[DBC_DECODE_TEXT_MAX];
+    int mi = -1;
+
+    /* dbc_mutex 保护 dbcs[can_idx]：上传/重载与解码互斥 */
+    pthread_mutex_lock(&app->dbc_mutex);
+    dbc_t *dbc = &app->dbcs[can_idx];
+    if (dbc->msg_count > 0) {
+        mi = dbc_find_message(dbc, frame->can_id);
+        if (mi >= 0) {
+            int n = dbc_decode_message(dbc, mi, frame, text, sizeof(text));
+            if (n <= 0) mi = -1;
+            else safe_strncpy(name, sizeof(name), dbc->messages[mi].name);
+        }
+    }
+    pthread_mutex_unlock(&app->dbc_mutex);
+
+    if (mi < 0) return -1;
+
+    log_info("CAN %s id=%X: %s", ifname ? ifname : "?", can_id, text);
+
+    if (id_out) *id_out = can_id;
+    if (name_out && name_size > 0) safe_strncpy(name_out, name_size, name);
+    if (text_out && text_size > 0) safe_strncpy(text_out, text_size, text);
+    return 0;
 }

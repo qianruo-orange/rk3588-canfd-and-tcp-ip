@@ -78,12 +78,12 @@ set(SOURCES
     source/core/main.c
     source/core/log.c
     source/core/config.c
-    source/core/data_flow.c
     source/can/can_queue.c
     source/can/can_socket.c
     source/can/dbc_parser.c
     source/net/tcp_server.c
     source/http/http.c
+    source/http/http_api_dbc.c
     source/http/http_logs.c
     source/http/http_api_system.c
     source/http/http_api_can.c

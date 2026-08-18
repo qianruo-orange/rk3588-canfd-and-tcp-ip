@@ -19,7 +19,6 @@
 #include <sched.h>
 
 #include "core/config.h"
-#include "core/data_flow.h"
 #include "can/can_socket.h"
 #include "can/dbc_parser.h"
 #include "net/tcp_server.h"
@@ -224,8 +223,6 @@ int main(void)
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
     signal(SIGPIPE, SIG_IGN);
 
-    /* 注册数据流虚函数实现（默认各域数据流独立、不做桥接；业务可整体替换或逐项覆盖） */
-    data_flow_register(&g_app, data_flow_default_ops());
     set_current_thread_name("main");
 
     for (int i = 0; i < MOD_COUNT; i++) {

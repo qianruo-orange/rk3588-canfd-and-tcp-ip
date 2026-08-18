@@ -28,6 +28,8 @@ void http_system_api(app_ctx_t *app, int fd);
 void http_can_status(app_ctx_t *app, int fd);
 void http_can_toggle(app_ctx_t *app, int fd, const char *body);
 void http_can_decoded(app_ctx_t *app, int fd);
+void http_can_send(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body);
+void http_can_rx(app_ctx_t *app, int fd);
 void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body);
 void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req);
 void http_config_post(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body);

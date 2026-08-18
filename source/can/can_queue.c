@@ -1,9 +1,10 @@
 #include <errno.h>
 #include <string.h>
 
-#include "core/can_queue.h"
+#include "can/can_queue.h"
 #include "core/log.h"
 
+/* 初始化单个队列（每个 CAN 接口各调用一次，传入 &txq[i] / &rxq[i]） */
 int can_queue_init(can_queue_t *q)
 {
     if (!q) {
@@ -30,6 +31,7 @@ int can_queue_init(can_queue_t *q)
     return CAN_QUEUE_ERR_OK;
 }
 
+/* 销毁单个队列 */
 void can_queue_destroy(can_queue_t *q)
 {
     if (!q) return;
@@ -38,7 +40,8 @@ void can_queue_destroy(can_queue_t *q)
     pthread_mutex_destroy(&q->push_mutex);
 }
 
-int can_queue_push(can_queue_t *q, const can_queue_frame_t *frame)
+/* 向单个队列入队一帧 */
+int can_queue_push(can_queue_t *q, const struct canfd_frame *frame)
 {
     if (!q || !frame) {
         log_error("can_queue_push: invalid param");
@@ -72,7 +75,8 @@ int can_queue_push(can_queue_t *q, const can_queue_frame_t *frame)
     return CAN_QUEUE_ERR_OK;
 }
 
-int can_queue_pop(can_queue_t *q, can_queue_frame_t *frame)
+/* 从单个队列出队一帧 */
+int can_queue_pop(can_queue_t *q, struct canfd_frame *frame)
 {
     if (!q || !frame) {
         log_error("can_queue_pop: invalid param");
@@ -80,10 +84,8 @@ int can_queue_pop(can_queue_t *q, can_queue_frame_t *frame)
     }
     if (sem_trywait(&q->used_sem) != 0) {
         int err = errno;
-        if (err == EAGAIN) {
-            log_info("can_queue_pop: queue is empty");
+        if (err == EAGAIN)
             return CAN_QUEUE_ERR_QUEUE_EMPTY;
-        }
         log_error("can_queue_pop: used_sem trywait failed");
         return CAN_QUEUE_ERR_QUEUE_SEM_ERROR;
     }
@@ -99,6 +101,7 @@ int can_queue_pop(can_queue_t *q, can_queue_frame_t *frame)
     return CAN_QUEUE_ERR_OK;
 }
 
+/* 返回单个队列当前已入队（可弹出）的帧数 */
 int can_queue_count(can_queue_t *q)
 {
     if (!q) return 0;

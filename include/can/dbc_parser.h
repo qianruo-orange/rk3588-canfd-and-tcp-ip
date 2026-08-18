@@ -5,10 +5,15 @@
 #include <stdint.h>
 #include <linux/can.h>
 
+struct app_ctx;   /* 前置声明，供 dbc_decode_frame 引用 */
+
 /* 编译期上限（静态数组，禁止动态内存）：可按实际 DBC 规模调整 */
 #define DBC_MAX_MESSAGES 256
 #define DBC_MAX_SIGNALS  1024
 #define DBC_MAX_NAME_LEN 64
+
+/* 解码整帧文本最大长度（name=value 形式，供解码结果缓存/展示使用） */
+#define DBC_DECODE_TEXT_MAX 512
 
 /* 字节序：DBC 中 @0=Motorola(大端/MSB first)，@1=Intel(小端/LSB first) */
 typedef enum {
@@ -80,5 +85,12 @@ int dbc_decode_physical(const dbc_t *dbc, int sig_idx,
 /* 解码整帧消息为 "name=value name=value ..." 文本；返回写入字节数 */
 int dbc_decode_message(const dbc_t *dbc, int msg_idx,
                        const struct canfd_frame *frame, char *out, size_t out_size);
+
+/* 收到一帧 CAN 数据后按通道 DBC 解码整帧并记录日志；解码成功返回 0，否则 -1。
+   通过 out 参数返回 can_id(不含标志位)、报文名与解码文本。 */
+int dbc_decode_frame(struct app_ctx *app, int can_idx, const char *ifname,
+                     const struct canfd_frame *frame,
+                     canid_t *id_out, char *name_out, size_t name_size,
+                     char *text_out, size_t text_size);
 
 #endif /* DBC_PARSER_H */

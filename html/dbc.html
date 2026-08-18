@@ -54,6 +54,25 @@ td{color:#c8d6e5}
   </div>
   <div class="meta" id="meta"></div>
 </div>
+<div class="card">
+  <div class="card-head">
+    <h3>最近发送的 CAN 信号（发送方向）</h3>
+    <label class="filter">通道
+      <select id="channel-tx"><option value="">全部</option></select>
+    </label>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>#</th><th>接口</th><th>ID</th><th>报文</th><th>信号值</th></tr>
+      </thead>
+      <tbody id="rows-tx">
+        <tr><td colspan="5" class="empty">等待数据…</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="meta" id="meta-tx"></div>
+</div>
 <script src="/js/dbc.js"></script>
 </body>
 </html>

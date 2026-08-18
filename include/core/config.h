@@ -4,6 +4,7 @@
 #include <linux/can.h>
 
 #include "core/common.h"  /* PATH_CONFIG */
+#include "can/can_queue.h"
 
 #define DEFAULT_CONFIG_PATH PATH_CONFIG
 
@@ -28,6 +29,8 @@ typedef struct {
     int           up;
     int           restart_ms;
     char          dbc_path[256]; /* 该通道的 DBC 文件路径（空 = 不启用解码） */
+    can_queue_t   txq; /* 该接口发送队列 */
+    can_queue_t   rxq; /* 该接口接收队列 */
 } can_iface_t;
 
 /* ---- 网关启动参数 ---- */

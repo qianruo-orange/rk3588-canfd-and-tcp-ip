@@ -248,7 +248,7 @@ static void can_epoll_update_tx(can_ctx_t *ctx, int idx)
     int fd = ctx->ifaces[idx].sock_fd;
     if (fd < 0) return;
     struct epoll_event ev;
-    ev.events = EPOLLIN | (can_queue_count(&ctx->txq[idx]) > 0 ? EPOLLOUT : 0);
+    ev.events = EPOLLIN | (can_queue_count(&ctx->ifaces[idx].txq) > 0 ? EPOLLOUT : 0);
     ev.data.u32 = (uint32_t)(idx + 1);
     if (epoll_ctl(ctx->epfd, EPOLL_CTL_MOD, fd, &ev) < 0 && errno == ENOENT)
         epoll_ctl(ctx->epfd, EPOLL_CTL_ADD, fd, &ev);
@@ -277,7 +277,7 @@ int can_tx_frame(app_ctx_t *app, const char *ifname, const struct canfd_frame *f
     int fd = ctx->ifaces[idx].sock_fd;
     if (fd < 0) { pthread_mutex_unlock(&app->can_mutex); errno = ENODEV; return -1; }
 
-    can_queue_t *txq = &ctx->txq[idx];
+    can_queue_t *txq = &ctx->ifaces[idx].txq;
 
     /* 队列为空才尝试立即写：队列已有待发帧时直接入队，
        保证同一接口的帧按调用顺序发出，不越过已排队的旧帧 */
@@ -319,7 +319,7 @@ static void handle_can_output(app_ctx_t *app)
         int fd = ctx->ifaces[idx].sock_fd;
         if (fd < 0) continue;
 
-        can_queue_t *q = &ctx->txq[idx];
+        can_queue_t *q = &ctx->ifaces[idx].txq;
         /* 一轮最多处理当前队列长度，避免 EAGAIN 帧重排入队尾导致死循环 */
         int limit = can_queue_count(q);
         while (limit-- > 0 && can_queue_count(q) > 0) {
@@ -351,7 +351,7 @@ static void handle_can_input(app_ctx_t *app, int can_idx)
     can_ctx_t *ctx = app->can;
     pthread_mutex_lock(&app->can_mutex);
     int fd = ctx->ifaces[can_idx].sock_fd;
-    can_queue_t *rxq = &ctx->rxq[can_idx];
+    can_queue_t *rxq = &ctx->ifaces[can_idx].rxq;
     const char *ifname = ctx->ifaces[can_idx].ifname;
 
     /* 每次 epoll 事件最多排空 64 帧就返回：避免 CAN 总线持续有数据时无限排水，
@@ -487,8 +487,8 @@ int can_init(void *arg)
     ctx->count  = args->can_count;
     /* 每个接口各初始化一个发送队列和一个接收队列 */
     for (int i = 0; i < ctx->count; i++) {
-        can_queue_init(&ctx->txq[i]);
-        can_queue_init(&ctx->rxq[i]);
+        can_queue_init(&ctx->ifaces[i].txq);
+        can_queue_init(&ctx->ifaces[i].rxq);
     }
     /* CAN 数据收发专用 epoll（socket + TX eventfd，与 TCP 分开管理） */
     ctx->epfd = epoll_create1(0);
@@ -528,8 +528,8 @@ void can_cleanup(void *arg)
 
     for (int i = 0; i < ctx->count; i++) {
         can_socket_close(ctx->ifaces[i].sock_fd);
-        can_queue_destroy(&ctx->txq[i]);
-        can_queue_destroy(&ctx->rxq[i]);
+        can_queue_destroy(&ctx->ifaces[i].txq);
+        can_queue_destroy(&ctx->ifaces[i].rxq);
     }
     if (ctx->tx_efd >= 0) close(ctx->tx_efd);
     if (ctx->epfd >= 0) close(ctx->epfd);

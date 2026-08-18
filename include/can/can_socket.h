@@ -17,8 +17,6 @@ typedef struct can_ctx {
     can_iface_t     *ifaces;
     int              count;
     int              epfd;      /* CAN socket 收发 epoll（can_task 线程） */
-    can_queue_t      txq[CAN_MAX_IFACES]; /* 每个接口一个发送队列 */
-    can_queue_t      rxq[CAN_MAX_IFACES]; /* 每个接口一个接收队列 */
     int              tx_efd;    /* TX eventfd：压入 TX 队列后 write，唤醒 can_task */
 } can_ctx_t;
 

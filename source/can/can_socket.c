@@ -274,19 +274,23 @@ int can_tx_frame(app_ctx_t *app, const can_queue_frame_t *frame)
     int fd = ctx->ifaces[idx].sock_fd;
     if (fd < 0) { pthread_mutex_unlock(&app->can_mutex); errno = ENODEV; return -1; }
 
-    ssize_t n = write(fd, &frame->frame, sizeof(frame->frame));
-    if (n == (ssize_t)sizeof(frame->frame)) {
-        pthread_mutex_unlock(&app->can_mutex);
-        return (int)n;
-    }
-    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        int saved = errno;
-        pthread_mutex_unlock(&app->can_mutex);
-        errno = saved;
-        return -1;
+    /* 队列为空才尝试立即写：队列已有待发帧时直接入队，
+       保证同一接口的帧按调用顺序发出，不越过已排队的旧帧 */
+    if (can_queue_count(&ctx->txq) == 0) {
+        ssize_t n = write(fd, &frame->frame, sizeof(frame->frame));
+        if (n == (ssize_t)sizeof(frame->frame)) {
+            pthread_mutex_unlock(&app->can_mutex);
+            return (int)n;
+        }
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            int saved = errno;
+            pthread_mutex_unlock(&app->can_mutex);
+            errno = saved;
+            return -1;
+        }
     }
 
-    /* 不可写：压入共用 TX 队列（ifname 换成 can_ctx 内稳定的接口名，供 can_task 路由），写 eventfd 唤醒排空 */
+    /* 不可写或队列非空：压入共用 TX 队列（ifname 换成 can_ctx 内稳定的接口名，供 can_task 路由），写 eventfd 唤醒排空 */
     can_queue_frame_t qf = *frame;
     qf.ifname = ctx->ifaces[idx].ifname;
     if (can_queue_push(&ctx->txq, &qf) != CAN_QUEUE_ERR_OK) {

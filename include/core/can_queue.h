@@ -7,7 +7,7 @@
 #include <linux/can.h>
 #include <linux/can/raw.h>
 
-#define CAN_QUEUE_MAX_SLOTS 65535 /* 池最大槽位数 */
+#define CAN_QUEUE_MAX_SLOTS 64 /* 池最大槽位数 */
 
 typedef struct{
     struct canfd_frame frame;

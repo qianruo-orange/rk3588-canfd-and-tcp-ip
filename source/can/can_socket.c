@@ -217,61 +217,7 @@ int can_socket_open(const char *ifname, int fd_mode)
  */
 void can_socket_close(int fd) { if (fd >= 0) close(fd); }
 
-/* ---- RX / TX 双队列 + eventfd 跨线程唤醒 ---- */
-
-static void rxq_reset(can_rx_queue_t *q)
-{
-    q->head = q->tail = q->count = 0;
-}
-
-static int rxq_push(can_rx_queue_t *q, const char *ifname,
-                    const struct canfd_frame *frame)
-{
-    if (q->count >= CAN_RX_QUEUE_DEPTH) return -1;
-    can_rx_item_t *it = &q->items[q->tail];
-    safe_strncpy(it->ifname, sizeof(it->ifname), ifname);
-    it->frame = *frame;
-    q->tail = (q->tail + 1) % CAN_RX_QUEUE_DEPTH;
-    q->count++;
-    return 0;
-}
-
-static int rxq_pop(can_rx_queue_t *q, can_rx_item_t *out)
-{
-    if (q->count <= 0) return -1;
-    *out = q->items[q->head];
-    q->head = (q->head + 1) % CAN_RX_QUEUE_DEPTH;
-    q->count--;
-    return 0;
-}
-
-static void txq_reset(can_tx_queue_t *q)
-{
-    q->head = q->tail = q->count = 0;
-}
-
-static int txq_push(can_tx_queue_t *q, const struct canfd_frame *frame)
-{
-    if (q->count >= CAN_TX_QUEUE_DEPTH) return -1;
-    q->frames[q->tail] = *frame;
-    q->tail = (q->tail + 1) % CAN_TX_QUEUE_DEPTH;
-    q->count++;
-    return 0;
-}
-
-static int txq_front(can_tx_queue_t *q, struct canfd_frame *frame)
-{
-    if (q->count <= 0) return -1;
-    *frame = q->frames[q->head];
-    return 0;
-}
-
-static void txq_pop(can_tx_queue_t *q)
-{
-    if (q->count <= 0) return;
-    q->head = (q->head + 1) % CAN_TX_QUEUE_DEPTH;
-    q->count--;
-}
+/* ---- TX 队列 + eventfd 跨线程唤醒 ---- */
 
 /* 写 eventfd：通知对端“有数据压入队列” */
 static void eventfd_signal(int efd)
@@ -290,7 +236,7 @@ static void eventfd_consume(int efd)
 }
 
 /**
- * can_epoll_update_tx - 按接口发送队列是否为空，动态切换 epoll 是否监听 EPOLLOUT。
+ * can_epoll_update_tx - 按共用发送队列是否为空，动态切换 epoll 是否监听 EPOLLOUT。
  * 队列非空才监听 EPOLLOUT，避免 socket 一直可写导致 epoll 忙轮询。
  * @ctx: CAN 上下文。
  * @idx: 接口索引。
@@ -300,7 +246,7 @@ static void can_epoll_update_tx(can_ctx_t *ctx, int idx)
     int fd = ctx->ifaces[idx].sock_fd;
     if (fd < 0) return;
     struct epoll_event ev;
-    ev.events = EPOLLIN | (ctx->txq[idx].count > 0 ? EPOLLOUT : 0);
+    ev.events = EPOLLIN | (can_queue_count(&ctx->txq) > 0 ? EPOLLOUT : 0);
     ev.data.u32 = (uint32_t)(idx + 1);
     if (epoll_ctl(ctx->epfd, EPOLL_CTL_MOD, fd, &ev) < 0 && errno == ENOENT)
         epoll_ctl(ctx->epfd, EPOLL_CTL_ADD, fd, &ev);
@@ -310,27 +256,26 @@ static void can_epoll_update_tx(can_ctx_t *ctx, int idx)
  * can_tx_frame - 异步发送一帧 CAN 数据。
  * 立即可写则直接发送；不可写则入队，由 can_task 在 EPOLLOUT 事件时发送。
  * @app: 全局应用上下文。
- * @ifname: 目标 CAN 接口名。
- * @frame: 待发送帧。
+ * @frame: 待发送帧，其中 ifname 为目标接口名。
  * @return: 立即发送返回写入字节数；入队返回 0；失败返回 -1。
  */
-int can_tx_frame(app_ctx_t *app, const char *ifname, const struct canfd_frame *frame)
+int can_tx_frame(app_ctx_t *app, const can_queue_frame_t *frame)
 {
-    if (!app || !app->can || !ifname || !frame) { errno = EINVAL; return -1; }
+    if (!app || !app->can || !frame || !frame->ifname) { errno = EINVAL; return -1; }
     can_ctx_t *ctx = app->can;
 
     int idx = -1;
     for (int i = 0; i < ctx->count; i++) {
-        if (strcmp(ctx->ifaces[i].ifname, ifname) == 0) { idx = i; break; }
+        if (strcmp(ctx->ifaces[i].ifname, frame->ifname) == 0) { idx = i; break; }
     }
-    if (idx < 0) { log_error("can_tx: unknown interface '%s'", ifname); errno = ENODEV; return -1; }
+    if (idx < 0) { log_error("can_tx: unknown interface '%s'", frame->ifname); errno = ENODEV; return -1; }
 
     pthread_mutex_lock(&app->can_mutex);
     int fd = ctx->ifaces[idx].sock_fd;
     if (fd < 0) { pthread_mutex_unlock(&app->can_mutex); errno = ENODEV; return -1; }
 
-    ssize_t n = write(fd, frame, sizeof(*frame));
-    if (n == (ssize_t)sizeof(*frame)) {
+    ssize_t n = write(fd, &frame->frame, sizeof(frame->frame));
+    if (n == (ssize_t)sizeof(frame->frame)) {
         pthread_mutex_unlock(&app->can_mutex);
         return (int)n;
     }
@@ -341,8 +286,10 @@ int can_tx_frame(app_ctx_t *app, const char *ifname, const struct canfd_frame *f
         return -1;
     }
 
-    /* 不可写：压入 TX 队列，写 eventfd 唤醒 can_task 排空 */
-    if (txq_push(&ctx->txq[idx], frame) < 0) {
+    /* 不可写：压入共用 TX 队列（ifname 换成 can_ctx 内稳定的接口名，供 can_task 路由），写 eventfd 唤醒排空 */
+    can_queue_frame_t qf = *frame;
+    qf.ifname = ctx->ifaces[idx].ifname;
+    if (can_queue_push(&ctx->txq, &qf) != CAN_QUEUE_ERR_OK) {
         pthread_mutex_unlock(&app->can_mutex);
         errno = ENOBUFS;
         return -1;
@@ -353,29 +300,41 @@ int can_tx_frame(app_ctx_t *app, const char *ifname, const struct canfd_frame *f
 }
 
 /**
- * handle_can_output - 处理单个 CAN 接口的 EPOLLOUT 事件，尽力排空发送队列。
+ * handle_can_output - 排空共用发送队列，按帧内 ifname 路由到对应接口写 socket。
  * @app: 全局应用上下文。
- * @can_idx: CAN 接口索引。
  */
-static void handle_can_output(app_ctx_t *app, int can_idx)
+static void handle_can_output(app_ctx_t *app)
 {
     can_ctx_t *ctx = app->can;
     pthread_mutex_lock(&app->can_mutex);
-    int fd = ctx->ifaces[can_idx].sock_fd;
-    can_tx_queue_t *q = &ctx->txq[can_idx];
+    can_queue_t *q = &ctx->txq;
 
-    while (fd >= 0 && q->count > 0) {
-        struct canfd_frame frame;
-        txq_front(q, &frame);
-        ssize_t n = write(fd, &frame, sizeof(frame));
-        if (n == (ssize_t)sizeof(frame)) { txq_pop(q); continue; }
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-        txq_pop(q); /* 写异常：丢弃该帧，避免卡死 */
+    /* 一轮最多处理当前队列长度，避免 EAGAIN 帧重排入队尾导致死循环 */
+    int limit = can_queue_count(q);
+    while (limit-- > 0 && can_queue_count(q) > 0) {
+        can_queue_frame_t qf;
+        if (can_queue_pop(q, &qf) != CAN_QUEUE_ERR_OK) break;
+
+        int idx = -1;
+        if (qf.ifname) {
+            for (int i = 0; i < ctx->count; i++)
+                if (strcmp(ctx->ifaces[i].ifname, qf.ifname) == 0) { idx = i; break; }
+        }
+        if (idx < 0) continue; /* 未知接口：丢弃该帧 */
+
+        int fd = ctx->ifaces[idx].sock_fd;
+        if (fd < 0) continue;
+
+        ssize_t n = write(fd, &qf.frame, sizeof(qf.frame));
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            can_queue_push(q, &qf); /* 该接口暂不可写：放回队尾，等下一轮 */
+        }
+        /* 写成功继续；写异常则该帧已弹出，直接丢弃 */
     }
 
-    /* 让 epoll 的 EPOLLOUT 状态与队列是否非空保持一致：
-       队列非空才监听 EPOLLOUT，排空则回到仅监听 EPOLLIN */
-    can_epoll_update_tx(ctx, can_idx);
+    /* 队列非空才监听 EPOLLOUT，排空则回到仅 EPOLLIN */
+    for (int i = 0; i < ctx->count; i++)
+        can_epoll_update_tx(ctx, i);
     pthread_mutex_unlock(&app->can_mutex);
 }
 
@@ -396,9 +355,12 @@ static void handle_can_input(app_ctx_t *app, int can_idx)
         struct canfd_frame frame;
         ssize_t n = read(fd, &frame, sizeof(frame));
         if (n > 0) {
-            /* 直接在 can_task 线程中回调，不再使用 RX 队列 */
-            if (app->flow && app->flow->on_can_rx)
-                app->flow->on_can_rx(app, ctx->ifaces[can_idx].ifname, &frame);
+            /* 读到的帧先入共用接收队列，稍后在本轮内统一排空回调 on_can_rx */
+            can_queue_frame_t qf;
+            qf.frame = frame;
+            qf.ifname = ctx->ifaces[can_idx].ifname;
+            if (can_queue_push(&ctx->rxq, &qf) != CAN_QUEUE_ERR_OK)
+                log_error("can rx queue full on %s, drop frame", ctx->ifaces[can_idx].ifname);
         } else if (n == 0) {
             break;
         } else {
@@ -409,8 +371,6 @@ static void handle_can_input(app_ctx_t *app, int can_idx)
                                           ctx->ifaces[can_idx].fd_mode);
             if (new_fd >= 0) {
                 ctx->ifaces[can_idx].sock_fd = new_fd;
-                /* 重建 socket 后清空待发队列：旧链路已断，遗留帧不再有意义 */
-                txq_reset(&ctx->txq[can_idx]);
                 for (int k = 0; k < ctx->ifaces[can_idx].filter_count; k++)
                     can_socket_set_filter(new_fd,
                         ctx->ifaces[can_idx].filters[k].id,
@@ -420,6 +380,12 @@ static void handle_can_input(app_ctx_t *app, int can_idx)
             }
             break;
         }
+    }
+    /* 排空共用接收队列：在 can_task 线程内逐帧回调 on_can_rx */
+    can_queue_frame_t qf;
+    while (can_queue_pop(&ctx->rxq, &qf) == CAN_QUEUE_ERR_OK) {
+        if (app->flow && app->flow->on_can_rx)
+            app->flow->on_can_rx(app, qf.ifname, &qf.frame);
     }
     pthread_mutex_unlock(&app->can_mutex);
 }
@@ -444,10 +410,9 @@ void *can_task(void *arg)
         for (int i = 0; i < nfds; i++) {
             uint32_t tag = events[i].data.u32;
             if (tag == 0) {
-                /* TX eventfd：有帧压入 TX 队列，尽力排空所有接口 */
+                /* TX eventfd：有帧压入 TX 队列，排空共用发送队列 */
                 eventfd_consume(ctx->tx_efd);
-                for (int k = 0; k < ctx->count; k++)
-                    handle_can_output(app, k);
+                handle_can_output(app);
                 continue;
             }
             if (tag < 1 || tag > (uint32_t)ctx->count) continue;
@@ -456,7 +421,7 @@ void *can_task(void *arg)
             if (ev & (EPOLLIN | EPOLLERR | EPOLLHUP))
                 handle_can_input(app, idx);
             if (ev & EPOLLOUT)
-                handle_can_output(app, idx);
+                handle_can_output(app);
         }
     }
     log_info("can_task stopped");
@@ -511,18 +476,15 @@ int can_init(void *arg)
     ctx->tx_efd = -1;
     ctx->ifaces = args->can_ifaces;
     ctx->count  = args->can_count;
-    /* 收发队列清零 */
-    rxq_reset(&ctx->rxq);
-    for (int i = 0; i < CAN_MAX_IFACES; i++)
-        txq_reset(&ctx->txq[i]);
-    pthread_mutex_init(&ctx->rx_mutex, NULL);
+    /* 发送/接收队列初始化（所有接口各共用一个） */
+    can_queue_init(&ctx->txq);
+    can_queue_init(&ctx->rxq);
     /* CAN 数据收发专用 epoll（socket + TX eventfd，与 TCP 分开管理） */
     ctx->epfd = epoll_create1(0);
     if (ctx->epfd < 0) { log_error("can: epoll_create1 failed"); return -1; }
-    /* RX/TX 两个 eventfd：跨线程唤醒，让 epoll 检测“有数据压入/弹出” */
-    ctx->rx_efd = eventfd(0, EFD_NONBLOCK);
+    /* TX eventfd：跨线程唤醒 can_task，让其检测“有帧压入 TX 队列” */
     ctx->tx_efd = eventfd(0, EFD_NONBLOCK);
-    if (ctx->rx_efd < 0 || ctx->tx_efd < 0) { log_error("can: eventfd failed"); return -1; }
+    if (ctx->tx_efd < 0) { log_error("can: eventfd failed"); return -1; }
 
     struct epoll_event ev;
     ev.events = EPOLLIN;
@@ -541,11 +503,6 @@ int can_init(void *arg)
             can_socket_set_filter(fd, iface->filters[k].id, iface->filters[k].mask);
     }
 
-    /* 独立 RX 消费线程：epoll 监听 rx_efd，弹出 RX 队列回调 on_can_rx */
-    if (pthread_create(&ctx->rx_tid, NULL, can_rx_consumer, app) != 0) {
-        log_error("can: create rx consumer thread failed"); return -1;
-    }
-
     log_info("%d CAN interface(s) initialized", args->can_count);
     for (int i = 0; i < args->can_count; i++)
         log_info("  CAN[%d]=%s filters=%d", i, args->can_ifaces[i].ifname, args->can_ifaces[i].filter_count);
@@ -558,15 +515,10 @@ void can_cleanup(void *arg)
     can_ctx_t *ctx = app->can;
     if (!ctx) return;
 
-    /* 停止并回收 RX 消费线程 */
-    ctx->rx_stop = 1;
-    eventfd_signal(ctx->rx_efd);
-    if (ctx->rx_tid) pthread_join(ctx->rx_tid, NULL);
-
     for (int i = 0; i < ctx->count; i++)
         can_socket_close(ctx->ifaces[i].sock_fd);
-    if (ctx->rx_efd >= 0) close(ctx->rx_efd);
+    can_queue_destroy(&ctx->txq);
+    can_queue_destroy(&ctx->rxq);
     if (ctx->tx_efd >= 0) close(ctx->tx_efd);
     if (ctx->epfd >= 0) close(ctx->epfd);
-    pthread_mutex_destroy(&ctx->rx_mutex);
 }

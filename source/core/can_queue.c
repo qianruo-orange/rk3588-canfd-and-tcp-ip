@@ -38,7 +38,7 @@ void can_queue_destroy(can_queue_t *q)
     pthread_mutex_destroy(&q->push_mutex);
 }
 
-int can_queue_push(can_queue_t *q, const struct canfd_frame *frame)
+int can_queue_push(can_queue_t *q, const can_queue_frame_t *frame)
 {
     if (!q || !frame) {
         log_error("can_queue_push: invalid param");
@@ -72,7 +72,7 @@ int can_queue_push(can_queue_t *q, const struct canfd_frame *frame)
     return CAN_QUEUE_ERR_OK;
 }
 
-int can_queue_pop(can_queue_t *q, struct canfd_frame *frame)
+int can_queue_pop(can_queue_t *q, can_queue_frame_t *frame)
 {
     if (!q || !frame) {
         log_error("can_queue_pop: invalid param");

@@ -47,7 +47,10 @@ static ssize_t default_tx_can(app_ctx_t *app, const char *ifname,
     (void)timeout_ms; /* 异步入队发送，无需阻塞超时 */
     if (!app || !app->can || !ifname || !frame) { errno = EINVAL; return -1; }
     /* 走 CAN 常驻 epoll 的收发队列：立即可写直接发送，否则入队由 can_task 发送 */
-    int r = can_tx_frame(app, ifname, frame);
+    can_queue_frame_t qf;
+    qf.frame = *frame;
+    qf.ifname = (char *)ifname; /* 目标接口名，由 can_tx_frame 据此路由 */
+    int r = can_tx_frame(app, &qf);
     return r < 0 ? -1 : (ssize_t)r;
 }
 

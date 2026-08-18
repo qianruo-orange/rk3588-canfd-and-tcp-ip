@@ -131,7 +131,7 @@ void http_can_toggle(app_ctx_t *app, int fd, const char *body)
     if (!ln) { nl_socket_free(sk); http_send_response(fd, 500, "Error", "text/plain", "", 0); return; }
     rtnl_link_set_name(ln, ifname);
 
-    /* 串行化接口状态操作与 CAN 配置热更新 / can_task 重连 */
+    /* 串行化接口状态操作与 CAN 配置热更新 / CAN 重连 */
     pthread_mutex_lock(&app->can_mutex);
     if (strcmp(action, "up") == 0)
         rtnl_link_set_flags(ln, IFF_UP);

@@ -85,11 +85,27 @@ static app_ctx_t g_app;
 static dbc_t g_dbc[CAN_MAX_IFACES];
 
 static module_t g_modules[] = {
-    /* can */
+    /* can（只负责初始化 / 清理，不占独立线程） */
     {
         .tid  = 0,
         .name = "can",
-        .ops  = { .init = can_init, .dtor = can_cleanup, .task = can_task },
+        .ops  = { .init = can_init, .dtor = can_cleanup, .task = NULL },
+        .wd   = { .timeout = 0, .max_miss = 0 },
+        .thr  = { .stack_size = 0, .priority = 0, .cpu = -1 },
+    },
+    /* can_recv —— 接收线程：读 socket 做接收 DBC 解析并入 rxq，喂狗 */
+    {
+        .tid  = 0,
+        .name = "can_recv",
+        .ops  = { .init = NULL, .dtor = NULL, .task = can_recv_task },
+        .wd   = { .timeout = 3, .max_miss = 3 },
+        .thr  = { .stack_size = 0, .priority = 0, .cpu = -1 },
+    },
+    /* can_send —— 发送线程：排空 txq 写 socket 做发送 DBC 解析，喂狗 */
+    {
+        .tid  = 0,
+        .name = "can_send",
+        .ops  = { .init = NULL, .dtor = NULL, .task = can_send_task },
         .wd   = { .timeout = 3, .max_miss = 3 },
         .thr  = { .stack_size = 0, .priority = 0, .cpu = -1 },
     },

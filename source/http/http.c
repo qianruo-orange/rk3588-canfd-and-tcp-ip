@@ -50,6 +50,11 @@ static void http_can_toggle_wrap(app_ctx_t *app, int fd, const char *method, con
 static void http_can_decoded_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_decoded(app, fd); }
 
 /**
+ * http_can_decoded_tx_wrap - 包装发送方向 DBC 解析结果查询接口。
+ */
+static void http_can_decoded_tx_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_decoded_tx(app, fd); }
+
+/**
  * http_can_dbc_upload_wrap - 包装 DBC 文件上传接口，保留 method/uri/body 供上传处理。
  */
 static void http_can_dbc_upload_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { http_can_dbc_upload(app, fd, method, uri, req); }
@@ -421,6 +426,7 @@ static void *client_handler(app_ctx_t *app, int fd)
         { "/api/system",    0, NULL,   http_system_api_wrap,   NULL },
         { "/api/can",       0, NULL,   http_can_status_wrap,   NULL },
         { "/api/can/decoded",0,NULL,   http_can_decoded_wrap,  NULL },
+        { "/api/can/decoded/tx",0,NULL,http_can_decoded_tx_wrap, NULL },
         { "/api/can/dbc",    0, "POST", http_can_dbc_upload_wrap, http_check_auth_root },
         { "/api/can/send",   0, "POST", http_can_send_wrap,   http_check_auth_root },
         { "/api/can/frames", 0, NULL,   http_can_rx_wrap,     NULL },

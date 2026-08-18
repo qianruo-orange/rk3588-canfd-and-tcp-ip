@@ -75,7 +75,7 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         return;
     }
 
-    /* 整个配置应用过程加锁：串行化并发 POST，并与 can_task 的 CAN 重连互斥 */
+    /* 整个配置应用过程加锁：串行化并发 POST，并与 CAN 重连互斥 */
     pthread_mutex_lock(&app->can_mutex);
 
     /* 跳过 HTTP 头部，定位 POST body */
@@ -161,16 +161,16 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
 
         watchdog_feed_self("http");   /* 配置可能执行 ip 命令较慢，避免 HTTP 看门狗误杀 */
 
-        /* 从 CAN epoll 移除旧 fd */
-        if (old_fd >= 0 && can->epfd >= 0)
-            epoll_ctl(can->epfd, EPOLL_CTL_DEL, old_fd, NULL);
+        /* 从 CAN 接收 epoll 移除旧 fd */
+        if (old_fd >= 0 && can->recv_epfd >= 0)
+            epoll_ctl(can->recv_epfd, EPOLL_CTL_DEL, old_fd, NULL);
 
         /* 重新配置并打开 */
         if (can_socket_configure(iface->ifname, iface->bitrate, iface->dbitrate,
                                   iface->fd_mode, iface->restart_ms, iface->up) < 0) {
             log_error("config: CAN %s reconfigure failed", iface->ifname);
-            if (old_fd >= 0 && can->epfd >= 0)
-                epoll_ctl(can->epfd, EPOLL_CTL_ADD, old_fd, NULL);
+            if (old_fd >= 0 && can->recv_epfd >= 0)
+                epoll_ctl(can->recv_epfd, EPOLL_CTL_ADD, old_fd, NULL);
             continue;
         }
 
@@ -188,12 +188,12 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         for (int k = 0; k < iface->filter_count; k++)
             can_socket_set_filter(new_fd, iface->filters[k].id, iface->filters[k].mask);
 
-        /* 重新加入 CAN epoll */
-        if (can->epfd >= 0) {
+        /* 重新加入 CAN 接收 epoll */
+        if (can->recv_epfd >= 0) {
             struct epoll_event ev;
             ev.events = EPOLLIN;
             ev.data.u32 = (uint32_t)(i + 1);
-            epoll_ctl(can->epfd, EPOLL_CTL_ADD, new_fd, &ev);
+            epoll_ctl(can->recv_epfd, EPOLL_CTL_ADD, new_fd, &ev);
         }
         log_info("config: CAN %s reconfigured (bitrate=%d, fd=%s, up=%s)",
                  iface->ifname, iface->bitrate,

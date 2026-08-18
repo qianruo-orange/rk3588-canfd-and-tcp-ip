@@ -50,19 +50,24 @@ cd /home/orangepi/project1
 单进程多线程架构，所有线程由 `source/core/main.c` 的模块总表 `g_modules[]` 统一注册并拉起：
 
 ```text
-        ┌─► can_task      ──► SocketCAN 收帧 ──► DBC 解码 ──► 日志 / 解码缓存
- main ──┼─► tcp_task      ──► TCP 监听 / 收发
+        ┌─► can_recv_task ──► SocketCAN 收帧 ──► 入 rxq（原始帧）+ 接收方向 DBC 解码
+ main ──┼─► can_send_task ──► 排空 txq（原始帧）写 socket + 发送方向 DBC 解码
+        ├─► tcp_task      ──► TCP 监听 / 收发
         ├─► http_task     ──► Web 管理 + REST API + MJPEG 推流
         ├─► video_task    ──► V4L2 采集
         └─► watchdog_task ──► 心跳监控 + sd_notify
 
-CAN 数据流：CAN 帧 ─► can_task ─► DBC 解码 ─► 解码缓存 ─► /api/can/decoded ─► /dbc 页面
+CAN 数据流（入队均为原始帧，DBC 解析结果供前端展示）：
+  接收：CAN 帧 ─► can_recv_task ─► 入 rxq（原始帧）/ 接收方向 DBC 解码 ─► /api/can/decoded ─► /dbc 页面
+  发送：业务线程压入 txq（原始帧） ─► can_send_task 写 socket ─► 发送方向 DBC 解码 ─► /api/can/decoded/tx
 ```
 
 | 线程 | 职责 |
 | --- | --- |
 | `main` | 初始化、配置加载、DBC 加载、退出编排、喂狗 |
-| `can` | CAN 帧接收、DBC 信号解码与缓存 |
+| `can` | CAN 初始化 / 清理（不占独立线程） |
+| `can_recv` | CAN 帧接收、入 rxq（原始帧）、接收方向 DBC 解码 |
+| `can_send` | 排空 txq（原始帧）写 socket、发送方向 DBC 解码 |
 | `tcp` | TCP 监听、连接管理与数据收发 |
 | `http` | HTTP 管理服务主循环、REST API、MJPEG 推流 |
 | `video` | V4L2 MJPEG 采集与帧发布 |
@@ -298,7 +303,8 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 | --- | --- | --- | --- |
 | GET | `/api/system` | 无 | 系统监控数据 |
 | GET | `/api/can` | 无 | CAN 状态 |
-| GET | `/api/can/decoded` | 无 | DBC 解析后的最近 CAN 信号（JSON） |
+| GET | `/api/can/decoded` | 无 | 接收方向 DBC 解析后的最近 CAN 信号（JSON） |
+| GET | `/api/can/decoded/tx` | 无 | 发送方向 DBC 解析后的最近 CAN 信号（JSON） |
 | POST | `/api/can/dbc?ifname=` | root | 上传某通道的 DBC 文件 |
 | POST | `/api/can/toggle` | root | 切换 CAN 接口 |
 | GET/POST | `/api/config` | root | 读取/写入配置 |
@@ -317,7 +323,7 @@ HTTP 写操作接口要求 root 权限。
 
 ## 看门狗机制
 
-- 通过模块总表 `g_modules[]` 为 `can`、`tcp`、`http`、`video`、`main` 注册心跳监控
+- 通过模块总表 `g_modules[]` 为 `can_recv`、`can_send`、`tcp`、`http`、`video`、`main` 注册心跳监控
 - 每个模块带 `timeout` / `max_miss` 参数；`watchdog` 线程自身 `timeout=0`，不监督自己
 - 线程以名字注册 / 喂狗 / 注销，超时日志可直接定位到具体线程名（如 `thread 'http'`）
 - 心跳超时将触发整体退出

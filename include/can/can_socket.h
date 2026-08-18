@@ -9,22 +9,27 @@
 
 /* ---- CAN 收发队列 ----
  * 每个接口各占一个发送队列、一个接收队列（txq[i]/rxq[i] 与 ifaces[i] 一一对应）。
- * RX：can_task 从 socket 读到帧先入 rxq[i]，随后在本轮内排空做 DBC 解码（无独立消费线程）。
- * TX：业务线程压入待发送帧（can_queue_t 接口），can_task 弹出并写 socket；用 tx_efd 唤醒 epoll。 */
+ * RX：can_recv_task 从 socket 读到帧先做接收方向 DBC 解析，再入 rxq[i]（只入队、不出队）。
+ * TX：业务线程压入待发送帧（can_queue_t 接口），can_send_task 弹出写 socket 后做发送方向 DBC 解析；
+ *     用 tx_efd 唤醒 can_send_task。 */
 
 /* ---- CAN 子系统上下文 ---- */
 typedef struct can_ctx {
     can_iface_t     *ifaces;
     int              count;
-    int              epfd;      /* CAN socket 收发 epoll（can_task 线程） */
-    int              tx_efd;    /* TX eventfd：压入 TX 队列后 write，唤醒 can_task */
+    int              recv_epfd; /* 接收 epoll（can_recv_task） */
+    int              send_epfd; /* 发送 epoll（can_send_task，监听 tx_efd + 各接口 EPOLLOUT） */
+    int              tx_efd;    /* TX eventfd：压入 TX 队列后 write，唤醒 can_send_task */
 } can_ctx_t;
 
-/* CAN 数据收发线程（独立 epoll 管理所有 CAN 接口 + TX eventfd） */
-void *can_task(void *arg);
+/* CAN 接收线程：读 socket 入 rxq 并做接收方向 DBC 解析 */
+void *can_recv_task(void *arg);
 
-/* 异步发送一帧：立即可写则直接发送；否则入对应接口队列，由 can_task 在 EPOLLOUT 时发送。
- * ifname 为目标接口名。返回 0 表示已入队（稍后发送），>0 表示立即发送字节数，-1 失败。 */
+/* CAN 发送线程：排空 txq 写 socket 并做发送方向 DBC 解析 */
+void *can_send_task(void *arg);
+
+/* 异步发送一帧：入对应接口 TX 队列，由 can_send_task 排空写 socket 并做发送方向 DBC 解析。
+ * ifname 为目标接口名。返回 0 表示已入队，-1 失败。 */
 int can_tx_frame(app_ctx_t *app, const char *ifname, const struct canfd_frame *frame);
 
 /* 打开/关闭单个 CAN 套接字（can_init 内部使用） */

@@ -149,7 +149,7 @@ int tcp_tx_packet(tcp_ctx_t *ctx, int client_idx, const void *buf, size_t len)
     return pushed > 0 ? 0 : -1;
 }
 
-/* 读取单个客户端数据，压入 RX 队列并写 eventfd 唤醒消费线程；返回 1 表示客户端已断开 */
+/* 读取单个客户端数据并直接回调处理；返回 1 表示客户端已断开 */
 static int handle_tcp_input(app_ctx_t *app, tcp_ctx_t *ctx, int client_idx)
 {
     char buf[WBUF_SIZE];
@@ -167,10 +167,9 @@ static int handle_tcp_input(app_ctx_t *app, tcp_ctx_t *ctx, int client_idx)
     if (n == 0) return 1;                                   /* 对端正常关闭 */
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return 1;
     if (n > 0) {
-        pthread_mutex_lock(&ctx->rx_mutex);
-        if (tcpq_push(&ctx->rxq, client_idx, buf, (size_t)n) == 0)
-            eventfd_signal(ctx->rx_efd);
-        pthread_mutex_unlock(&ctx->rx_mutex);
+        /* 直接在 tcp_task 线程中回调，不再使用 RX 队列 */
+        if (app->flow && app->flow->on_tcp_rx)
+            app->flow->on_tcp_rx(app, client_idx, buf, (size_t)n);
     }
     return 0;
 }
@@ -226,46 +225,6 @@ static void tcp_flush_tx(tcp_ctx_t *ctx)
 
     pthread_mutex_unlock(&ctx->client_mutex);
     pthread_mutex_unlock(&ctx->tx_mutex);
-}
-
-/* TCP RX 独立消费线程：epoll 监听 rx_efd，弹出 RX 队列并回调数据流钩子 */
-static void *tcp_rx_consumer(void *arg)
-{
-    app_ctx_t *app = (app_ctx_t *)arg;
-    tcp_ctx_t *ctx = app->tcp;
-    if (!ctx) return NULL;
-
-    int epfd = epoll_create1(0);
-    if (epfd < 0) { log_error("tcp rx: epoll_create1 failed"); return NULL; }
-    struct epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.u32 = 0;
-    epoll_ctl(epfd, EPOLL_CTL_ADD, ctx->rx_efd, &ev);
-
-    log_info("tcp rx consumer started");
-    while (app->running && !ctx->rx_stop) {
-        struct epoll_event evs[8];
-        int n = epoll_wait(epfd, evs, 8, 500);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        for (int i = 0; i < n; i++) {
-            eventfd_consume(ctx->rx_efd);
-            for (;;) {
-                tcp_pkt_t p;
-                pthread_mutex_lock(&ctx->rx_mutex);
-                int ok = (tcpq_pop(&ctx->rxq, &p) == 0);
-                pthread_mutex_unlock(&ctx->rx_mutex);
-                if (!ok) break;
-                if (app->flow && app->flow->on_tcp_rx)
-                    app->flow->on_tcp_rx(app, p.client_idx, p.data, p.len);
-            }
-        }
-    }
-    close(epfd);
-    log_info("tcp rx consumer stopped");
-    return NULL;
 }
 
 void *tcp_task(void *arg)
@@ -336,10 +295,8 @@ int tcp_init(void *arg)
     if (!ctx) return -1;
     memset(ctx, 0, sizeof(*ctx));
     ctx->epfd = -1;
-    ctx->rx_efd = -1;
     ctx->tx_efd = -1;
     pthread_mutex_init(&ctx->client_mutex, NULL);
-    pthread_mutex_init(&ctx->rx_mutex, NULL);
     pthread_mutex_init(&ctx->tx_mutex, NULL);
     ctx->port        = app->cfg->gw_args.tcp_port;
     ctx->max_clients = app->cfg->gw_args.max_clients;
@@ -348,17 +305,10 @@ int tcp_init(void *arg)
     /* TCP 数据收发专用 epoll（listen + 客户端 + TX eventfd，与 CAN 分开管理） */
     ctx->epfd = epoll_create1(0);
     if (ctx->epfd < 0) { log_error("tcp: epoll_create1 failed"); return -1; }
-    ctx->rx_efd = eventfd(0, EFD_NONBLOCK);
     ctx->tx_efd = eventfd(0, EFD_NONBLOCK);
-    if (ctx->rx_efd < 0 || ctx->tx_efd < 0) { log_error("tcp: eventfd failed"); return -1; }
+    if (ctx->tx_efd < 0) { log_error("tcp: eventfd failed"); return -1; }
     for (int i = 0; i < TCP_MAX_CLIENTS; i++) ctx->clients[i].fd = -1;
-    tcpq_reset(&ctx->rxq);
     tcpq_reset(&ctx->txq);
-
-    /* 独立 RX 消费线程：epoll 监听 rx_efd，弹出 RX 队列回调 on_tcp_rx */
-    if (pthread_create(&ctx->rx_tid, NULL, tcp_rx_consumer, app) != 0) {
-        log_error("tcp: create rx consumer thread failed"); return -1;
-    }
     return 0;
 }
 
@@ -368,19 +318,12 @@ void tcp_cleanup(void *arg)
     tcp_ctx_t *ctx = app->tcp;
     if (!ctx) return;
 
-    /* 停止并回收 RX 消费线程 */
-    ctx->rx_stop = 1;
-    eventfd_signal(ctx->rx_efd);
-    if (ctx->rx_tid) pthread_join(ctx->rx_tid, NULL);
-
     for (int i = 0; i < TCP_MAX_CLIENTS; i++)
         if (ctx->clients[i].fd >= 0) { close(ctx->clients[i].fd); ctx->clients[i].fd = -1; }
     if (ctx->listen_fd >= 0) close(ctx->listen_fd);
-    if (ctx->rx_efd >= 0) close(ctx->rx_efd);
     if (ctx->tx_efd >= 0) close(ctx->tx_efd);
     if (ctx->epfd >= 0) close(ctx->epfd);
     pthread_mutex_destroy(&ctx->client_mutex);
-    pthread_mutex_destroy(&ctx->rx_mutex);
     pthread_mutex_destroy(&ctx->tx_mutex);
 }
 

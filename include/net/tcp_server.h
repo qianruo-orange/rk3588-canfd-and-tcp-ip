@@ -31,9 +31,8 @@ typedef struct {
 } client_t;
 
 /* ---- TCP 子系统上下文 ----
- * RX 队列：tcp_task 从客户端读到数据后压入，独立消费线程弹出并回调 on_tcp_rx。
  * TX 队列：业务线程压入待发送包，tcp_task 弹出并写客户端 socket。
- * 两侧都用 eventfd 唤醒，epoll 检测“有数据压入 / 弹出”。 */
+ * 用 eventfd 唤醒，epoll 检测"有数据压入"。 */
 typedef struct tcp_ctx {
     int           listen_fd;
     int           port;
@@ -42,12 +41,6 @@ typedef struct tcp_ctx {
     int           client_count;
     pthread_mutex_t client_mutex;
     int           epfd;      /* TCP 数据收发 epoll（tcp_task 线程） */
-
-    pthread_mutex_t rx_mutex;
-    tcp_queue_t     rxq;
-    int             rx_efd;
-    volatile sig_atomic_t rx_stop;
-    pthread_t       rx_tid;
 
     pthread_mutex_t tx_mutex;
     tcp_queue_t     txq;

@@ -396,11 +396,9 @@ static void handle_can_input(app_ctx_t *app, int can_idx)
         struct canfd_frame frame;
         ssize_t n = read(fd, &frame, sizeof(frame));
         if (n > 0) {
-            /* 压入 RX 队列并写 eventfd 唤醒独立消费线程；由消费线程回调 on_can_rx */
-            pthread_mutex_lock(&ctx->rx_mutex);
-            if (rxq_push(&ctx->rxq, ctx->ifaces[can_idx].ifname, &frame) == 0)
-                eventfd_signal(ctx->rx_efd);
-            pthread_mutex_unlock(&ctx->rx_mutex);
+            /* 直接在 can_task 线程中回调，不再使用 RX 队列 */
+            if (app->flow && app->flow->on_can_rx)
+                app->flow->on_can_rx(app, ctx->ifaces[can_idx].ifname, &frame);
         } else if (n == 0) {
             break;
         } else {
@@ -424,47 +422,6 @@ static void handle_can_input(app_ctx_t *app, int can_idx)
         }
     }
     pthread_mutex_unlock(&app->can_mutex);
-}
-
-/* CAN RX 独立消费线程：epoll 监听 rx_efd，弹出 RX 队列并回调数据流钩子 */
-static void *can_rx_consumer(void *arg)
-{
-    app_ctx_t *app = (app_ctx_t *)arg;
-    can_ctx_t *ctx = app->can;
-    if (!ctx) return NULL;
-
-    int epfd = epoll_create1(0);
-    if (epfd < 0) { log_error("can rx: epoll_create1 failed"); return NULL; }
-    struct epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.u32 = 0;
-    epoll_ctl(epfd, EPOLL_CTL_ADD, ctx->rx_efd, &ev);
-
-    log_info("can rx consumer started");
-    while (app->running && !ctx->rx_stop) {
-        struct epoll_event evs[8];
-        int n = epoll_wait(epfd, evs, 8, 500);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        for (int i = 0; i < n; i++) {
-            eventfd_consume(ctx->rx_efd);
-            /* 排空 RX 队列并逐个回调数据流钩子 */
-            for (;;) {
-                can_rx_item_t item;
-                pthread_mutex_lock(&ctx->rx_mutex);
-                int ok = (rxq_pop(&ctx->rxq, &item) == 0);
-                pthread_mutex_unlock(&ctx->rx_mutex);
-                if (!ok) break;
-                if (app->flow && app->flow->on_can_rx)
-                    app->flow->on_can_rx(app, item.ifname, &item.frame);
-            }
-        }
-    }
-    close(epfd);
-    log_info("can rx consumer stopped");
-    return NULL;
 }
 
 void *can_task(void *arg)
@@ -551,7 +508,6 @@ int can_init(void *arg)
     can_ctx_t *ctx = app->can;
     memset(ctx, 0, sizeof(*ctx));
     ctx->epfd  = -1;
-    ctx->rx_efd = -1;
     ctx->tx_efd = -1;
     ctx->ifaces = args->can_ifaces;
     ctx->count  = args->can_count;

@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <net/if.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "net/tcp_server.h"
@@ -21,10 +22,22 @@
 #define TCP_TXEFD_TAG 0x40000000u
 #define TCP_CLIENT_TAG(idx) (0x80000000u | (uint32_t)((idx) + 1))
 
-int tcp_listen(int port)
+int tcp_listen(int port, const char *bind_ifname)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { log_error("tcp socket"); return -1; }
+
+    /* 指定网卡时用 SO_BINDTODEVICE 绑定到该接口（否则 INADDR_ANY 绑定所有网卡） */
+    if (bind_ifname && bind_ifname[0]) {
+        struct ifreq ifr;
+        memset(&ifr, 0, sizeof(ifr));
+        snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", bind_ifname);
+        if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof(ifr)) < 0) {
+            log_error("tcp bind device %s: %s", bind_ifname, strerror(errno));
+            close(fd); return -1;
+        }
+    }
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -43,7 +56,10 @@ int tcp_listen(int port)
         log_error("tcp fcntl O_NONBLOCK: %s", strerror(errno));
         close(fd); return -1;
     }
-    log_info("TCP listening on port %d", port);
+    if (bind_ifname && bind_ifname[0])
+        log_info("TCP listening on %s:%d", bind_ifname, port);
+    else
+        log_info("TCP listening on port %d", port);
     return fd;
 }
 
@@ -294,7 +310,8 @@ int tcp_init(void *arg)
     pthread_mutex_init(&ctx->tx_mutex, NULL);
     ctx->port        = app->cfg->gw_args.tcp_port;
     ctx->max_clients = app->cfg->gw_args.max_clients;
-    ctx->listen_fd = tcp_listen(ctx->port);
+    safe_strncpy(ctx->bind_ifname, sizeof(ctx->bind_ifname), app->cfg->gw_args.tcp_bind);
+    ctx->listen_fd = tcp_listen(ctx->port, ctx->bind_ifname);
     if (ctx->listen_fd < 0) return -1;
     /* TCP 数据收发专用 epoll（listen + 客户端 + TX eventfd，与 CAN 分开管理） */
     ctx->epfd = epoll_create1(0);

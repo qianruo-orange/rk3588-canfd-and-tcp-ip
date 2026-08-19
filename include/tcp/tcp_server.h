@@ -37,6 +37,7 @@ typedef struct tcp_ctx {
     int           listen_fd;
     int           port;
     int           max_clients;
+    char          bind_ifname[IFNAMSIZ]; /* TCP 监听绑定网卡名（空 = 绑定所有网卡） */
     client_t      clients[TCP_MAX_CLIENTS];
     int           client_count;
     pthread_mutex_t client_mutex;
@@ -47,7 +48,7 @@ typedef struct tcp_ctx {
     int             tx_efd;
 } tcp_ctx_t;
 
-int tcp_listen(int port);
+int tcp_listen(int port, const char *bind_ifname);
 
 /* 创建 TCP 监听套接字。必须在 can_init() 之后调用。 */
 int  tcp_init(void *arg);

@@ -42,7 +42,7 @@ void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri
     }
     J("},");
 
-    J("\"tcp_port\":%d,\"max_clients\":%d", tcp->port, tcp->max_clients);
+    J("\"tcp_port\":%d,\"max_clients\":%d,\"tcp_bind\":\"%s\"", tcp->port, tcp->max_clients, tcp->bind_ifname);
     if (cfg->video_device[0]) J(",\"video_device\":\"%s\"", cfg->video_device);
     J(",\"video_width\":%d,\"video_height\":%d", cfg->video_width, cfg->video_height);
     J("}");
@@ -201,33 +201,43 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
                  iface->up ? "on" : "off");
     }
 
-    /* -- 应用 TCP 端口 -- */
-    const char *v = form_find(keys, vals, count, "tcp_port");
-    if (v) {
-        int new_port = atoi(v);
-        if (new_port > 0 && new_port != tcp->port) {
-            /* 加锁串行化与 tcp_task 的 listen 事件管理，避免 fd/epoll 竞态 */
-            pthread_mutex_lock(&tcp->client_mutex);
-            if (tcp->listen_fd >= 0 && tcp->epfd >= 0)
-                epoll_ctl(tcp->epfd, EPOLL_CTL_DEL, tcp->listen_fd, NULL);
-            if (tcp->listen_fd >= 0) close(tcp->listen_fd);
+    /* -- 应用 TCP 监听配置（端口 / 绑定网卡） -- */
+    const char *pv = form_find(keys, vals, count, "tcp_port");
+    const char *bv = form_find(keys, vals, count, "tcp_bind");
 
-            tcp->listen_fd = tcp_listen(new_port);
-            tcp->port = new_port;
+    int  want_port = pv ? atoi(pv) : tcp->port;
+    char want_bind[IFNAMSIZ];
+    if (bv) safe_strncpy(want_bind, sizeof(want_bind), bv);
+    else   safe_strncpy(want_bind, sizeof(want_bind), tcp->bind_ifname);
 
-            if (tcp->listen_fd >= 0 && tcp->epfd >= 0) {
-                struct epoll_event ev;
-                ev.events = EPOLLIN;
-                ev.data.u32 = 0;
-                if (epoll_ctl(tcp->epfd, EPOLL_CTL_ADD, tcp->listen_fd, &ev) < 0)
-                    log_error("config: epoll add listen failed");
-            }
-            pthread_mutex_unlock(&tcp->client_mutex);
-            log_info("config: TCP port changed to %d", new_port);
+    if (want_port <= 0) want_port = tcp->port;
+    int changed = (want_port != tcp->port) || (strcmp(want_bind, tcp->bind_ifname) != 0);
+
+    if (changed) {
+        /* 加锁串行化与 tcp_task 的 listen 事件管理，避免 fd/epoll 竞态 */
+        pthread_mutex_lock(&tcp->client_mutex);
+        if (tcp->listen_fd >= 0 && tcp->epfd >= 0)
+            epoll_ctl(tcp->epfd, EPOLL_CTL_DEL, tcp->listen_fd, NULL);
+        if (tcp->listen_fd >= 0) close(tcp->listen_fd);
+
+        tcp->listen_fd = tcp_listen(want_port, want_bind);
+        if (tcp->listen_fd >= 0) {
+            tcp->port = want_port;
+            safe_strncpy(tcp->bind_ifname, sizeof(tcp->bind_ifname), want_bind);
         }
+
+        if (tcp->listen_fd >= 0 && tcp->epfd >= 0) {
+            struct epoll_event ev;
+            ev.events = EPOLLIN;
+            ev.data.u32 = 0;
+            if (epoll_ctl(tcp->epfd, EPOLL_CTL_ADD, tcp->listen_fd, &ev) < 0)
+                log_error("config: epoll add listen failed");
+        }
+        pthread_mutex_unlock(&tcp->client_mutex);
+        log_info("config: TCP listen changed to %s:%d", want_bind[0] ? want_bind : "*", want_port);
     }
 
-    v = form_find(keys, vals, count, "max_clients");
+    const char *v = form_find(keys, vals, count, "max_clients");
     if (v) {
         int mc = atoi(v);
         if (mc < 1) mc = 1;

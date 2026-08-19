@@ -282,6 +282,7 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 | `can_up` | `<name> on\|off` | 启动时 bring up |
 | `tcp_port` | `<port>` | TCP 端口，默认 6666 |
 | `max_clients` | `<n>` | 最大客户端数，默认 16 |
+| `tcp_bind` | `<ifname>` | TCP 监听绑定网卡名，留空表示绑定所有网卡（`INADDR_ANY`） |
 | `video_device` | `<path>` | 视频设备，默认 `/dev/video0` |
 | `video_width` / `video_height` | `<n>` | 分辨率，默认 640×480 |
 | `can_dbc` | `<name> <path>` | 按 CAN 通道配置 DBC 数据库文件路径，留空则不启用该通道信号解码 |

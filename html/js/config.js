@@ -187,6 +187,7 @@
       var cfg = await (await fetch('/api/config')).json();
       document.getElementById('tp').value = cfg.tcp_port || '';
       document.getElementById('mc').value = cfg.max_clients || '16';
+      document.getElementById('bind').value = cfg.tcp_bind || '';
       document.getElementById('vd').value = cfg.video_device || '/dev/video0';
       /* 自动查询摄像头参数并同步下拉框 */
       if (cfg.video_device) setTimeout(queryCaps, 500);
@@ -242,6 +243,7 @@
 
     d['tcp_port'] = document.getElementById('tp').value;
     d['max_clients'] = document.getElementById('mc').value;
+    d['tcp_bind'] = document.getElementById('bind').value;
     d['video_device'] = document.getElementById('vd').value;
     d['video_width'] = document.getElementById('vw').value;
     d['video_height'] = document.getElementById('vh').value;

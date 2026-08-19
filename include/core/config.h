@@ -2,6 +2,7 @@
 #define CONFIG_H
 
 #include <linux/can.h>
+#include <linux/if.h>
 
 #include "core/common.h"  /* PATH_CONFIG */
 #include "can/can_queue.h"
@@ -39,6 +40,7 @@ typedef struct {
     int         can_count;
     int         tcp_port;
     int         max_clients;
+    char        tcp_bind[IFNAMSIZ]; /* TCP 监听绑定网卡名（空 = 绑定所有网卡 INADDR_ANY） */
 } gateway_args_t;
 
 struct app_config_t {

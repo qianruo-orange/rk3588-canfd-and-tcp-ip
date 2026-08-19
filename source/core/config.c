@@ -85,6 +85,7 @@ int config_load(struct app_config_t *cfg)
                 for (int i = 0; i < a->can_count; i++) if (!strcmp(a->can_ifaces[i].ifname, nm)) { a->can_ifaces[i].up = !strcmp(m, "on"); break; }
         } else if (strcmp(key, "tcp_port") == 0) a->tcp_port = parse_int_clamped(val, 1, 65535, 6666);
         else if (strcmp(key, "max_clients") == 0) a->max_clients = parse_int_clamped(val, 1, TCP_MAX_CLIENTS, 16);
+        else if (strcmp(key, "tcp_bind") == 0) safe_strncpy(a->tcp_bind, sizeof(a->tcp_bind), val);
         else if (strcmp(key, "video_device") == 0) safe_strncpy(cfg->video_device, sizeof(cfg->video_device), val);
         else if (strcmp(key, "video_width") == 0) cfg->video_width = parse_int_clamped(val, 1, 4096, 640);
         else if (strcmp(key, "video_height") == 0) cfg->video_height = parse_int_clamped(val, 1, 4096, 480);
@@ -125,6 +126,8 @@ void config_save(app_ctx_t *app)
     }
 
     fprintf(fp, "\ntcp_port %d\nmax_clients %d\n", tcp->port, tcp->max_clients);
+    if (tcp->bind_ifname[0])
+        fprintf(fp, "tcp_bind %s\n", tcp->bind_ifname);
     fprintf(fp, "\n# --- 视频 ---\n");
     fprintf(fp, "video_device %s\n", cfg->video_device);
     fprintf(fp, "video_width %d\n", cfg->video_width);

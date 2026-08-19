@@ -169,7 +169,7 @@ static int http_check_auth_common(const char *req, int fd, int require_root)
         g_auth_fail_win = now;
     }
     if (g_auth_fail >= AUTH_FAIL_LIMIT) {
-        log_info("HTTP auth: rate limited");
+        LOG_INFO("HTTP auth: rate limited");
         goto deny;
     }
 
@@ -227,12 +227,12 @@ static int http_check_auth_common(const char *req, int fd, int require_root)
     if (ok)
         return 1;
 
-    log_info("HTTP auth: user '%s' denied", username);
+    LOG_INFO("HTTP auth: user '%s' denied", username);
     goto deny;
 
 auth_unlock_deny:
     pthread_mutex_unlock(&g_auth_mutex);
-    log_info("HTTP auth: user '%s' denied", username);
+    LOG_INFO("HTTP auth: user '%s' denied", username);
 deny:
     g_auth_fail++;
     dprintf(fd,
@@ -480,10 +480,10 @@ void *http_server_task(void *arg)
     app_ctx_t *app = (app_ctx_t *)arg;
 
     g_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (g_listen_fd < 0) { log_error("http socket"); return NULL; }
+    if (g_listen_fd < 0) { LOG_ERROR("http socket"); return NULL; }
 
     if (set_socket_nonblocking(g_listen_fd) < 0) {
-        log_error("http set nonblocking");
+        LOG_ERROR("http set nonblocking");
         close(g_listen_fd);
         g_listen_fd = -1;
         return NULL;
@@ -496,17 +496,17 @@ void *http_server_task(void *arg)
     addr.sin_port        = htons(HTTP_DEFAULT_PORT);
 
     if (bind(g_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        log_error("http bind :%d", HTTP_DEFAULT_PORT);
+        LOG_ERROR("http bind :%d", HTTP_DEFAULT_PORT);
         close(g_listen_fd); g_listen_fd = -1; return NULL;
     }
     if (listen(g_listen_fd, 10) < 0) {
-        log_error("http listen :%d", HTTP_DEFAULT_PORT);
+        LOG_ERROR("http listen :%d", HTTP_DEFAULT_PORT);
         close(g_listen_fd); g_listen_fd = -1; return NULL;
     }
 
     int epfd = epoll_create1(0);
     if (epfd < 0) {
-        log_error("http epoll_create1");
+        LOG_ERROR("http epoll_create1");
         close(g_listen_fd);
         g_listen_fd = -1;
         return NULL;
@@ -516,14 +516,14 @@ void *http_server_task(void *arg)
     ev.events = EPOLLIN;
     ev.data.fd = g_listen_fd;
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, g_listen_fd, &ev) < 0) {
-        log_error("http epoll_ctl add listen");
+        LOG_ERROR("http epoll_ctl add listen");
         close(epfd);
         close(g_listen_fd);
         g_listen_fd = -1;
         return NULL;
     }
 
-    log_info("HTTP server listening on port %d", HTTP_DEFAULT_PORT);
+    LOG_INFO("HTTP server listening on port %d", HTTP_DEFAULT_PORT);
 
     struct epoll_event events[64];
     while (app->running) {
@@ -545,12 +545,12 @@ void *http_server_task(void *arg)
                     if (client_fd < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
                         if (errno == EINTR) continue;
-                        log_error("http accept");
+                        LOG_ERROR("http accept");
                         break;
                     }
                     if (__atomic_fetch_add(&g_http_active, 1, __ATOMIC_RELAXED) >= HTTP_MAX_CONN) {
                         __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
-                        log_error("http: too many connections, rejecting %s",
+                        LOG_ERROR("http: too many connections, rejecting %s",
                                   inet_ntoa(client.sin_addr));
                         close(client_fd);
                         continue;
@@ -561,7 +561,7 @@ void *http_server_task(void *arg)
                     cev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP;
                     cev.data.fd = client_fd;
                     if (epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev) < 0) {
-                        log_error("http epoll_ctl add client");
+                        LOG_ERROR("http epoll_ctl add client");
                         close(client_fd);
                         __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
                     }
@@ -584,7 +584,7 @@ void *http_server_task(void *arg)
     close(epfd);
     close(g_listen_fd);
     g_listen_fd = -1;
-    log_info("HTTP server stopped");
+    LOG_INFO("HTTP server stopped");
     return NULL;
 }
 
@@ -594,7 +594,7 @@ int http_server_start(void *arg)
 {
     (void)arg;
     /* HTTP 端口固定为 80（见 http.h 的 HTTP_DEFAULT_PORT） */
-    log_info("HTTP port = %d", HTTP_DEFAULT_PORT);
+    LOG_INFO("HTTP port = %d", HTTP_DEFAULT_PORT);
     return 0;
 }
 

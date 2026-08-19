@@ -57,7 +57,7 @@ int watchdog_register_thread(pthread_t tid, const char *name, int timeout, int m
         g_wd_slots[slot].timeout = timeout > 0 ? timeout : 1;
         g_wd_slots[slot].max_miss = max_miss > 0 ? max_miss : 1;
         g_wd_slots[slot].last_advance = time(NULL);
-        log_info("watchdog: thread '%s' tid=%lu updated timeout=%ds miss=%d",
+        LOG_INFO("watchdog: thread '%s' tid=%lu updated timeout=%ds miss=%d",
                  watchdog_slot_name(&g_wd_slots[slot]), (unsigned long)tid,
                  g_wd_slots[slot].timeout, g_wd_slots[slot].max_miss);
         pthread_mutex_unlock(&g_wd_mutex);
@@ -75,13 +75,13 @@ int watchdog_register_thread(pthread_t tid, const char *name, int timeout, int m
         g_wd_slots[i].miss_count = 0;
         g_wd_slots[i].last_advance = time(NULL);
         g_wd_slots[i].active = 1;
-        log_info("watchdog: thread '%s' tid=%lu registered timeout=%ds miss=%d",
+        LOG_INFO("watchdog: thread '%s' tid=%lu registered timeout=%ds miss=%d",
                  watchdog_slot_name(&g_wd_slots[i]), (unsigned long)tid,
                  g_wd_slots[i].timeout, g_wd_slots[i].max_miss);
         pthread_mutex_unlock(&g_wd_mutex);
         return i;
     }
-    log_error("watchdog: register failed for thread '%s' tid=%lu (slot full)",
+    LOG_ERROR("watchdog: register failed for thread '%s' tid=%lu (slot full)",
               (name && *name) ? name : "(unnamed)", (unsigned long)tid);
     pthread_mutex_unlock(&g_wd_mutex);
     return -1;
@@ -97,7 +97,7 @@ int watchdog_unregister_thread(pthread_t tid, const char *name)
         pthread_mutex_unlock(&g_wd_mutex);
         return -1;
     }
-    log_info("watchdog: thread '%s' tid=%lu unregistered",
+    LOG_INFO("watchdog: thread '%s' tid=%lu unregistered",
              watchdog_slot_name(&g_wd_slots[slot]),
              (unsigned long)g_wd_slots[slot].tid);
     g_wd_slots[slot].active = 0;
@@ -125,7 +125,7 @@ int watchdog_feed_thread(pthread_t tid, const char *name)
         if (now != g_feed_miss_log_at || strcmp(g_feed_miss_name, miss_name) != 0) {
             g_feed_miss_log_at = now;
             safe_strncpy(g_feed_miss_name, sizeof(g_feed_miss_name), miss_name);
-            log_error("watchdog: feed ignored for unregistered thread '%s' tid=%lu",
+            LOG_ERROR("watchdog: feed ignored for unregistered thread '%s' tid=%lu",
                       miss_name, (unsigned long)tid);
         }
         pthread_mutex_unlock(&g_wd_mutex);
@@ -142,7 +142,7 @@ int watchdog_init(void *arg)
 {
     (void)arg;
     const char *env_usec = getenv("WATCHDOG_USEC");
-    if (env_usec) { long usec = atol(env_usec); if (usec > 0) { wd_notify_sec = (int)(usec / 2000000); if (wd_notify_sec < 1) wd_notify_sec = 1; log_info("watchdog: systemd WATCHDOG_USEC=%ld notify=%ds", usec, wd_notify_sec); } }
+    if (env_usec) { long usec = atol(env_usec); if (usec > 0) { wd_notify_sec = (int)(usec / 2000000); if (wd_notify_sec < 1) wd_notify_sec = 1; LOG_INFO("watchdog: systemd WATCHDOG_USEC=%ld notify=%ds", usec, wd_notify_sec); } }
     return 0;
 }
 
@@ -157,7 +157,7 @@ void *watchdog_task(void *arg)
         g_wd_slots[i].last_advance = now;
     }
     pthread_mutex_unlock(&g_wd_mutex);
-    log_info("watchdog started");
+    LOG_INFO("watchdog started");
     sd_notify(0, "READY=1");
     time_t next_notify = 0; int notify_fail = 0;
     if (wd_notify_sec > 0) { sd_notify(0, "WATCHDOG=1"); next_notify = time(NULL) + wd_notify_sec; }
@@ -174,7 +174,7 @@ void *watchdog_task(void *arg)
             else if (now - g_wd_slots[i].last_advance >= timeout) {
                 g_wd_slots[i].miss_count++; g_wd_slots[i].last_advance = now;
                 if (g_wd_slots[i].miss_count >= g_wd_slots[i].max_miss) {
-                    log_error("watchdog: thread '%s' tid=%lu STUCK (missed %d/%d, beat=%d)",
+                    LOG_ERROR("watchdog: thread '%s' tid=%lu STUCK (missed %d/%d, beat=%d)",
                         watchdog_slot_name(&g_wd_slots[i]),
                         (unsigned long)g_wd_slots[i].tid, g_wd_slots[i].miss_count,
                         g_wd_slots[i].max_miss, cur);
@@ -183,7 +183,7 @@ void *watchdog_task(void *arg)
                     should_stop = 1;
                     break;
                 }
-                else log_error("watchdog: thread '%s' tid=%lu timeout #%d/%d",
+                else LOG_ERROR("watchdog: thread '%s' tid=%lu timeout #%d/%d",
                                watchdog_slot_name(&g_wd_slots[i]),
                                (unsigned long)g_wd_slots[i].tid,
                                g_wd_slots[i].miss_count, g_wd_slots[i].max_miss);
@@ -200,9 +200,9 @@ void *watchdog_task(void *arg)
 
         if (wd_notify_sec > 0 && now >= next_notify) {
             if (sd_notify(0, "WATCHDOG=1") > 0) notify_fail = 0;
-            else if (++notify_fail >= 3) { log_error("watchdog: sd_notify failed, exiting"); app->running = 0; break; }
+            else if (++notify_fail >= 3) { LOG_ERROR("watchdog: sd_notify failed, exiting"); app->running = 0; break; }
             next_notify = now + wd_notify_sec;
         }
     }
-    log_info("watchdog stopped"); return NULL;
+    LOG_INFO("watchdog stopped"); return NULL;
 }

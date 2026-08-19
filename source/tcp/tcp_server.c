@@ -25,7 +25,7 @@
 int tcp_listen(int port, const char *bind_ifname)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { log_error("tcp socket"); return -1; }
+    if (fd < 0) { LOG_ERROR("tcp socket"); return -1; }
 
     /* 指定网卡时用 SO_BINDTODEVICE 绑定到该接口（否则 INADDR_ANY 绑定所有网卡） */
     if (bind_ifname && bind_ifname[0]) {
@@ -33,7 +33,7 @@ int tcp_listen(int port, const char *bind_ifname)
         memset(&ifr, 0, sizeof(ifr));
         snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", bind_ifname);
         if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof(ifr)) < 0) {
-            log_error("tcp bind device %s: %s", bind_ifname, strerror(errno));
+            LOG_ERROR("tcp bind device %s: %s", bind_ifname, strerror(errno));
             close(fd); return -1;
         }
     }
@@ -44,22 +44,22 @@ int tcp_listen(int port, const char *bind_ifname)
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons((uint16_t)port);
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        log_error("tcp bind :%d: %s", port, strerror(errno));
+        LOG_ERROR("tcp bind :%d: %s", port, strerror(errno));
         close(fd); return -1;
     }
     if (listen(fd, SOMAXCONN) < 0) {
-        log_error("tcp listen :%d: %s", port, strerror(errno));
+        LOG_ERROR("tcp listen :%d: %s", port, strerror(errno));
         close(fd); return -1;
     }
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        log_error("tcp fcntl O_NONBLOCK: %s", strerror(errno));
+        LOG_ERROR("tcp fcntl O_NONBLOCK: %s", strerror(errno));
         close(fd); return -1;
     }
     if (bind_ifname && bind_ifname[0])
-        log_info("TCP listening on %s:%d", bind_ifname, port);
+        LOG_INFO("TCP listening on %s:%d", bind_ifname, port);
     else
-        log_info("TCP listening on port %d", port);
+        LOG_INFO("TCP listening on port %d", port);
     return fd;
 }
 
@@ -71,19 +71,19 @@ static int tcp_accept(int listen_fd)
     if (client_fd < 0) {
         /* 非阻塞监听 fd 下 EAGAIN/EWOULDBLOCK 属正常无连接，不刷错误日志 */
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
-            log_error("tcp accept: %s", strerror(errno));
+            LOG_ERROR("tcp accept: %s", strerror(errno));
         return -1;
     }
     int flags = fcntl(client_fd, F_GETFL, 0);
     if (flags < 0 || fcntl(client_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        log_error("tcp client fcntl O_NONBLOCK: %s", strerror(errno));
+        LOG_ERROR("tcp client fcntl O_NONBLOCK: %s", strerror(errno));
         close(client_fd);
         return -1;
     }
     char ip_str[INET_ADDRSTRLEN];
     if (inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, sizeof(ip_str)) == NULL)
         safe_strncpy(ip_str, sizeof(ip_str), "?");
-    log_info("TCP client connected: %s:%d  fd=%d", ip_str, ntohs(client_addr.sin_port), client_fd);
+    LOG_INFO("TCP client connected: %s:%d  fd=%d", ip_str, ntohs(client_addr.sin_port), client_fd);
     return client_fd;
 }
 
@@ -263,13 +263,13 @@ void *tcp_task(void *arg)
     }
     pthread_mutex_unlock(&ctx->client_mutex);
 
-    log_info("tcp_task started");
+    LOG_INFO("tcp_task started");
     while (app->running) {
         struct epoll_event events[64];
         int nfds = epoll_wait(ctx->epfd, events, 64, 500);
         if (nfds < 0) {
             if (errno == EINTR) { watchdog_feed_self("tcp"); continue; }
-            log_error("tcp epoll_wait"); break;
+            LOG_ERROR("tcp epoll_wait"); break;
         }
         watchdog_feed_self("tcp");
         for (int i = 0; i < nfds; i++) {
@@ -294,7 +294,7 @@ void *tcp_task(void *arg)
             if (dead) tcp_client_del(ctx, client_idx);
         }
     }
-    log_info("tcp_task stopped");
+    LOG_INFO("tcp_task stopped");
     return NULL;
 }
 
@@ -315,9 +315,9 @@ int tcp_init(void *arg)
     if (ctx->listen_fd < 0) return -1;
     /* TCP 数据收发专用 epoll（listen + 客户端 + TX eventfd，与 CAN 分开管理） */
     ctx->epfd = epoll_create1(0);
-    if (ctx->epfd < 0) { log_error("tcp: epoll_create1 failed"); return -1; }
+    if (ctx->epfd < 0) { LOG_ERROR("tcp: epoll_create1 failed"); return -1; }
     ctx->tx_efd = eventfd(0, EFD_NONBLOCK);
-    if (ctx->tx_efd < 0) { log_error("tcp: eventfd failed"); return -1; }
+    if (ctx->tx_efd < 0) { LOG_ERROR("tcp: eventfd failed"); return -1; }
     for (int i = 0; i < TCP_MAX_CLIENTS; i++) ctx->clients[i].fd = -1;
     tcpq_reset(&ctx->txq);
     return 0;
@@ -346,12 +346,12 @@ static void tcp_client_add(tcp_ctx_t *ctx, int fd)
     if (limit > TCP_MAX_CLIENTS) limit = TCP_MAX_CLIENTS;   /* clamp，防止数组越界 */
     for (int i = 0; i < limit; i++) { if (ctx->clients[i].fd == -1) { idx = i; break; } }
     if (idx < 0 && ctx->client_count < limit) idx = ctx->client_count;
-    if (idx < 0) { log_error("too many clients, rejecting fd=%d", fd); close(fd); pthread_mutex_unlock(&ctx->client_mutex); return; }
+    if (idx < 0) { LOG_ERROR("too many clients, rejecting fd=%d", fd); close(fd); pthread_mutex_unlock(&ctx->client_mutex); return; }
     client_t *c = &ctx->clients[idx]; memset(c, 0, sizeof(*c)); c->fd = fd;
     if (idx >= ctx->client_count) ctx->client_count = idx + 1;
     struct epoll_event ev; ev.events = EPOLLIN | EPOLLRDHUP; ev.data.u32 = TCP_CLIENT_TAG(idx);
     epoll_ctl(ctx->epfd, EPOLL_CTL_ADD, fd, &ev);
-    log_info("client added fd=%d idx=%d", fd, idx);
+    LOG_INFO("client added fd=%d idx=%d", fd, idx);
     pthread_mutex_unlock(&ctx->client_mutex);
 }
 
@@ -362,7 +362,7 @@ static void tcp_client_del(tcp_ctx_t *ctx, int idx)
     client_t *c = &ctx->clients[idx];
     if (c->fd < 0) { pthread_mutex_unlock(&ctx->client_mutex); return; }
     epoll_ctl(ctx->epfd, EPOLL_CTL_DEL, c->fd, NULL);
-    close(c->fd); log_info("client removed fd=%d idx=%d", c->fd, idx);
+    close(c->fd); LOG_INFO("client removed fd=%d idx=%d", c->fd, idx);
     c->fd = -1;
     pthread_mutex_unlock(&ctx->client_mutex);
 }

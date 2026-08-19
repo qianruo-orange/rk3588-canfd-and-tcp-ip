@@ -189,14 +189,14 @@ static void wait_threads_exit(void)
  */
 static void shutdown_modules_safe(void)
 {
-    log_info("Shutting down modules...");
+    LOG_INFO("Shutting down modules...");
     for (int i = 0; i < MOD_COUNT; i++) {
         if (g_modules[i].ops.dtor) {
-            log_info("Shutting down module %s...", g_modules[i].name);
+            LOG_INFO("Shutting down module %s...", g_modules[i].name);
             g_modules[i].ops.dtor(&g_app);
         }
     }
-    log_info("Modules shut down successfully.");
+    LOG_INFO("Modules shut down successfully.");
     g_app.running = 0;
     http_server_stop(&g_app);
     video_stream_shutdown(&g_app);
@@ -230,9 +230,9 @@ int main(void)
         const char *path = cfg.args.can_ifaces[i].dbc_path;
         if (!path[0]) continue;
         if (dbc_load(&g_dbc[i], path) < 0)
-            log_error("dbc: load '%s' for %s failed", path, cfg.args.can_ifaces[i].ifname);
+            LOG_ERROR("dbc: load '%s' for %s failed", path, cfg.args.can_ifaces[i].ifname);
         else
-            log_info("dbc: loaded '%s' for %s (%d message(s), %d signal(s))",
+            LOG_INFO("dbc: loaded '%s' for %s (%d message(s), %d signal(s))",
                      path, cfg.args.can_ifaces[i].ifname, g_dbc[i].msg_count, g_dbc[i].sig_count);
     }
 
@@ -270,7 +270,7 @@ int main(void)
 
         if (rc != 0) {
             __atomic_fetch_sub(&g_app.threads_running, 1, __ATOMIC_RELAXED);
-            log_error("create thread '%s' failed: %s", m->name, strerror(rc));
+            LOG_ERROR("create thread '%s' failed: %s", m->name, strerror(rc));
             goto fail;
         }
 
@@ -280,7 +280,7 @@ int main(void)
             CPU_ZERO(&set);
             CPU_SET(m->thr.cpu, &set);
             if (pthread_setaffinity_np(m->tid, sizeof(set), &set) != 0)
-                log_error("bind thread '%s' to cpu %d failed: %s",
+                LOG_ERROR("bind thread '%s' to cpu %d failed: %s",
                           m->name, m->thr.cpu, strerror(errno));
         }
 

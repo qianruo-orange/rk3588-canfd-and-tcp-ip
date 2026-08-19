@@ -49,18 +49,18 @@ static int init_video_device(video_ctx_t *vs, int verbose)
     if (vs->fd < 0) {
         /* 相机未连接是常见场景：重试时静默，仅在状态切换时详细记录，避免刷屏 */
         if (verbose)
-            log_error("video_stream: open %s failed: %s", vs->device, strerror(errno));
+            LOG_ERROR("video_stream: open %s failed: %s", vs->device, strerror(errno));
         return -1;
     }
     watchdog_feed_self("video");
 
     struct v4l2_capability cap;
     if (ioctl(vs->fd, VIDIOC_QUERYCAP, &cap) < 0) {
-        log_error("video_stream: VIDIOC_QUERYCAP failed");
+        LOG_ERROR("video_stream: VIDIOC_QUERYCAP failed");
         goto fail_close;
     }
     if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
-        log_error("video_stream: device %s is not video capture", vs->device);
+        LOG_ERROR("video_stream: device %s is not video capture", vs->device);
         goto fail_close;
     }
     watchdog_feed_self("video");
@@ -77,7 +77,7 @@ static int init_video_device(video_ctx_t *vs, int verbose)
         fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
         if (ioctl(vs->fd, VIDIOC_S_FMT, &fmt) < 0) {
             /* 仍失败则用 G_FMT 取驱动默认值 */
-            log_error("video_stream: S_FMT MJPG+YUYV failed, using driver default");
+            LOG_ERROR("video_stream: S_FMT MJPG+YUYV failed, using driver default");
             memset(&fmt, 0, sizeof(fmt));
             fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             if (ioctl(vs->fd, VIDIOC_G_FMT, &fmt) < 0)
@@ -89,7 +89,7 @@ static int init_video_device(video_ctx_t *vs, int verbose)
     /* 记录实际使用的参数 */
     vs->width  = fmt.fmt.pix.width;
     vs->height = fmt.fmt.pix.height;
-    log_info("video_stream: fmt=%c%c%c%c %dx%d",
+    LOG_INFO("video_stream: fmt=%c%c%c%c %dx%d",
         (char)(fmt.fmt.pix.pixelformat & 0xFF),
         (char)((fmt.fmt.pix.pixelformat >> 8) & 0xFF),
         (char)((fmt.fmt.pix.pixelformat >> 16) & 0xFF),
@@ -101,14 +101,14 @@ static int init_video_device(video_ctx_t *vs, int verbose)
     req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_MMAP;
     if (ioctl(vs->fd, VIDIOC_REQBUFS, &req) < 0 || req.count < 2) {
-        log_error("video_stream: VIDIOC_REQBUFS failed");
+        LOG_ERROR("video_stream: VIDIOC_REQBUFS failed");
         goto fail_close;
     }
     watchdog_feed_self("video");
 
     vs->buffers = calloc(req.count, sizeof(*vs->buffers));
     if (!vs->buffers) {
-        log_error("video_stream: calloc buffers failed");
+        LOG_ERROR("video_stream: calloc buffers failed");
         goto fail_close;
     }
     vs->nbuffers = req.count;
@@ -119,7 +119,7 @@ static int init_video_device(video_ctx_t *vs, int verbose)
         buf.memory = V4L2_MEMORY_MMAP;
         buf.index  = i;
         if (ioctl(vs->fd, VIDIOC_QUERYBUF, &buf) < 0) {
-            log_error("video_stream: VIDIOC_QUERYBUF failed");
+            LOG_ERROR("video_stream: VIDIOC_QUERYBUF failed");
             goto fail_buffers;
         }
         vs->buffers[i].length = buf.length;
@@ -127,11 +127,11 @@ static int init_video_device(video_ctx_t *vs, int verbose)
                                      PROT_READ | PROT_WRITE,
                                      MAP_SHARED, vs->fd, buf.m.offset);
         if (vs->buffers[i].start == MAP_FAILED) {
-            log_error("video_stream: mmap failed");
+            LOG_ERROR("video_stream: mmap failed");
             goto fail_buffers;
         }
         if (ioctl(vs->fd, VIDIOC_QBUF, &buf) < 0) {
-            log_error("video_stream: VIDIOC_QBUF failed");
+            LOG_ERROR("video_stream: VIDIOC_QBUF failed");
             goto fail_buffers;
         }
         watchdog_feed_self("video");
@@ -139,7 +139,7 @@ static int init_video_device(video_ctx_t *vs, int verbose)
 
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(vs->fd, VIDIOC_STREAMON, &type) < 0) {
-        log_error("video_stream: VIDIOC_STREAMON failed");
+        LOG_ERROR("video_stream: VIDIOC_STREAMON failed");
         goto fail_buffers;
     }
     watchdog_feed_self("video");
@@ -227,7 +227,7 @@ void *video_stream_task(void *arg)
 
         if (!ok) {
             if (!failed_before) {
-                log_error("video_stream: device init failed, entering idle retry loop (watchdog still fed)");
+                LOG_ERROR("video_stream: device init failed, entering idle retry loop (watchdog still fed)");
                 failed_before = 1;
             }
             /* 相机未连接：线程保持存活并持续喂狗，程序正常运行；
@@ -247,27 +247,27 @@ void *video_stream_task(void *arg)
 
         int epfd = epoll_create1(0);
         if (epfd < 0) {
-            log_error("video_stream: epoll_create1 failed");
+            LOG_ERROR("video_stream: epoll_create1 failed");
             deinit_video_device(vs);
             __atomic_store_n(&vs->restart_req, 0, __ATOMIC_RELEASE);
             continue;
         }
         struct epoll_event vev = { .events = EPOLLIN | EPOLLERR, .data.fd = vs->fd };
         if (epoll_ctl(epfd, EPOLL_CTL_ADD, vs->fd, &vev) < 0) {
-            log_error("video_stream: epoll_ctl add device failed");
+            LOG_ERROR("video_stream: epoll_ctl add device failed");
             close(epfd);
             deinit_video_device(vs);
             __atomic_store_n(&vs->restart_req, 0, __ATOMIC_RELEASE);
             continue;
         }
-        log_info("video_stream: capturing from %s", vs->device);
+        LOG_INFO("video_stream: capturing from %s", vs->device);
 
         while (vs->app->running && !__atomic_load_n(&vs->restart_req, __ATOMIC_ACQUIRE)) {
             struct epoll_event out;
             int ret = epoll_wait(epfd, &out, 1, 500);
             if (ret < 0) {
                 if (errno == EINTR) { watchdog_feed_self("video"); continue; }
-                log_error("video_stream: epoll_wait failed");
+                LOG_ERROR("video_stream: epoll_wait failed");
                 break;
             }
             /* 无论是否有帧都保持喂狗：相机空闲/无数据时线程仍存活，避免误判卡死 */
@@ -280,7 +280,7 @@ void *video_stream_task(void *arg)
             buf.memory = V4L2_MEMORY_MMAP;
             if (ioctl(vs->fd, VIDIOC_DQBUF, &buf) < 0) {
                 if (errno == EAGAIN || errno == EINTR) continue;
-                log_error("video_stream: VIDIOC_DQBUF failed");
+                LOG_ERROR("video_stream: VIDIOC_DQBUF failed");
                 break;
             }
 
@@ -305,7 +305,7 @@ void *video_stream_task(void *arg)
             }
 
             if (ioctl(vs->fd, VIDIOC_QBUF, &buf) < 0) {
-                log_error("video_stream: VIDIOC_QBUF failed");
+                LOG_ERROR("video_stream: VIDIOC_QBUF failed");
                 break;
             }
         }
@@ -315,7 +315,7 @@ void *video_stream_task(void *arg)
         __atomic_store_n(&vs->restart_req, 0, __ATOMIC_RELEASE);
     }
 
-    log_info("video_stream: worker exiting");
+    LOG_INFO("video_stream: worker exiting");
     return NULL;
 }
 
@@ -336,7 +336,7 @@ static int video_stream_wait_next(int last_seq, unsigned char **out, size_t *out
 
     unsigned char *copy = malloc(f->len);
     if (!copy) {
-        log_error("video_stream: frame alloc failed (%zu bytes)", f->len);
+        LOG_ERROR("video_stream: frame alloc failed (%zu bytes)", f->len);
         pthread_mutex_unlock(&vs->frame_mutex);
         *out     = NULL;
         *out_len = 0;
@@ -375,7 +375,7 @@ void video_stream_restart(void)
     /* 请求 worker 用新参数重新初始化；旧设备由 worker 自行 deinit，
        避免 restart 与 worker 并发操作同一 fd 造成双重释放/崩溃 */
     __atomic_store_n(&vs->restart_req, 1, __ATOMIC_RELEASE);
-    log_info("video_stream: restart requested (%s %dx%d)",
+    LOG_INFO("video_stream: restart requested (%s %dx%d)",
              vs->device, vs->width, vs->height);
 }
 

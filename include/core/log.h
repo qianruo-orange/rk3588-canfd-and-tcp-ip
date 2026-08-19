@@ -19,7 +19,7 @@ void _log_info(const char *file, int line, const char *fmt, ...)
 void _log_error(const char *file, int line, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 
-#define log_info(fmt, ...)  _log_info(__FILE__, __LINE__, fmt, ##__VA_ARGS__)
-#define log_error(fmt, ...) _log_error(__FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)  _log_info(__FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) _log_error(__FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 #endif /* LOG_H */

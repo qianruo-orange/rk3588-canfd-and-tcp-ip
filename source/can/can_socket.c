@@ -68,7 +68,7 @@ static void apply_dbitrate(struct nl_sock *sk, const char *ifname, uint32_t dbit
         rtnl_link_can_set_ctrlmode(live, CAN_CTRLMODE_FD);
         rtnl_link_can_set_data_bittiming(live, &dbt);
         rtnl_link_change(sk, live, live, 0);
-        log_info("CAN %s: data bitrate set to %u bps", ifname, dbitrate);
+        LOG_INFO("CAN %s: data bitrate set to %u bps", ifname, dbitrate);
     }
     rtnl_link_put(live);
 }
@@ -86,12 +86,12 @@ static void apply_dbitrate(struct nl_sock *sk, const char *ifname, uint32_t dbit
 int can_socket_configure(const char *ifname, int bitrate, int dbitrate,
                          int fd_mode, int restart_ms, int bring_up)
 {
-    if (!ifname_valid(ifname)) { log_error("invalid CAN interface name: '%s'", ifname?ifname:"(null)"); return -1; }
+    if (!ifname_valid(ifname)) { LOG_ERROR("invalid CAN interface name: '%s'", ifname?ifname:"(null)"); return -1; }
     if (bitrate <= 0) bitrate = 500000;
 
     struct nl_sock *sk = nl_socket_alloc();
-    if (!sk) { log_error("nl_socket_alloc"); return -1; }
-    if (nl_connect(sk, NETLINK_ROUTE) < 0) { log_error("nl_connect"); nl_socket_free(sk); return -1; }
+    if (!sk) { LOG_ERROR("nl_socket_alloc"); return -1; }
+    if (nl_connect(sk, NETLINK_ROUTE) < 0) { LOG_ERROR("nl_connect"); nl_socket_free(sk); return -1; }
 
     /* 用 netlink 探测接口是否已存在；避免 if_nametoindex() 返回 0 后仍走
        rtnl_link_add(NLM_F_CREATE) 而对已存在接口报 "Object busy" */
@@ -131,12 +131,12 @@ int can_socket_configure(const char *ifname, int bitrate, int dbitrate,
                 close(sock);
             }
             if (!(flags & IFF_UP)) {
-                log_error("CAN %s: config via ip command failed", ifname);
+                LOG_ERROR("CAN %s: config via ip command failed", ifname);
                 nl_socket_free(sk); return -1;
             }
-            log_info("CAN %s: type can returned EEXIST, interface is up anyway", ifname);
+            LOG_INFO("CAN %s: type can returned EEXIST, interface is up anyway", ifname);
         }
-        log_info("CAN %s configured (existing), %s", ifname, bring_up ? "up" : "down");
+        LOG_INFO("CAN %s configured (existing), %s", ifname, bring_up ? "up" : "down");
         nl_socket_free(sk);
         return 0;
     }
@@ -152,7 +152,7 @@ int can_socket_configure(const char *ifname, int bitrate, int dbitrate,
 
     int ret = rtnl_link_add(sk, link, NLM_F_CREATE);
     if (ret < 0) {
-        log_error("CAN %s: configure failed: %s", ifname, nl_geterror(ret));
+        LOG_ERROR("CAN %s: configure failed: %s", ifname, nl_geterror(ret));
         rtnl_link_put(link); nl_socket_free(sk); return -1;
     }
 
@@ -162,10 +162,10 @@ int can_socket_configure(const char *ifname, int bitrate, int dbitrate,
     if (bring_up) {
         rtnl_link_set_flags(link, IFF_UP);
         if (rtnl_link_change(sk, link, link, 0) < 0)
-            log_error("CAN %s: bring up failed", ifname);
+            LOG_ERROR("CAN %s: bring up failed", ifname);
     }
 
-    log_info("CAN %s configured (bitrate=%d%s%s) %s", ifname, bitrate,
+    LOG_INFO("CAN %s configured (bitrate=%d%s%s) %s", ifname, bitrate,
              fd_mode ? " FD" : "",
              (fd_mode && dbitrate > 0) ? "+dbitrate" : "",
              bring_up ? "up" : "down");
@@ -182,34 +182,34 @@ int can_socket_configure(const char *ifname, int bitrate, int dbitrate,
  */
 int can_socket_open(const char *ifname, int fd_mode)
 {
-    if (!ifname_valid(ifname)) { log_error("invalid CAN interface name: '%s'", ifname?ifname:"(null)"); return -1; }
+    if (!ifname_valid(ifname)) { LOG_ERROR("invalid CAN interface name: '%s'", ifname?ifname:"(null)"); return -1; }
     int s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
-    if (s < 0) { log_error("socket(PF_CAN)"); return -1; }
+    if (s < 0) { LOG_ERROR("socket(PF_CAN)"); return -1; }
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
     snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
-    if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) { log_error("ioctl SIOCGIFINDEX for %s", ifname); close(s); return -1; }
+    if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) { LOG_ERROR("ioctl SIOCGIFINDEX for %s", ifname); close(s); return -1; }
     struct sockaddr_can addr;
     memset(&addr, 0, sizeof(addr));
     addr.can_family = AF_CAN;
     addr.can_ifindex = ifr.ifr_ifindex;
-    if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) { log_error("bind CAN %s", ifname); close(s); return -1; }
+    if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) { LOG_ERROR("bind CAN %s", ifname); close(s); return -1; }
     if (fd_mode) {
         int enable = 1;
         if (setsockopt(s, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &enable, sizeof(enable)) < 0)
-            log_info("CAN_RAW_FD_FRAMES not available on %s, classic CAN only", ifname);
-        else log_info("CAN FD socket enabled on %s", ifname);
+            LOG_INFO("CAN_RAW_FD_FRAMES not available on %s, classic CAN only", ifname);
+        else LOG_INFO("CAN FD socket enabled on %s", ifname);
     }
 
     /* 非阻塞：配合 epoll 就绪通知，read/write 在无数据/不可写时返回 EAGAIN 而不是阻塞 */
     int flags = fcntl(s, F_GETFL, 0);
     if (flags < 0 || fcntl(s, F_SETFL, flags | O_NONBLOCK) < 0) {
-        log_error("CAN %s: fcntl O_NONBLOCK: %s", ifname, strerror(errno));
+        LOG_ERROR("CAN %s: fcntl O_NONBLOCK: %s", ifname, strerror(errno));
         close(s);
         return -1;
     }
 
-    log_info("CAN socket opened on %s", ifname);
+    LOG_INFO("CAN socket opened on %s", ifname);
     return s;
 }
 
@@ -287,7 +287,7 @@ int can_tx_frame(app_ctx_t *app, const char *ifname, const struct canfd_frame *f
     for (int i = 0; i < ctx->count; i++) {
         if (strcmp(ctx->ifaces[i].ifname, ifname) == 0) { idx = i; break; }
     }
-    if (idx < 0) { log_error("can_tx: unknown interface '%s'", ifname); errno = ENODEV; return -1; }
+    if (idx < 0) { LOG_ERROR("can_tx: unknown interface '%s'", ifname); errno = ENODEV; return -1; }
 
     /* 发送统一走 TX 队列：由 can_send_task 弹出写 socket 并做发送方向 DBC 解析 */
     can_queue_t *txq = &ctx->ifaces[idx].txq;
@@ -376,12 +376,12 @@ static void handle_can_input(app_ctx_t *app, int can_idx)
 
             /* 解析后入 rxq；接收线程只入队、不出队（由其他线程 pop） */
             if (can_queue_push(rxq, &frame) != CAN_QUEUE_ERR_OK)
-                log_error("can rx queue full on %s, drop frame", ifname);
+                LOG_ERROR("can rx queue full on %s, drop frame", ifname);
         } else if (n == 0) {
             break;
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            log_error("can read %s: %s", ifname, strerror(errno));
+            LOG_ERROR("can read %s: %s", ifname, strerror(errno));
             can_socket_close(fd);
             int new_fd = can_socket_open(ifname, ctx->ifaces[can_idx].fd_mode);
             if (new_fd >= 0) {
@@ -393,7 +393,7 @@ static void handle_can_input(app_ctx_t *app, int can_idx)
                 /* 重新注册到接收 epoll；并同步发送 epoll 的 EPOLLOUT 状态 */
                 can_epoll_add_recv(ctx, can_idx);
                 can_epoll_update_tx(ctx, can_idx);
-                log_info("CAN %s reconnected", ifname);
+                LOG_INFO("CAN %s reconnected", ifname);
             }
             break;
         }
@@ -408,13 +408,13 @@ void *can_recv_task(void *arg)
     can_ctx_t *ctx = app->can;
     if (!ctx) return NULL;
 
-    log_info("can_recv_task started (%d iface(s))", ctx->count);
+    LOG_INFO("can_recv_task started (%d iface(s))", ctx->count);
     while (app->running) {
         struct epoll_event events[64];
         int nfds = epoll_wait(ctx->recv_epfd, events, 64, 500);
         if (nfds < 0) {
             if (errno == EINTR) { watchdog_feed_self("can_recv"); continue; }
-            log_error("can recv epoll_wait"); break;
+            LOG_ERROR("can recv epoll_wait"); break;
         }
         watchdog_feed_self("can_recv");
         for (int i = 0; i < nfds; i++) {
@@ -426,7 +426,7 @@ void *can_recv_task(void *arg)
                 handle_can_input(app, idx);
         }
     }
-    log_info("can_recv_task stopped");
+    LOG_INFO("can_recv_task stopped");
     return NULL;
 }
 
@@ -438,13 +438,13 @@ void *can_send_task(void *arg)
 
     for (int i = 0; i < ctx->count; i++)
         can_epoll_update_tx(ctx, i);
-    log_info("can_send_task started (%d iface(s))", ctx->count);
+    LOG_INFO("can_send_task started (%d iface(s))", ctx->count);
     while (app->running) {
         struct epoll_event events[64];
         int nfds = epoll_wait(ctx->send_epfd, events, 64, 500);
         if (nfds < 0) {
             if (errno == EINTR) { watchdog_feed_self("can_send"); continue; }
-            log_error("can send epoll_wait"); break;
+            LOG_ERROR("can send epoll_wait"); break;
         }
         watchdog_feed_self("can_send");
         for (int i = 0; i < nfds; i++) {
@@ -461,7 +461,7 @@ void *can_send_task(void *arg)
                 handle_can_output(app);
         }
     }
-    log_info("can_send_task stopped");
+    LOG_INFO("can_send_task stopped");
     return NULL;
 }
 
@@ -472,9 +472,9 @@ int can_socket_set_filter(int fd, canid_t id, canid_t mask)
     filter.can_id = id;
     filter.can_mask = mask;
     if (setsockopt(fd, SOL_CAN_RAW, CAN_RAW_FILTER, &filter, sizeof(filter)) < 0) {
-        log_error("setsockopt CAN_RAW_FILTER id=%08X mask=%08X", id, mask); return -1;
+        LOG_ERROR("setsockopt CAN_RAW_FILTER id=%08X mask=%08X", id, mask); return -1;
     }
-    log_info("CAN filter set: id=%08X mask=%08X", id, mask);
+    LOG_INFO("CAN filter set: id=%08X mask=%08X", id, mask);
     return 0;
 }
 
@@ -521,19 +521,19 @@ int can_init(void *arg)
     }
     /* 接收 epoll（can_recv_task，监听各接口 EPOLLIN） */
     ctx->recv_epfd = epoll_create1(0);
-    if (ctx->recv_epfd < 0) { log_error("can: recv epoll_create1 failed"); return -1; }
+    if (ctx->recv_epfd < 0) { LOG_ERROR("can: recv epoll_create1 failed"); return -1; }
     /* 发送 epoll（can_send_task，监听 TX eventfd + 各接口 EPOLLOUT） */
     ctx->send_epfd = epoll_create1(0);
-    if (ctx->send_epfd < 0) { log_error("can: send epoll_create1 failed"); return -1; }
+    if (ctx->send_epfd < 0) { LOG_ERROR("can: send epoll_create1 failed"); return -1; }
     /* TX eventfd：跨线程唤醒 can_send_task，让其检测“有帧压入 TX 队列” */
     ctx->tx_efd = eventfd(0, EFD_NONBLOCK);
-    if (ctx->tx_efd < 0) { log_error("can: eventfd failed"); return -1; }
+    if (ctx->tx_efd < 0) { LOG_ERROR("can: eventfd failed"); return -1; }
 
     struct epoll_event ev;
     ev.events = EPOLLIN;
     ev.data.u32 = 0;
     if (epoll_ctl(ctx->send_epfd, EPOLL_CTL_ADD, ctx->tx_efd, &ev) < 0) {
-        log_error("can: epoll_ctl(tx_efd) failed"); return -1;
+        LOG_ERROR("can: epoll_ctl(tx_efd) failed"); return -1;
     }
 
     for (int i = 0; i < args->can_count; i++) {
@@ -547,9 +547,9 @@ int can_init(void *arg)
         can_epoll_add_recv(ctx, i);
     }
 
-    log_info("%d CAN interface(s) initialized", args->can_count);
+    LOG_INFO("%d CAN interface(s) initialized", args->can_count);
     for (int i = 0; i < args->can_count; i++)
-        log_info("  CAN[%d]=%s filters=%d", i, args->can_ifaces[i].ifname, args->can_ifaces[i].filter_count);
+        LOG_INFO("  CAN[%d]=%s filters=%d", i, args->can_ifaces[i].ifname, args->can_ifaces[i].filter_count);
     return 0;
 }
 

@@ -44,7 +44,7 @@ static void config_defaults(struct app_config_t *cfg)
         c->bitrate = 500000; c->dbitrate = 2000000; c->fd_mode = 1; c->up = 1;
     }
 
-    log_info("config: defaults loaded (%d can iface(s))", args->can_count);
+    LOG_INFO("config: defaults loaded (%d can iface(s))", args->can_count);
 }
 
 int config_load(struct app_config_t *cfg)
@@ -98,7 +98,7 @@ int config_load(struct app_config_t *cfg)
     fclose(fp);
     if (a->can_count == 0) { config_defaults(cfg); return 0; }
     if (a->tcp_port <= 0) a->tcp_port = 6666;
-    log_info("config: loaded from %s", CONFIG_PATH);
+    LOG_INFO("config: loaded from %s", CONFIG_PATH);
     return 0;
 }
 
@@ -110,7 +110,7 @@ void config_save(app_ctx_t *app)
     tcp_ctx_t *tcp = app->tcp;
 
     FILE *fp = fopen(CONFIG_PATH, "w");
-    if (!fp) { log_error("config: cannot write %s", CONFIG_PATH); return; }
+    if (!fp) { LOG_ERROR("config: cannot write %s", CONFIG_PATH); return; }
 
     fprintf(fp, "# %s — auto-saved\n", APP_NAME);
     for (int i = 0; i < can->count; i++)
@@ -138,5 +138,5 @@ void config_save(app_ctx_t *app)
             fprintf(fp, "can_dbc %s %s\n", can->ifaces[i].ifname, can->ifaces[i].dbc_path);
 
     fclose(fp);
-    log_info("config: saved to %s", CONFIG_PATH);
+    LOG_INFO("config: saved to %s", CONFIG_PATH);
 }

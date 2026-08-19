@@ -236,7 +236,7 @@ int dbc_decode_frame(struct app_ctx *app, int can_idx, const char *ifname,
 
     if (mi < 0) return -1;
 
-    log_info("CAN %s id=%X: %s", ifname ? ifname : "?", can_id, text);
+    LOG_INFO("CAN %s id=%X: %s", ifname ? ifname : "?", can_id, text);
 
     if (id_out) *id_out = can_id;
     if (name_out && name_size > 0) safe_strncpy(name_out, name_size, name);

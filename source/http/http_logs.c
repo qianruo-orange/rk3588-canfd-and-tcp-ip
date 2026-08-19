@@ -204,7 +204,7 @@ static void serve_log_pack(int fd)
     snprintf(cmd, sizeof(cmd), "tar -czf - -C %s . 2>/dev/null", LOG_DIR);
     FILE *tar = popen(cmd, "r");
     if (!tar) {
-        log_error("logs pack: popen tar failed");
+        LOG_ERROR("logs pack: popen tar failed");
         http_send_response(fd, 500, "Internal Error", "text/plain", "", 0);
         return;
     }

@@ -110,7 +110,7 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
     can_ctx_t *can = app->can;
     tcp_ctx_t *tcp = app->tcp;
 
-    log_info("config POST: parsed %d fields", count);
+    LOG_INFO("config POST: parsed %d fields", count);
 
     for (int i = 0; i < CAN_MAX_IFACES; i++) {
         char kn[32];
@@ -168,7 +168,7 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         /* 重新配置并打开 */
         if (can_socket_configure(iface->ifname, iface->bitrate, iface->dbitrate,
                                   iface->fd_mode, iface->restart_ms, iface->up) < 0) {
-            log_error("config: CAN %s reconfigure failed", iface->ifname);
+            LOG_ERROR("config: CAN %s reconfigure failed", iface->ifname);
             if (old_fd >= 0 && can->recv_epfd >= 0)
                 epoll_ctl(can->recv_epfd, EPOLL_CTL_ADD, old_fd, NULL);
             continue;
@@ -176,7 +176,7 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
 
         int new_fd = can_socket_open(iface->ifname, iface->fd_mode);
         if (new_fd < 0) {
-            log_error("config: CAN %s reopen failed", iface->ifname);
+            LOG_ERROR("config: CAN %s reopen failed", iface->ifname);
             continue;
         }
 
@@ -195,7 +195,7 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
             ev.data.u32 = (uint32_t)(i + 1);
             epoll_ctl(can->recv_epfd, EPOLL_CTL_ADD, new_fd, &ev);
         }
-        log_info("config: CAN %s reconfigured (bitrate=%d, fd=%s, up=%s)",
+        LOG_INFO("config: CAN %s reconfigured (bitrate=%d, fd=%s, up=%s)",
                  iface->ifname, iface->bitrate,
                  iface->fd_mode ? "on" : "off",
                  iface->up ? "on" : "off");
@@ -231,10 +231,10 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
             ev.events = EPOLLIN;
             ev.data.u32 = 0;
             if (epoll_ctl(tcp->epfd, EPOLL_CTL_ADD, tcp->listen_fd, &ev) < 0)
-                log_error("config: epoll add listen failed");
+                LOG_ERROR("config: epoll add listen failed");
         }
         pthread_mutex_unlock(&tcp->client_mutex);
-        log_info("config: TCP listen changed to %s:%d", want_bind[0] ? want_bind : "*", want_port);
+        LOG_INFO("config: TCP listen changed to %s:%d", want_bind[0] ? want_bind : "*", want_port);
     }
 
     const char *v = form_find(keys, vals, count, "max_clients");
@@ -253,7 +253,7 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
     v = form_find(keys, vals, count, "video_height");
     if (v) { vid_changed = 1; cfg->video_height = parse_int_clamped(v, 1, 4096, cfg->video_height > 0 ? cfg->video_height : 480); }
 
-    log_info("config: applied to runtime, saving to file");
+    LOG_INFO("config: applied to runtime, saving to file");
     config_save(app);
     http_send_response(fd, 200, "OK", "text/plain", "saved", 5);
 

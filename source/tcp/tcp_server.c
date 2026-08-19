@@ -308,9 +308,9 @@ int tcp_init(void *arg)
     ctx->tx_efd = -1;
     pthread_mutex_init(&ctx->client_mutex, NULL);
     pthread_mutex_init(&ctx->tx_mutex, NULL);
-    ctx->port        = app->cfg->gw_args.tcp_port;
-    ctx->max_clients = app->cfg->gw_args.max_clients;
-    safe_strncpy(ctx->bind_ifname, sizeof(ctx->bind_ifname), app->cfg->gw_args.tcp_bind);
+    ctx->port        = app->cfg->args.tcp_port;
+    ctx->max_clients = app->cfg->args.max_clients;
+    safe_strncpy(ctx->bind_ifname, sizeof(ctx->bind_ifname), app->cfg->args.tcp_bind);
     ctx->listen_fd = tcp_listen(ctx->port, ctx->bind_ifname);
     if (ctx->listen_fd < 0) return -1;
     /* TCP 数据收发专用 epoll（listen + 客户端 + TX eventfd，与 CAN 分开管理） */

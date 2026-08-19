@@ -506,7 +506,7 @@ int can_enumerate_system(char names[][IFNAMSIZ], int max)
 int can_init(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;
-    gateway_args_t *args = &app->cfg->gw_args;
+    app_args_t *args = &app->cfg->args;
     can_ctx_t *ctx = app->can;
     memset(ctx, 0, sizeof(*ctx));
     ctx->recv_epfd = -1;

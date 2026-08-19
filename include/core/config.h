@@ -34,22 +34,22 @@ typedef struct {
     can_queue_t   rxq; /* 该接口接收队列 */
 } can_iface_t;
 
-/* ---- 网关启动参数 ---- */
+/* ---- 应用启动参数 ---- */
 typedef struct {
     can_iface_t can_ifaces[CAN_MAX_IFACES];
     int         can_count;
     int         tcp_port;
     int         max_clients;
     char        tcp_bind[IFNAMSIZ]; /* TCP 监听绑定网卡名（空 = 绑定所有网卡 INADDR_ANY） */
-} gateway_args_t;
+} app_args_t;
 
 struct app_config_t {
-    gateway_args_t gw_args;
-    int            wd_sec;
-    char           log_dir[256];
-    char           video_device[128];
-    int            video_width;
-    int            video_height;
+    app_args_t    args;
+    int           wd_sec;
+    char          log_dir[256];
+    char          video_device[128];
+    int           video_width;
+    int           video_height;
 };
 
 int  config_load(struct app_config_t *cfg);

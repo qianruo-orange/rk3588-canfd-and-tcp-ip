@@ -23,7 +23,7 @@ static void config_defaults(struct app_config_t *cfg)
     cfg->video_width  = 640;
     cfg->video_height = 480;
 
-    gateway_args_t *args = &cfg->gw_args;
+    app_args_t *args = &cfg->args;
     args->tcp_port    = 6666;
     args->max_clients = 16;
 
@@ -55,7 +55,7 @@ int config_load(struct app_config_t *cfg)
     memset(cfg, 0, sizeof(*cfg));
     safe_strncpy(cfg->log_dir, sizeof(cfg->log_dir), PATH_LOGS);
     cfg->video_width = 640; cfg->video_height = 480;
-    gateway_args_t *a = &cfg->gw_args;
+    app_args_t *a = &cfg->args;
 
     char line[256];
     while (fgets(line, sizeof(line), fp)) {

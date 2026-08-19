@@ -226,14 +226,14 @@ int main(void)
     log_close(); log_init(cfg.log_dir);
 
     /* 按 CAN 通道加载 DBC（可选）：失败不阻塞启动，仅记录日志 */
-    for (int i = 0; i < cfg.gw_args.can_count; i++) {
-        const char *path = cfg.gw_args.can_ifaces[i].dbc_path;
+    for (int i = 0; i < cfg.args.can_count; i++) {
+        const char *path = cfg.args.can_ifaces[i].dbc_path;
         if (!path[0]) continue;
         if (dbc_load(&g_dbc[i], path) < 0)
-            log_error("dbc: load '%s' for %s failed", path, cfg.gw_args.can_ifaces[i].ifname);
+            log_error("dbc: load '%s' for %s failed", path, cfg.args.can_ifaces[i].ifname);
         else
             log_info("dbc: loaded '%s' for %s (%d message(s), %d signal(s))",
-                     path, cfg.gw_args.can_ifaces[i].ifname, g_dbc[i].msg_count, g_dbc[i].sig_count);
+                     path, cfg.args.can_ifaces[i].ifname, g_dbc[i].msg_count, g_dbc[i].sig_count);
     }
 
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);

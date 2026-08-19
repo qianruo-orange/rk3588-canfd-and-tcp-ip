@@ -152,7 +152,9 @@ rk3588-canfd-and-tcp-ip-communication/
 │       └── dbc.js                    # DBC 页脚本
 ├── config/                           # 运行时配置
 │   ├── config.txt                    # 主配置
-│   └── example.dbc                   # DBC 示例数据库
+│   ├── example.dbc                   # DBC 示例数据库
+│   ├── can0.dbc                      # CAN0 通道 DBC 模板
+│   └── can1.dbc                      # CAN1 通道 DBC 模板
 ├── docs/                             # 文档与截图
 │   └── ScreenShot_2026-08-15_144854_676.png  # Web 界面截图
 ├── scripts/

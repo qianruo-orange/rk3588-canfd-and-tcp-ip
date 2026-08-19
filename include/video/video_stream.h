@@ -4,7 +4,6 @@
 #include <stddef.h>
 
 /* 初始化 video stream 模块（从 cfg 读取设备和分辨率），不创建线程 */
-struct gateway_ctx;
 struct app_config_t;
 int video_stream_init(void *arg);
 /* 工作线程函数，由 main 创建线程并传入 NULL */

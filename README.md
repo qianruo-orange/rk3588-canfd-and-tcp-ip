@@ -1,49 +1,17 @@
 # rk3588-canfd-and-tcp-ip-communication
 
-[![Platform](https://img.shields.io/badge/Platform-RK3588-orange.svg)](https://github.com/qianruo-orange/rk3588-canfd-and-tcp-ip-communication)
-[![Language](https://img.shields.io/badge/Language-C11-blue.svg)](https://github.com/qianruo-orange/rk3588-canfd-and-tcp-ip-communication)
-[![OS](https://img.shields.io/badge/OS-Linux-green.svg)](https://github.com/qianruo-orange/rk3588-canfd-and-tcp-ip-communication)
+基于 epoll 的 CAN / CAN FD 数据采集、DBC 信号解析与 TCP/IP 通信解决方案，内置 Web 管理界面、视频流与 systemd 看门狗，支持按系统信息自动识别可配置 CAN 通道。适用于 RK3588（如 Orange Pi 5 Max）/ Linux 运行环境，使用 C11 实现。
 
-基于 epoll 的 CAN/CAN FD 数据采集、DBC 信号解析与 TCP/IP 通信解决方案，内置 Web 管理界面、视频流与 systemd 看门狗，支持按系统信息自动识别可配置 CAN 通道。该项目适用于 Orange Pi 5 Max（RK3588）/ Linux 运行环境，使用 C11 实现。
+## 功能特性
 
-## 项目简介
-
-本项目面向嵌入式工业场景与边缘网关场景，整合了以下核心能力：
-
-- CAN 总线数据采集与日志记录
-- CAN FD 兼容支持
-- DBC 信号解析与物理量解码
-- TCP/IP 通信与连接管理
-- Web 管理界面配置与监控
-- 视频流服务
-- 运行时系统守护与 watchdog 监控
-
-## 快速开始
-
-```bash
-cd /home/orangepi/project1
-./scripts/build.sh -R
-./bin/rk3588-canfd-and-tcp-ip-communication
-```
-
-## 项目亮点
-
-- 面向 RK3588 平台设计，适合工业控制与边缘设备部署
-- 同时覆盖 CAN、CAN FD、TCP、HTTP 与视频流功能
-- Web 端可查看状态、更新配置、管理日志和重启设备
-- 采用 systemd watchdog 提升稳定性与故障恢复能力
-- 支持日志按日期和大小自动轮转，便于长期运行追踪
-
-## 功能特点
-
-- CAN 数据接收：支持经典 CAN 与 CAN FD，多接口管理，自动识别系统 CAN 接口
-- DBC 信号解析：解析 DBC 数据库，将 CAN 帧解码为物理量信号
-- 日志记录：接收的 CAN 帧和系统事件按级别写入日志
-- Web 管理界面：提供数据监控、配置修改、日志查看与重启控制
+- CAN 数据采集：支持经典 CAN 与 CAN FD，多接口管理，自动识别系统 CAN 接口
+- DBC 信号解析：解析 DBC 数据库，将 CAN 帧解码为物理量信号（接收 / 发送双方向）
+- TCP/IP 通信：TCP 服务监听，端口与绑定网卡均可配置
+- Web 管理界面：数据监控、配置修改、日志查看与重启 / 关机控制
 - 视频流服务：通过 V4L2 接入摄像头并输出 MJPEG 视频流
 - systemd 看门狗：监控关键线程心跳，防止异常卡死
-- 热更新配置：Web 页面修改后可立即生效
-- 运行维护：日志轮转、清理脚本、部署脚本
+- 热更新配置：Web 页面修改后立即生效
+- 运行维护：日志按日期与大小自动轮转、清理脚本、部署脚本
 
 ## 系统架构
 
@@ -56,16 +24,18 @@ cd /home/orangepi/project1
         ├─► http_task     ──► Web 管理 + REST API + MJPEG 推流
         ├─► video_task    ──► V4L2 采集
         └─► watchdog_task ──► 心跳监控 + sd_notify
+```
 
-CAN 数据流（入队均为原始帧，DBC 解析结果供前端展示）：
-  接收：CAN 帧 ─► can_recv_task ─► 入 rxq（原始帧）/ 接收方向 DBC 解码 ─► /api/can/decoded ─► /dbc 页面
-  发送：业务线程压入 txq（原始帧） ─► can_send_task 写 socket ─► 发送方向 DBC 解码 ─► /api/can/decoded/tx
+CAN 数据流（队列中均为原始帧，DBC 解析结果单独供前端展示）：
+
+```text
+接收：CAN 帧 ─► can_recv_task ─► 入 rxq（原始帧）/ 接收方向 DBC 解码 ─► /api/can/decoded
+发送：业务线程压入 txq（原始帧） ─► can_send_task 写 socket ─► 发送方向 DBC 解码 ─► /api/can/decoded/tx
 ```
 
 | 线程 | 职责 |
 | --- | --- |
 | `main` | 初始化、配置加载、DBC 加载、退出编排、喂狗 |
-| `can` | CAN 初始化 / 清理（不占独立线程） |
 | `can_recv` | CAN 帧接收、入 rxq（原始帧）、接收方向 DBC 解码 |
 | `can_send` | 排空 txq（原始帧）写 socket、发送方向 DBC 解码 |
 | `tcp` | TCP 监听、连接管理与数据收发 |
@@ -74,16 +44,6 @@ CAN 数据流（入队均为原始帧，DBC 解析结果供前端展示）：
 | `watchdog` | 线程心跳监控与 `sd_notify` |
 
 > 注：`signal` 模块仅注册信号处理（`init`），`task` 为空，不创建线程。
-
-每个 `module_t` 条目包含：
-
-- `name`：模块名（同时用于 watchdog 注册与 Linux 原生线程名）
-- `tid`：运行时线程句柄（`pthread_create` 后回填）
-- `ops`：生命周期函数 `init` / `dtor` / `task`（`task` 为空则不创建线程）
-- `wd`：看门狗参数 `timeout` / `max_miss`
-- `thr`：线程创建属性 `stack_size` / `priority` / `cpu`
-
-新增模块只需在总表中追加一行，并实现对应的 `init` / `dtor` / `task` 函数。
 
 ## 目录结构
 
@@ -94,20 +54,19 @@ rk3588-canfd-and-tcp-ip-communication/
 ├── rk3588-canfd-and-tcp-ip-communication.service  # systemd 服务单元
 ├── include/                          # 头文件
 │   ├── core/
-│   │   ├── common.h                  # 应用上下文
+│   │   ├── common.h                  # 应用上下文与公共工具
 │   │   ├── config.h                  # 配置结构
 │   │   ├── log.h                     # 日志接口
-│   │   ├── queue.h                   # 内存池队列
-│   │   └── version.h                 # 版本（CMake 生成）
+│   │   └── version.h                 # 版本宏（CMake 生成）
 │   ├── can/
+│   │   ├── can_queue.h               # CAN 收发队列
 │   │   ├── can_socket.h              # SocketCAN 接口
 │   │   └── dbc_parser.h              # DBC 解析接口
-│   ├── net/
+│   ├── tcp/
 │   │   └── tcp_server.h              # TCP 服务接口
 │   ├── http/
 │   │   ├── http.h                    # HTTP 服务接口
-│   │   ├── http_internal.h           # HTTP 内部定义
-│   │   └── http_api_dbc.h              # DBC 解码结果 HTTP 展示
+│   │   └── http_internal.h           # HTTP 内部定义
 │   ├── video/
 │   │   └── video_stream.h            # V4L2 视频流接口
 │   └── watchdog/
@@ -116,18 +75,17 @@ rk3588-canfd-and-tcp-ip-communication/
 │   ├── core/
 │   │   ├── main.c                    # 入口、模块总表、线程编排
 │   │   ├── config.c                  # 配置读写
-│   │   ├── log.c                     # 日志实现
-│   │   ├── queue.c                   # 内存池队列实现
-│   │   └── version.c                 # 版本
+│   │   └── log.c                     # 日志实现
 │   ├── can/
+│   │   ├── can_queue.c               # CAN 收发队列实现
 │   │   ├── can_socket.c              # SocketCAN 收发
 │   │   └── dbc_parser.c              # DBC 解析实现
-│   ├── net/
+│   ├── tcp/
 │   │   └── tcp_server.c              # TCP 服务实现
 │   ├── http/
 │   │   ├── http.c                    # HTTP 路由与静态文件
 │   │   ├── http_api_can.c            # CAN 相关 API
-│   │   ├── http_api_dbc.c              # DBC 解码结果 HTTP 展示
+│   │   ├── http_api_dbc.c            # DBC 解码结果 API
 │   │   ├── http_api_config.c         # 配置 API
 │   │   ├── http_api_network.c        # 网络 API
 │   │   ├── http_api_system.c         # 系统 API
@@ -142,21 +100,22 @@ rk3588-canfd-and-tcp-ip-communication/
 │   ├── index.html                    # 监控页
 │   ├── config.html                   # 配置页
 │   ├── dbc.html                      # DBC 解析页
+│   ├── logs.html                     # 日志页
 │   ├── css/
 │   │   ├── common.css                # 全局共享样式
-│   │   ├── monitor.css               # 监控页样式
-│   │   └── config.css                # 配置页样式
+│   │   ├── config.css                # 配置页样式
+│   │   ├── logs.css                  # 日志页样式
+│   │   └── monitor.css               # 监控页样式
 │   └── js/
-│       ├── monitor.js                # 监控页脚本
 │       ├── config.js                 # 配置页脚本
-│       └── dbc.js                    # DBC 页脚本
+│       ├── dbc.js                    # DBC 页脚本
+│       ├── logs.js                   # 日志页脚本
+│       └── monitor.js                # 监控页脚本
 ├── config/                           # 运行时配置
 │   ├── config.txt                    # 主配置
-│   ├── example.dbc                   # DBC 示例数据库
 │   ├── can0.dbc                      # CAN0 通道 DBC 模板
 │   └── can1.dbc                      # CAN1 通道 DBC 模板
 ├── docs/                             # 文档与截图
-│   └── ScreenShot_2026-08-15_144854_676.png  # Web 界面截图
 ├── scripts/
 │   ├── build.sh                      # 构建脚本
 │   └── deploy.sh                     # 部署脚本
@@ -167,8 +126,6 @@ rk3588-canfd-and-tcp-ip-communication/
 ```
 
 ## 依赖要求
-
-该项目依赖以下组件：
 
 - gcc（C11）
 - cmake ≥ 3.10
@@ -183,7 +140,7 @@ rk3588-canfd-and-tcp-ip-communication/
 apt install gcc cmake libsystemd-dev libnl-3-dev libnl-route-3-dev
 ```
 
-## 构建与版本信息
+## 构建
 
 ```bash
 cd /home/orangepi/project1
@@ -192,33 +149,9 @@ cd /home/orangepi/project1
 ./scripts/build.sh -C   # 清理构建产物与 logs
 ```
 
-当前版本信息由 CMake 统一管理，工程版本号和构建信息会在配置阶段生成到头文件：
+构建产物：`./bin/rk3588-canfd-and-tcp-ip-communication`
 
-```text
-include/core/version.h
-```
-
-生成的宏包括：
-
-- `APP_NAME`
-- `APP_VERSION`
-- `APP_GIT_COMMIT`
-- `APP_GIT_BRANCH`
-- `APP_GIT_DIRTY`
-- `APP_BUILD_TYPE`
-- `APP_BUILD_DATE`
-
-构建脚本会在编译完成后输出当前版本与构建模式，例如：
-
-```text
-[BUILD] version=1.0.0 build_type=Release
-```
-
-构建产物：
-
-```bash
-./bin/rk3588-canfd-and-tcp-ip-communication
-```
+版本信息由 CMake 在配置阶段生成到 `include/core/version.h`，包括 `APP_NAME`、`APP_VERSION`、`APP_GIT_COMMIT`、`APP_GIT_BRANCH`、`APP_GIT_DIRTY`、`APP_BUILD_TYPE`、`APP_BUILD_DATE`。
 
 ## 运行方式
 
@@ -247,12 +180,9 @@ sudo ./scripts/deploy.sh -h     # 查看帮助
 | --- | --- |
 | `bin/<可执行文件>` | `/opt/.../bin/` |
 | `html/` | `/opt/.../html/` |
-| `config/example.dbc` | `/opt/.../config/example.dbc` |
 | systemd 服务单元 | `/etc/systemd/system/` |
 
-> 注：`config/config.txt` **不会**被复制，首次部署使用程序内置默认值，后续通过 Web 配置页保存到部署目录。
-
-部署后启用 DBC：在配置中设置 `can_dbc <通道名> config/example.dbc`（相对部署目录，即指向已复制的 `/opt/.../config/example.dbc`），或在 Web 配置页上传。
+> 注：`config/config.txt` 与 `config/` 下的 DBC 模板文件**不会**被复制；首次部署使用程序内置默认值，后续通过 Web 配置页保存配置、上传 DBC 文件。
 
 服务名称：`rk3588-canfd-and-tcp-ip-communication`
 
@@ -291,6 +221,15 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 
 未提供配置文件时，将从系统枚举实际存在的 CAN 接口（netlink 路由，`kind=="can"`）并套用默认参数；若系统无法枚举到接口，则回退到 `can0` / `can1`。
 
+### DBC 模板
+
+`config/` 下提供两个 CAN 通道的 DBC 模板文件，可通过 `can_dbc <通道名> <路径>` 启用（或在 Web 配置页上传）：
+
+- `config/can0.dbc`：动力 / 电池类（`EngineData`、`BatteryStatus`）
+- `config/can1.dbc`：底盘 / 位置类（`Status` 含 Motorola 大端信号、`VehiclePos` 扩展帧）
+
+> 解析器只识别 `BO_`（报文）与 `SG_`（信号）两类行，其余（含 `//` 注释）均忽略。ID 为十进制；扩展帧需在 29 位 ID 上置 bit31（如 `0x18FF50E5` → `2566869221`）。
+
 ## Web 管理界面
 
 服务默认监听 HTTP 端口 80，提供以下入口：
@@ -305,24 +244,21 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 | 方法 | 路径 | 认证 | 说明 |
 | --- | --- | --- | --- |
 | GET | `/api/system` | 无 | 系统监控数据 |
-| GET | `/api/can` | 无 | CAN 状态 |
+| GET | `/api/can` | 无 | CAN 接口状态 |
 | GET | `/api/can/decoded` | 无 | 接收方向 DBC 解析后的最近 CAN 信号（JSON） |
 | GET | `/api/can/decoded/tx` | 无 | 发送方向 DBC 解析后的最近 CAN 信号（JSON） |
+| GET | `/api/can/frames` | 无 | 最近接收的原始 CAN 帧 |
+| POST | `/api/can/send` | root | 发送 CAN 帧 |
 | POST | `/api/can/dbc?ifname=` | root | 上传某通道的 DBC 文件 |
-| POST | `/api/can/toggle` | root | 切换 CAN 接口 |
-| GET/POST | `/api/config` | root | 读取/写入配置 |
+| POST | `/api/can/toggle` | root | 切换 CAN 接口开关 |
+| GET/POST | `/api/config` | root | 读取 / 写入配置 |
 | GET | `/api/network` | 无 | 网络统计 |
 | GET | `/api/video/devices` | 无 | 摄像头设备列表 |
 | GET | `/api/video/caps` | 无 | 视频参数列表 |
 | GET | `/video/mjpeg` | 无 | MJPEG 视频流 |
-| GET | `/logs`、`/logfile/*` | root | 日志列表 / 下载 / 删除 |
-| GET | `/api/reboot`、`/api/shutdown` | root | 重启 / 关机 |
+| GET | `/api/logs`、`/logs`、`/logfile/*` | root | 日志列表 / 下载 / 删除 |
 
-HTTP 写操作接口要求 root 权限。
-
-## TCP 数据通道
-
-当前实现聚焦 CAN 帧接收与日志记录，TCP 端口与客户端连接管理保留为后续扩展。
+> 监控页与 DBC 页需要普通用户认证；配置页与写操作接口要求 root 权限。
 
 ## 看门狗机制
 
@@ -352,22 +288,6 @@ logs/
 - CMake 生成文件（`CMakeCache.txt`、`CMakeFiles`、`cmake_install.cmake`、`Makefile`）
 - 并重建空 `logs/`
 
-## 预览截图
-
-![Web 界面截图](docs/ScreenShot_2026-08-15_144854_676.png)
-
-## 项目亮点
-
-- 面向 RK3588 平台开发，适合工业控制和边缘网关场景
-- 同时覆盖 CAN / CAN FD / TCP / HTTP / 视频流等功能
-- 通过 Web 页面快速查看设备状态与配置参数
-- 采用 systemd 看门狗机制增强稳定性与可靠性
-- 支持日志轮转、热更新与运行时管理
-
 ## 许可证
 
 该项目采用适用于本仓库的开源许可证，具体内容请参考仓库中的许可证文件。
-
-## 联系方式
-
-如需二次开发、部署咨询或定制化扩展，可直接基于当前仓库进行修改与定制。

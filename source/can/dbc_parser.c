@@ -123,27 +123,6 @@ static void parse_line(dbc_t *dbc, const char *line)
 
 /* ---- 对外 API ---- */
 
-static int dbc_parse(dbc_t *dbc, const char *content, size_t len)
-{
-    if (!dbc || (!content && len != 0)) return -1;
-    memset(dbc, 0, sizeof(*dbc));
-
-    const char *p = content;
-    const char *end = content + len;
-    char line[1024];
-
-    while (p < end) {
-        const char *nl = memchr(p, '\n', (size_t)(end - p));
-        size_t line_len = nl ? (size_t)(nl - p) : (size_t)(end - p);
-        if (line_len >= sizeof(line)) line_len = sizeof(line) - 1;
-        memcpy(line, p, line_len);
-        line[line_len] = '\0';
-        parse_line(dbc, line);
-        p += line_len + (nl ? 1 : 0);
-    }
-    return 0;
-}
-
 int dbc_load(dbc_t *dbc, const char *path)
 {
     if (!dbc || !path) return -1;
@@ -164,25 +143,6 @@ static int dbc_find_message(const dbc_t *dbc, canid_t can_id)
     canid_t id = can_id & CAN_EFF_MASK;
     for (int i = 0; i < dbc->msg_count; i++)
         if ((dbc->messages[i].can_id & CAN_EFF_MASK) == id) return i;
-    return -1;
-}
-
-static int dbc_find_message_by_name(const dbc_t *dbc, const char *name)
-{
-    if (!dbc || !name) return -1;
-    for (int i = 0; i < dbc->msg_count; i++)
-        if (strcmp(dbc->messages[i].name, name) == 0) return i;
-    return -1;
-}
-
-static int dbc_find_signal(const dbc_t *dbc, int msg_idx, const char *name)
-{
-    if (!dbc || !name || msg_idx < 0 || msg_idx >= dbc->msg_count) return -1;
-    const dbc_message_t *msg = &dbc->messages[msg_idx];
-    for (int i = 0; i < msg->sig_count; i++) {
-        int idx = msg->sig_start + i;
-        if (strcmp(dbc->signals[idx].name, name) == 0) return idx;
-    }
     return -1;
 }
 

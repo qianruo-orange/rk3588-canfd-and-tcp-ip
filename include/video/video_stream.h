@@ -12,11 +12,6 @@ void *video_stream_task(void *arg);
 /* 请求模块停止（由 main 在退出前调用） */
 void video_stream_shutdown(void *arg);
 
-/* 阻塞等待下一帧；传出为 malloc 的副本，调用者负责 free；返回新序号，或 -1 表示停止 */
-int video_stream_wait_next(int last_seq, unsigned char **out, size_t *out_len);
-
-/* 可查询内部状态（只读） */
-int video_stream_is_running(void);
 void video_stream_restart(void);
 
 /* 启动一个 MJPEG 推流线程（每个 HTTP 连接一个，detached）；成功返回 0。

@@ -123,7 +123,7 @@ static void parse_line(dbc_t *dbc, const char *line)
 
 /* ---- 对外 API ---- */
 
-int dbc_parse(dbc_t *dbc, const char *content, size_t len)
+static int dbc_parse(dbc_t *dbc, const char *content, size_t len)
 {
     if (!dbc || (!content && len != 0)) return -1;
     memset(dbc, 0, sizeof(*dbc));
@@ -158,7 +158,7 @@ int dbc_load(dbc_t *dbc, const char *path)
     return 0;
 }
 
-int dbc_find_message(const dbc_t *dbc, canid_t can_id)
+static int dbc_find_message(const dbc_t *dbc, canid_t can_id)
 {
     if (!dbc) return -1;
     canid_t id = can_id & CAN_EFF_MASK;
@@ -167,7 +167,7 @@ int dbc_find_message(const dbc_t *dbc, canid_t can_id)
     return -1;
 }
 
-int dbc_find_message_by_name(const dbc_t *dbc, const char *name)
+static int dbc_find_message_by_name(const dbc_t *dbc, const char *name)
 {
     if (!dbc || !name) return -1;
     for (int i = 0; i < dbc->msg_count; i++)
@@ -175,7 +175,7 @@ int dbc_find_message_by_name(const dbc_t *dbc, const char *name)
     return -1;
 }
 
-int dbc_find_signal(const dbc_t *dbc, int msg_idx, const char *name)
+static int dbc_find_signal(const dbc_t *dbc, int msg_idx, const char *name)
 {
     if (!dbc || !name || msg_idx < 0 || msg_idx >= dbc->msg_count) return -1;
     const dbc_message_t *msg = &dbc->messages[msg_idx];
@@ -186,7 +186,7 @@ int dbc_find_signal(const dbc_t *dbc, int msg_idx, const char *name)
     return -1;
 }
 
-int dbc_decode_raw(const dbc_t *dbc, int sig_idx,
+static int dbc_decode_raw(const dbc_t *dbc, int sig_idx,
                    const struct canfd_frame *frame, uint64_t *raw)
 {
     if (!dbc || !frame || !raw) return -1;
@@ -218,7 +218,7 @@ int dbc_decode_raw(const dbc_t *dbc, int sig_idx,
     return 0;
 }
 
-int dbc_decode_physical(const dbc_t *dbc, int sig_idx,
+static int dbc_decode_physical(const dbc_t *dbc, int sig_idx,
                         const struct canfd_frame *frame, double *value)
 {
     uint64_t raw;
@@ -228,7 +228,7 @@ int dbc_decode_physical(const dbc_t *dbc, int sig_idx,
     return 0;
 }
 
-int dbc_decode_message(const dbc_t *dbc, int msg_idx,
+static int dbc_decode_message(const dbc_t *dbc, int msg_idx,
                        const struct canfd_frame *frame, char *out, size_t out_size)
 {
     if (!dbc || !frame || !out || out_size == 0) return -1;

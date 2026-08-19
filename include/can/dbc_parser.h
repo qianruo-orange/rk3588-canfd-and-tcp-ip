@@ -59,32 +59,8 @@ typedef struct {
     int           sig_count;
 } dbc_t;
 
-/* 解析 DBC 文本内容（逐行解析 BO_/SG_，忽略其余行）；成功返回 0 */
-int dbc_parse(dbc_t *dbc, const char *content, size_t len);
-
 /* 从文件加载 DBC；成功返回 0 */
 int dbc_load(dbc_t *dbc, const char *path);
-
-/* 按 CAN ID 查找消息索引；找不到返回 -1 */
-int dbc_find_message(const dbc_t *dbc, canid_t can_id);
-
-/* 按名字查找消息索引；找不到返回 -1 */
-int dbc_find_message_by_name(const dbc_t *dbc, const char *name);
-
-/* 在指定消息内按名字查找信号索引（全局 signals[] 下标）；找不到返回 -1 */
-int dbc_find_signal(const dbc_t *dbc, int msg_idx, const char *name);
-
-/* 从帧中解码信号原始值（未缩放，含符号扩展）；成功返回 0 */
-int dbc_decode_raw(const dbc_t *dbc, int sig_idx,
-                   const struct canfd_frame *frame, uint64_t *raw);
-
-/* 从帧中解码信号物理值（raw * factor + offset）；成功返回 0 */
-int dbc_decode_physical(const dbc_t *dbc, int sig_idx,
-                        const struct canfd_frame *frame, double *value);
-
-/* 解码整帧消息为 "name=value name=value ..." 文本；返回写入字节数 */
-int dbc_decode_message(const dbc_t *dbc, int msg_idx,
-                       const struct canfd_frame *frame, char *out, size_t out_size);
 
 /* 收到一帧 CAN 数据后按通道 DBC 解码整帧并记录日志；解码成功返回 0，否则 -1。
    通过 out 参数返回 can_id(不含标志位)、报文名与解码文本。 */

@@ -15,7 +15,7 @@
 
 #include "core/tcp_queue.h"
 
-int tcp_queue_init(tcp_queue_t *q)
+static int tcp_queue_init(tcp_queue_t *q)
 {
     if (!q) 
     {
@@ -32,7 +32,7 @@ int tcp_queue_init(tcp_queue_t *q)
 }
 
 // 更新队列推送函数实现，适配新的参数签名和功能
-int tcp_queue_push(tcp_queue_t *q, uint8_t *buf, uint8_t len)
+static int tcp_queue_push(tcp_queue_t *q, uint8_t *buf, uint8_t len)
 {
     if (!q || !buf || len == 0) return TCP_QUEUE_ERR_INVALID_PARAM;
     if(pthread_mutex_lock(&q->mutex) != 0) return TCP_QUEUE_ERR_MUTEX_LOCK; 
@@ -56,7 +56,7 @@ int tcp_queue_push(tcp_queue_t *q, uint8_t *buf, uint8_t len)
     return 0;
 }
 
-int tcp_queue_pop(tcp_queue_t *q, uint8_t *buf, uint8_t *len)
+static int tcp_queue_pop(tcp_queue_t *q, uint8_t *buf, uint8_t *len)
 {
     if (!q || !buf || !len) return TCP_QUEUE_ERR_INVALID_PARAM;
     if(pthread_mutex_lock(&q->mutex) != 0) return TCP_QUEUE_ERR_MUTEX_LOCK; 

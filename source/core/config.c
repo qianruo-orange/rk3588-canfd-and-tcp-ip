@@ -15,7 +15,7 @@
 
 #define CONFIG_PATH PATH_CONFIG
 
-void config_defaults(struct app_config_t *cfg)
+static void config_defaults(struct app_config_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     safe_strncpy(cfg->log_dir, sizeof(cfg->log_dir), PATH_LOGS);

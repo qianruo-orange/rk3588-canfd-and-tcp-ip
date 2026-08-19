@@ -91,7 +91,7 @@ static void http_network_api_wrap(app_ctx_t *app, int fd, const char *method, co
  * @path: 目标资源路径。
  * @return: MIME 类型字符串。
  */
-const char *http_mime_type(const char *path)
+static const char *http_mime_type(const char *path)
 {
     const char *ext = strrchr(path, '.');
     if (!ext) return "application/octet-stream";
@@ -247,12 +247,12 @@ deny:
 /**
  * http_check_auth_user - 检查普通用户权限的 Basic Auth。
  */
-int http_check_auth_user(const char *req, int fd) { return http_check_auth_common(req, fd, 0); }
+static int http_check_auth_user(const char *req, int fd) { return http_check_auth_common(req, fd, 0); }
 
 /**
  * http_check_auth_root - 检查 root 权限的 Basic Auth。
  */
-int http_check_auth_root(const char *req, int fd) { return http_check_auth_common(req, fd, 1); }
+static int http_check_auth_root(const char *req, int fd) { return http_check_auth_common(req, fd, 1); }
 
 /* ---- 静态文件服务 ---- */
 

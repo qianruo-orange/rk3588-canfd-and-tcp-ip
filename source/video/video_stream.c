@@ -319,7 +319,7 @@ void *video_stream_task(void *arg)
     return NULL;
 }
 
-int video_stream_wait_next(int last_seq, unsigned char **out, size_t *out_len)
+static int video_stream_wait_next(int last_seq, unsigned char **out, size_t *out_len)
 {
     video_ctx_t *vs = g_ctx;
     if (!vs) return -1;
@@ -349,7 +349,7 @@ int video_stream_wait_next(int last_seq, unsigned char **out, size_t *out_len)
     return seq;
 }
 
-int video_stream_is_running(void)
+static int video_stream_is_running(void)
 {
     return g_ctx ? g_ctx->running : 0;
 }

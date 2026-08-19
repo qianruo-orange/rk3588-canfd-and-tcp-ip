@@ -24,9 +24,6 @@ typedef struct{
     pthread_mutex_t mutex;             // 互斥锁
 }tcp_queue_t;
 
-int tcp_queue_init(tcp_queue_t *q);
-int tcp_queue_push(tcp_queue_t *q, const uint8_t *buf, uint8_t len);
-int tcp_queue_pop(tcp_queue_t *q, uint8_t *buf, uint8_t *len);
 int tcp_queue_count(const tcp_queue_t *q);
 
 #endif /* TCP_QUEUE_H */

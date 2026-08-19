@@ -16,11 +16,8 @@
 
 #define JSON_ADD(json, off, fmt, ...) do {     int _n = snprintf((json) + (off), sizeof(json) - (off), fmt, ##__VA_ARGS__);     if (_n < 0 || _n >= (int)(sizeof(json) - (off))) return;     (off) += _n; } while(0)
 
-const char *http_mime_type(const char *path);
 void http_send_response(int fd, int code, const char *status, const char *mime, const void *body, size_t len);
 void http_handle_404(int fd, const char *path);
-int  http_check_auth_user(const char *req, int fd);
-int  http_check_auth_root(const char *req, int fd);
 void http_serve_file(int fd, const char *uri);
 
 void http_logs_handler(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf);

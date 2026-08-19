@@ -10,7 +10,7 @@
 #include "core/version.h"
 
 /* 短版本号：如 "1.0.0" */
-const char *app_version_short(void)
+static const char *app_version_short(void)
 {
     return APP_VERSION;
 }
@@ -18,7 +18,7 @@ const char *app_version_short(void)
 /* 完整版本串：如
  *   data_transport_test 1.0.0 (git:dd072de+ branch:main build:Release 2026-08-12 10:00:00)
  * '+' 后缀表示工作区存在未提交修改（git dirty）。 */
-const char *app_version_full(void)
+static const char *app_version_full(void)
 {
     static char buf[256];
     snprintf(buf, sizeof(buf),

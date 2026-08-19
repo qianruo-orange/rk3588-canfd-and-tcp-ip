@@ -52,7 +52,7 @@ void http_dbc_record(dbc_dir_t dir, const char *ifname, canid_t can_id,
     pthread_mutex_unlock(&g_decode_mutex);
 }
 
-int http_dbc_recent_json(dbc_dir_t dir, char *out, size_t out_size)
+static int http_dbc_recent_json(dbc_dir_t dir, char *out, size_t out_size)
 {
     if (!out || out_size == 0) return -1;
 

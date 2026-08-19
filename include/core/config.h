@@ -51,7 +51,6 @@ struct app_config_t {
 };
 
 int  config_load(struct app_config_t *cfg);
-void config_defaults(struct app_config_t *cfg);
 void config_save(app_ctx_t *app);
 
 #endif /* CONFIG_H */

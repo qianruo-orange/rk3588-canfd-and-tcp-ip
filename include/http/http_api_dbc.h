@@ -14,7 +14,4 @@ typedef enum {
 void http_dbc_record(dbc_dir_t dir, const char *ifname, canid_t can_id,
                      const char *name, const char *text);
 
-/* 将指定方向的最近解析结果序列化为 JSON 数组（最新在前）；返回写入字节数 */
-int http_dbc_recent_json(dbc_dir_t dir, char *out, size_t out_size);
-
 #endif /* HTTP_API_DBC_H */

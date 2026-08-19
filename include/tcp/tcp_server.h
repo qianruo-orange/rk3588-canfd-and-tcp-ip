@@ -47,12 +47,7 @@ typedef struct tcp_ctx {
     int             tx_efd;
 } tcp_ctx_t;
 
-/* 异步发送数据到客户端：压入 TX 队列，写 eventfd 唤醒 tcp_task。
- * client_idx < 0 表示广播所有已连接客户端。返回 0 成功，-1 失败。 */
-int tcp_tx_packet(tcp_ctx_t *ctx, int client_idx, const void *buf, size_t len);
-
 int tcp_listen(int port);
-int tcp_accept(int listen_fd);
 
 /* 创建 TCP 监听套接字。必须在 can_init() 之后调用。 */
 int  tcp_init(void *arg);
@@ -60,9 +55,5 @@ void tcp_cleanup(void *ctx);
 
 /* TCP 数据收发线程（独立 epoll 管理 listen + 客户端读写 + TX eventfd） */
 void *tcp_task(void *arg);
-
-/* 客户端管理 */
-void tcp_client_add(tcp_ctx_t *ctx, int fd);
-void tcp_client_del(tcp_ctx_t *ctx, int idx);
 
 #endif /* TCP_SERVER_H */

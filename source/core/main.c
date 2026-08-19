@@ -30,9 +30,9 @@
 
 /* 模块生命周期函数 */
 typedef struct {
-    int  (*init)(void *arg);
-    void (*dtor)(void *arg);
-    void *(*task)(void *);
+    int  (*init)(void *arg);    // 初始化函数，返回 0 成功
+    int  (*dtor)(void *arg);    // 清理函数，返回 0 成功
+    void *(*task)(void *arg);   // 任务函数，返回 NULL 退出
 } module_ops_t;
 
 /* 看门狗参数 */

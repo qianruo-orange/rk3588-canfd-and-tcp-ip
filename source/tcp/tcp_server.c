@@ -47,7 +47,7 @@ int tcp_listen(int port)
     return fd;
 }
 
-int tcp_accept(int listen_fd)
+static int tcp_accept(int listen_fd)
 {
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
@@ -117,7 +117,7 @@ static void eventfd_consume(int efd)
  * tcp_tx_packet - 异步发送数据到客户端：压入 TX 队列，写 eventfd 唤醒 tcp_task。
  * client_idx < 0 表示广播所有已连接客户端。返回 0 成功，-1 失败。
  */
-int tcp_tx_packet(tcp_ctx_t *ctx, int client_idx, const void *buf, size_t len)
+static int tcp_tx_packet(tcp_ctx_t *ctx, int client_idx, const void *buf, size_t len)
 {
     if (!ctx || !buf || len == 0 || len > WBUF_SIZE) { errno = EINVAL; return -1; }
 
@@ -321,7 +321,7 @@ void tcp_cleanup(void *arg)
     pthread_mutex_destroy(&ctx->tx_mutex);
 }
 
-void tcp_client_add(tcp_ctx_t *ctx, int fd)
+static void tcp_client_add(tcp_ctx_t *ctx, int fd)
 {
     pthread_mutex_lock(&ctx->client_mutex);
     int idx = -1;
@@ -338,7 +338,7 @@ void tcp_client_add(tcp_ctx_t *ctx, int fd)
     pthread_mutex_unlock(&ctx->client_mutex);
 }
 
-void tcp_client_del(tcp_ctx_t *ctx, int idx)
+static void tcp_client_del(tcp_ctx_t *ctx, int idx)
 {
     pthread_mutex_lock(&ctx->client_mutex);
     if (idx < 0 || idx >= TCP_MAX_CLIENTS) { pthread_mutex_unlock(&ctx->client_mutex); return; }

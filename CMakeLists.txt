@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(rk3588-canfd-and-tcp-ip-communication VERSION 1.1.0 LANGUAGES C)
+project(rk3588-canfd-and-tcp-ip VERSION 1.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -81,7 +81,7 @@ set(SOURCES
     source/can/can_queue.c
     source/can/can_socket.c
     source/can/dbc_parser.c
-    source/net/tcp_server.c
+    source/tcp/tcp_server.c
     source/http/http.c
     source/http/http_api_dbc.c
     source/http/http_logs.c
@@ -95,24 +95,24 @@ set(SOURCES
     source/watchdog/watchdog.c
 )
 
-add_executable(rk3588-canfd-and-tcp-ip-communication ${SOURCES})
+add_executable(rk3588-canfd-and-tcp-ip ${SOURCES})
 
-target_include_directories(rk3588-canfd-and-tcp-ip-communication PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(rk3588-canfd-and-tcp-ip PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include)
 
 # libnl3 headers are under /usr/include/libnl3
-target_include_directories(rk3588-canfd-and-tcp-ip-communication PRIVATE /usr/include/libnl3)
+target_include_directories(rk3588-canfd-and-tcp-ip PRIVATE /usr/include/libnl3)
 
-set_target_properties(rk3588-canfd-and-tcp-ip-communication PROPERTIES
+set_target_properties(rk3588-canfd-and-tcp-ip PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin"
 )
 
-target_link_libraries(rk3588-canfd-and-tcp-ip-communication PRIVATE pthread crypt)
+target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE pthread crypt)
 
 find_library(LIBSYSTEMD systemd REQUIRED)
-target_link_libraries(rk3588-canfd-and-tcp-ip-communication PRIVATE ${LIBSYSTEMD})
+target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBSYSTEMD})
 
 find_library(LIBNL3 nl-3 REQUIRED)
-target_link_libraries(rk3588-canfd-and-tcp-ip-communication PRIVATE ${LIBNL3})
+target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBNL3})
 
 find_library(LIBNLROUTE3 nl-route-3 REQUIRED)
-target_link_libraries(rk3588-canfd-and-tcp-ip-communication PRIVATE ${LIBNLROUTE3})
+target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBNLROUTE3})

@@ -4,7 +4,7 @@ set -e
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build"
 BIN_DIR="$PROJECT_DIR/bin"
-BIN_NAME="rk3588-canfd-and-tcp-ip-communication"
+BIN_NAME="rk3588-canfd-and-tcp-ip"
 BIN_PATH="$BIN_DIR/$BIN_NAME"
 CMAKE_DIR="$PROJECT_DIR/cmake"
 LOGS_DIR="$PROJECT_DIR/logs"

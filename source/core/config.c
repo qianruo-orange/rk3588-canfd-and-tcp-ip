@@ -9,7 +9,7 @@
 #include <string.h>
 #include "core/config.h"
 #include "can/can_socket.h"
-#include "net/tcp_server.h"
+#include "tcp/tcp_server.h"
 #include "core/log.h"
 #include "core/version.h"
 

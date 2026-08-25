@@ -21,7 +21,7 @@
 #include "core/config.h"
 #include "can/can_socket.h"
 #include "can/dbc_parser.h"
-#include "net/tcp_server.h"
+#include "tcp/tcp_server.h"
 #include "http/http.h"
 #include "watchdog/watchdog.h"
 #include "core/log.h"

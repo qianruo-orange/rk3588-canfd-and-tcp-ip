@@ -13,7 +13,7 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include "net/tcp_server.h"
+#include "tcp/tcp_server.h"
 #include "core/common.h"
 #include "core/log.h"
 #include "watchdog/watchdog.h"

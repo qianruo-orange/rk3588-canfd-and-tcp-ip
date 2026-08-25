@@ -1,4 +1,4 @@
-# rk3588-canfd-and-tcp-ip-communication
+# rk3588-canfd-and-tcp-ip
 
 基于 epoll 的 CAN / CAN FD 数据采集、DBC 信号解析与 TCP/IP 通信解决方案，内置 Web 管理界面、视频流与 systemd 看门狗，支持按系统信息自动识别可配置 CAN 通道。适用于 RK3588（如 Orange Pi 5 Max）/ Linux 运行环境，使用 C11 实现。
 
@@ -48,10 +48,10 @@ CAN 数据流（队列中均为原始帧，DBC 解析结果单独供前端展示
 ## 目录结构
 
 ```text
-rk3588-canfd-and-tcp-ip-communication/
+rk3588-canfd-and-tcp-ip/
 ├── CMakeLists.txt
 ├── README.md
-├── rk3588-canfd-and-tcp-ip-communication.service  # systemd 服务单元
+├── rk3588-canfd-and-tcp-ip.service  # systemd 服务单元
 ├── include/                          # 头文件
 │   ├── core/
 │   │   ├── common.h                  # 应用上下文与公共工具

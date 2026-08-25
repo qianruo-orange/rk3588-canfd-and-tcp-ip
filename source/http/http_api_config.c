@@ -4,7 +4,7 @@
 
 #include "http/http_internal.h"
 #include "can/can_socket.h"
-#include "net/tcp_server.h"
+#include "tcp/tcp_server.h"
 #include "video/video_stream.h"
 #include "watchdog/watchdog.h"
 #include <sys/epoll.h>

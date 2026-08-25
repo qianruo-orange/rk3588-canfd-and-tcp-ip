@@ -2,7 +2,7 @@
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="rk3588-canfd-and-tcp-ip-communication"
+APP_NAME="rk3588-canfd-and-tcp-ip"
 DEPLOY_DIR="/opt/$APP_NAME"
 BINARY="$PROJECT_DIR/bin/$APP_NAME"
 SERVICE_SRC="$PROJECT_DIR/$APP_NAME.service"

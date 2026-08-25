@@ -53,7 +53,19 @@ void http_video_caps(app_ctx_t *app, int fd, const char *method, const char *uri
     const char *device = "/dev/video0";
     if (q) {
         const char *d = strstr(q + 1, "device=");
-        if (d) device = d + 7;
+        if (d) {
+            const char *val = d + 7;
+            const char *p = val;
+            while (*p && *p != '&') p++;
+            size_t len = (size_t)(p - val);
+            /* 仅允许 /dev/videoN（N 为十进制数字），防止 open 任意路径 */
+            if (len > 10 && strncmp(val, "/dev/video", 10) == 0) {
+                int valid = 1;
+                for (size_t k = 10; k < len; k++)
+                    if (val[k] < '0' || val[k] > '9') { valid = 0; break; }
+                if (valid) device = val;
+            }
+        }
     }
 
     /* 尝试快速 QUERYCAP 获取设备名，失败则用占位名 */

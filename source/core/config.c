@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include "core/config.h"
 #include "can/can_socket.h"
 #include "tcp/tcp_server.h"
@@ -14,6 +15,10 @@
 #include "core/version.h"
 
 #define CONFIG_PATH PATH_CONFIG
+
+/* 串行化配置持久化：http_config_post 与 http_can_dbc_upload 等
+   并发保存时避免写坏 config.txt */
+static pthread_mutex_t g_config_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void config_defaults(struct app_config_t *cfg)
 {
@@ -109,8 +114,16 @@ void config_save(app_ctx_t *app)
     can_ctx_t *can = app->can;
     tcp_ctx_t *tcp = app->tcp;
 
-    FILE *fp = fopen(CONFIG_PATH, "w");
-    if (!fp) { LOG_ERROR("config: cannot write %s", CONFIG_PATH); return; }
+    pthread_mutex_lock(&g_config_mutex);
+    /* 原子写：先写临时文件，再 rename 覆盖，避免进程崩溃留下半截配置 */
+    char tmp_path[sizeof(CONFIG_PATH) + 8];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", CONFIG_PATH);
+    FILE *fp = fopen(tmp_path, "w");
+    if (!fp) {
+        LOG_ERROR("config: cannot write %s", tmp_path);
+        pthread_mutex_unlock(&g_config_mutex);
+        return;
+    }
 
     fprintf(fp, "# %s — auto-saved\n", APP_NAME);
     for (int i = 0; i < can->count; i++)
@@ -137,6 +150,11 @@ void config_save(app_ctx_t *app)
         if (can->ifaces[i].dbc_path[0])
             fprintf(fp, "can_dbc %s %s\n", can->ifaces[i].ifname, can->ifaces[i].dbc_path);
 
-    fclose(fp);
-    LOG_INFO("config: saved to %s", CONFIG_PATH);
+    if (fclose(fp) != 0 || rename(tmp_path, CONFIG_PATH) != 0) {
+        LOG_ERROR("config: save failed (%s)", CONFIG_PATH);
+        remove(tmp_path);
+    } else {
+        LOG_INFO("config: saved to %s", CONFIG_PATH);
+    }
+    pthread_mutex_unlock(&g_config_mutex);
 }

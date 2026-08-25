@@ -321,7 +321,10 @@ static void handle_can_output(app_ctx_t *app)
 
             ssize_t n = write(fd, &f, sizeof(f));
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                can_queue_push(q, &f); /* 该接口暂不可写：放回队尾，等下一轮 */
+                /* 该接口暂不可写：放回队尾，等下一轮；队列满时记录丢帧 */
+                if (can_queue_push(q, &f) != CAN_QUEUE_ERR_OK)
+                    LOG_ERROR("can tx queue full on %s, drop frame",
+                              ctx->ifaces[idx].ifname);
                 break;
             }
             if (n != (ssize_t)sizeof(f))

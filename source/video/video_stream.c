@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <linux/videodev2.h>
 #include <sys/epoll.h>
+#include <poll.h>
 #include <pthread.h>
 #include "video/video_stream.h"
 #include "core/log.h"
@@ -381,6 +382,29 @@ void video_stream_restart(void)
 
 /* ---- MJPEG 推流线程（每连接一个，detached，由 video 模块创建） ---- */
 
+/* 完整写入非阻塞推流 socket：处理 EAGAIN/EWOULDBLOCK 与部分写入，
+   避免慢客户端导致 MJPEG 流数据错位（部分写入后继续写下一段） */
+static int video_write_all(int fd, const void *data, size_t len)
+{
+    const char *p = (const char *)data;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, p + off, len - off);
+        if (w > 0) { off += (size_t)w; continue; }
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+                if (poll(&pfd, 1, 3000) <= 0) return -1;   /* 等待可写超时视为失败 */
+                continue;
+            }
+            return -1;
+        }
+        return -1;   /* write 返回 0，视为对端异常 */
+    }
+    return 0;
+}
+
 typedef struct {
     int fd;
     video_stream_client_close_cb on_close;
@@ -396,7 +420,7 @@ static void *video_stream_client_task(void *arg)
     const char *hdr = "HTTP/1.1 200 OK\r\n"
                       "Content-Type: multipart/x-mixed-replace; boundary=--frame\r\n"
                       "Connection: close\r\n\r\n";
-    write(fd, hdr, strlen(hdr));
+    video_write_all(fd, hdr, strlen(hdr));
     int last = 0;
     while (g_ctx && g_ctx->app->running) {
         /* 推流线程基于非阻塞写 + 轮询，不会长期阻塞，无需独立看门狗监督 */
@@ -410,9 +434,9 @@ static void *video_stream_client_task(void *arg)
         int hlen = snprintf(mhdr, sizeof(mhdr),
                             "--frame\r\nContent-Type: image/jpeg\r\n"
                             "Content-Length: %zu\r\n\r\n", flen);
-        if (write(fd, mhdr, hlen) < 0) { free(frame); break; }
-        if (write(fd, frame, flen) < 0) { free(frame); break; }
-        if (write(fd, "\r\n", 2) < 0) { free(frame); break; }
+        if (video_write_all(fd, mhdr, (size_t)hlen) < 0) { free(frame); break; }
+        if (video_write_all(fd, frame, flen) < 0) { free(frame); break; }
+        if (video_write_all(fd, "\r\n", 2) < 0) { free(frame); break; }
         free(frame);
     }
     if (on_close) on_close(fd);

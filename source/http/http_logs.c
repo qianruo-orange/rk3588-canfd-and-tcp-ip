@@ -15,19 +15,6 @@
 #define LOG_DIR PATH_LOGS
 #define LOG_PACK_MAX (100UL * 1024 * 1024)  /* 日志打包体积上限 100MB，防止长时间阻塞 HTTP */
 
-/* 用 epoll 实现单 fd 带超时的事件等待（可读/可写），替代 poll */
-static int logs_wait_fd(int fd, uint32_t events, int timeout_ms)
-{
-    int epfd = epoll_create1(0);
-    if (epfd < 0) return -1;
-    struct epoll_event ev = { .events = events, .data.fd = fd };
-    if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) { close(epfd); return -1; }
-    struct epoll_event out;
-    int r = epoll_wait(epfd, &out, 1, timeout_ms);
-    close(epfd);
-    return r;
-}
-
 /* URL 解码：前端用 encodeURIComponent 会把 '/' 编码为 %2F，这里还原 */
 static void url_decode(const char *src, char *dst, size_t dst_size)
 {
@@ -65,26 +52,8 @@ static int logs_resolve_rel(const char *rel, char *subdir, size_t subdir_size,
     return 0;
 }
 
-/* 将数据完整写入非阻塞 socket（处理 EAGAIN/EWOULDBLOCK 与部分写入） */
-static int http_write_all(int fd, const void *data, size_t len)
-{
-    const char *p = (const char *)data;
-    size_t off = 0;
-    while (off < len) {
-        ssize_t w = write(fd, p + off, len - off);
-        if (w > 0) { off += (size_t)w; continue; }
-        if (w < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                if (logs_wait_fd(fd, EPOLLOUT, 1000) <= 0) return -1;
-                continue;
-            }
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        return -1;   /* write 返回 0，视为错误 */
-    }
-    return 0;
-}
+/* 将数据完整写入非阻塞 socket（处理 EAGAIN/EWOULDBLOCK 与部分写入）
+   复用 http.c 的公共 http_write_all */
 
 /* 日志文件列表 JSON API */
 static void serve_log_list_json(int fd)
@@ -222,7 +191,10 @@ static void serve_log_pack(int fd)
     while ((n = fread(buf, 1, sizeof(buf), tar)) > 0) {
         if (http_write_all(fd, buf, n) < 0) break;
         total += n;
-        if (total > LOG_PACK_MAX) break;   /* 限制打包体积，避免长时间阻塞 HTTP 服务器 */
+        if (total > LOG_PACK_MAX) {
+            LOG_INFO("logs pack: capped at %zu bytes", total);
+            break;   /* 限制打包体积，避免长时间阻塞 HTTP 服务器 */
+        }
         watchdog_feed_self("http");            /* 打包耗时较长，持续喂狗防止看门狗误杀 */
     }
     pclose(tar);

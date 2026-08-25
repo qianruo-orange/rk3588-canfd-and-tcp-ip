@@ -29,7 +29,7 @@ struct app_config_t;
 
 /* 应用运行时上下文：唯一的共享状态容器，通过指针传递给各线程 / 各模块 */
 typedef struct app_ctx {
-    volatile sig_atomic_t running;    /* 运行标志（替代 g_running） */
+    atomic_int            running;    /* 运行标志（C11 原子，信号处理器与各线程安全读写） */
     pthread_mutex_t        can_mutex; /* CAN sock_fd 并发修改互斥锁 */
     struct can_ctx        *can;
     struct tcp_ctx        *tcp;

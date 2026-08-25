@@ -177,6 +177,14 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         int new_fd = can_socket_open(iface->ifname, iface->fd_mode);
         if (new_fd < 0) {
             LOG_ERROR("config: CAN %s reopen failed", iface->ifname);
+            /* 保持旧 socket 继续工作：重新注册到接收 epoll，
+               否则该通道会静默失联（fd 有效但已不在 epoll 中） */
+            if (old_fd >= 0 && can->recv_epfd >= 0) {
+                struct epoll_event ev;
+                ev.events = EPOLLIN;
+                ev.data.u32 = (uint32_t)(i + 1);
+                epoll_ctl(can->recv_epfd, EPOLL_CTL_ADD, old_fd, &ev);
+            }
             continue;
         }
 

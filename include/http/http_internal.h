@@ -19,6 +19,8 @@
 void http_send_response(int fd, int code, const char *status, const char *mime, const void *body, size_t len);
 void http_handle_404(int fd, const char *path);
 void http_serve_file(int fd, const char *uri);
+/* 完整写入非阻塞 socket（处理 EAGAIN/EWOULDBLOCK 与部分写入），失败返回 -1 */
+int http_write_all(int fd, const void *data, size_t len);
 
 void http_logs_handler(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf);
 void http_system_api(app_ctx_t *app, int fd);

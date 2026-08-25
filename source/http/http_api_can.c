@@ -197,10 +197,11 @@ void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char 
         return;
     }
 
-    /* 落盘到 config/dbc_<ifname>.dbc */
-    char path[320];
+    /* 先写临时文件，解析验证成功后再原子替换正式文件，避免残留损坏的 DBC */
+    char path[320], tmp_path[336];
     snprintf(path, sizeof(path), "config/dbc_%s.dbc", ifname);
-    FILE *fp = fopen(path, "w");
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    FILE *fp = fopen(tmp_path, "w");
     if (!fp) {
         http_send_response(fd, 500, "Error", "text/plain", "cannot write file", 17);
         return;
@@ -208,19 +209,28 @@ void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char 
     size_t w = fwrite(content, 1, (size_t)content_len, fp);
     fclose(fp);
     if (w != (size_t)content_len) {
+        remove(tmp_path);
         http_send_response(fd, 500, "Error", "text/plain", "write failed", 12);
         return;
     }
 
     /* 重新加载该通道 DBC（与解码互斥） */
     pthread_mutex_lock(&app->dbc_mutex);
-    int rc = dbc_load(&app->dbcs[idx], path);
+    int rc = dbc_load(&app->dbcs[idx], tmp_path);
     int msg_count = app->dbcs[idx].msg_count;
     int sig_count = app->dbcs[idx].sig_count;
     pthread_mutex_unlock(&app->dbc_mutex);
 
     if (rc < 0) {
+        remove(tmp_path);   /* 解析失败：不残留临时文件 */
         http_send_response(fd, 400, "Bad Request", "text/plain", "invalid dbc", 12);
+        return;
+    }
+
+    /* 验证通过：替换为正式文件 */
+    if (rename(tmp_path, path) != 0) {
+        remove(tmp_path);
+        http_send_response(fd, 500, "Error", "text/plain", "cannot write file", 17);
         return;
     }
 
@@ -353,6 +363,22 @@ void http_can_send(app_ctx_t *app, int fd, const char *method, const char *uri, 
     }
     if (len < 0 || hi >= 0) {   /* 非法字符 / 奇数个 hex 字符 / 超长 */
         http_send_response(fd, 400, "Bad Request", "text/plain", "bad data", 8);
+        return;
+    }
+
+    /* 校验目标接口存在及其模式：经典 CAN 单帧最多 8 字节，
+       否则 send 必然失败且前端无提示 */
+    int iface_idx = -1;
+    if (app && app->can) {
+        for (int i = 0; i < app->can->count; i++)
+            if (strcmp(app->can->ifaces[i].ifname, ifname) == 0) { iface_idx = i; break; }
+    }
+    if (iface_idx < 0) {
+        http_send_response(fd, 404, "Not Found", "text/plain", "iface not found", 15);
+        return;
+    }
+    if (!app->can->ifaces[iface_idx].fd_mode && len > 8) {
+        http_send_response(fd, 400, "Bad Request", "text/plain", "classic CAN max 8 bytes", 23);
         return;
     }
 

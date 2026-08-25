@@ -13,6 +13,7 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <poll.h>
 #include <shadow.h>
 #include <crypt.h>
 #include <pwd.h>
@@ -106,6 +107,34 @@ static const char *http_mime_type(const char *path)
 }
 
 /**
+ * http_write_all - 完整写入非阻塞 socket（处理 EAGAIN/EWOULDBLOCK 与部分写入）。
+ * @fd: 客户端 socket。
+ * @data: 数据指针。
+ * @len: 数据长度。
+ * @return: 成功返回 0；对端关闭或等待可写超时返回 -1。
+ */
+int http_write_all(int fd, const void *data, size_t len)
+{
+    const char *p = (const char *)data;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, p + off, len - off);
+        if (w > 0) { off += (size_t)w; continue; }
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+                if (poll(&pfd, 1, 3000) <= 0) return -1;   /* 等待可写超时视为失败 */
+                continue;
+            }
+            return -1;
+        }
+        return -1;   /* write 返回 0，视为对端异常 */
+    }
+    return 0;
+}
+
+/**
  * http_send_response - 向客户端发送标准 HTTP 响应头和响应体。
  * @fd: 客户端 socket。
  * @code: HTTP 状态码。
@@ -124,9 +153,10 @@ void http_send_response(int fd, int code, const char *status,
                        "Content-Length: %zu\r\n"
                        "Connection: close\r\n\r\n",
                        code, status, mime, len);
-    if (write(fd, header, off) < 0) return;
+    if (off < 0) return;
+    if (http_write_all(fd, header, (size_t)off) < 0) return;
     if (body && len > 0)
-        write(fd, body, len);
+        http_write_all(fd, body, len);
 }
 
 /**
@@ -146,11 +176,14 @@ void http_handle_404(int fd, const char *path)
 
 static pthread_mutex_t g_auth_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* 认证暴力破解限速（http worker 单线程执行认证，无需原子） */
-static int    g_auth_fail = 0;
-static time_t g_auth_fail_win = 0;
+/* 认证暴力破解限速：按来源 IP 计数。
+   全局熔断会被匿名攻击者刷满失败计数从而 DoS 合法用户，因此按 IP 隔离，
+   仅封禁肇事 IP；getpwnam/getspnam/crypt 本身也由 g_auth_mutex 串行保护 */
 #define AUTH_FAIL_WINDOW 10   /* 窗口：10 秒 */
 #define AUTH_FAIL_LIMIT  20   /* 窗口内允许的最大失败次数 */
+#define AUTH_IP_TABLE    64
+typedef struct { char ip[INET_ADDRSTRLEN]; int fail; time_t win; } auth_fail_t;
+static auth_fail_t g_auth_fail[AUTH_IP_TABLE];
 
 /* internal helper: check basic auth; if require_root==1 require uid==0 */
 /**
@@ -162,14 +195,41 @@ static time_t g_auth_fail_win = 0;
  */
 static int http_check_auth_common(const char *req, int fd, int require_root)
 {
-    /* 暴力破解熔断：窗口内失败超限直接拒绝（不执行 crypt，避免 CPU DoS） */
+    /* 取来源 IP 作为限速 key */
+    struct sockaddr_in peer;
+    socklen_t plen = sizeof(peer);
+    char ip[INET_ADDRSTRLEN] = "unknown";
+    if (getpeername(fd, (struct sockaddr *)&peer, &plen) == 0)
+        inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
+
+    /* 暴力破解限速：窗口内该 IP 失败超限直接拒绝（不执行 crypt，避免 CPU DoS） */
     time_t now = time(NULL);
-    if (!g_auth_fail_win || now - g_auth_fail_win >= AUTH_FAIL_WINDOW) {
-        g_auth_fail = 0;
-        g_auth_fail_win = now;
+    pthread_mutex_lock(&g_auth_mutex);
+    int slot = -1, free_slot = -1;
+    for (int i = 0; i < AUTH_IP_TABLE; i++) {
+        if (g_auth_fail[i].ip[0] && strcmp(g_auth_fail[i].ip, ip) == 0) { slot = i; break; }
+        if (!g_auth_fail[i].ip[0] && free_slot < 0) free_slot = i;
     }
-    if (g_auth_fail >= AUTH_FAIL_LIMIT) {
-        LOG_INFO("HTTP auth: rate limited");
+    if (slot < 0) {
+        if (free_slot < 0) {   /* 表满：淘汰最久未更新的条目 */
+            free_slot = 0;
+            for (int i = 1; i < AUTH_IP_TABLE; i++)
+                if (g_auth_fail[i].win < g_auth_fail[free_slot].win) free_slot = i;
+        }
+        slot = free_slot;
+        safe_strncpy(g_auth_fail[slot].ip, sizeof(g_auth_fail[slot].ip), ip);
+        g_auth_fail[slot].fail = 0;
+        g_auth_fail[slot].win  = now;
+    }
+    if (now - g_auth_fail[slot].win >= AUTH_FAIL_WINDOW) {
+        g_auth_fail[slot].fail = 0;
+        g_auth_fail[slot].win  = now;
+    }
+    int rate_limited = (g_auth_fail[slot].fail >= AUTH_FAIL_LIMIT);
+    pthread_mutex_unlock(&g_auth_mutex);
+
+    if (rate_limited) {
+        LOG_INFO("HTTP auth: rate limited from %s", ip);
         goto deny;
     }
 
@@ -224,8 +284,14 @@ static int http_check_auth_common(const char *req, int fd, int require_root)
     if (ok && require_root && pw->pw_uid != 0) ok = 0;
     pthread_mutex_unlock(&g_auth_mutex);
 
-    if (ok)
+    if (ok) {
+        /* 认证成功：清除该 IP 的失败计数 */
+        pthread_mutex_lock(&g_auth_mutex);
+        g_auth_fail[slot].fail = 0;
+        g_auth_fail[slot].win  = now;
+        pthread_mutex_unlock(&g_auth_mutex);
         return 1;
+    }
 
     LOG_INFO("HTTP auth: user '%s' denied", username);
     goto deny;
@@ -234,7 +300,9 @@ auth_unlock_deny:
     pthread_mutex_unlock(&g_auth_mutex);
     LOG_INFO("HTTP auth: user '%s' denied", username);
 deny:
-    g_auth_fail++;
+    pthread_mutex_lock(&g_auth_mutex);
+    g_auth_fail[slot].fail++;
+    pthread_mutex_unlock(&g_auth_mutex);
     dprintf(fd,
         "HTTP/1.1 401 Unauthorized\r\n"
         "WWW-Authenticate: Basic realm=\"data_transport\"\r\n"
@@ -292,7 +360,7 @@ void http_serve_file(int fd, const char *uri)
                        "Content-Length: %zu\r\n"
                        "Connection: close\r\n\r\n",
                        http_mime_type(path), size);
-    if (write(fd, header, off) < 0) { fclose(fp); return; }
+    if (http_write_all(fd, header, (size_t)off) < 0) { fclose(fp); return; }
 
     char buf[8192];
     size_t remain = size;
@@ -300,7 +368,7 @@ void http_serve_file(int fd, const char *uri)
         size_t n = (remain > sizeof(buf)) ? sizeof(buf) : remain;
         size_t r = fread(buf, 1, n, fp);
         if (r == 0) break;
-        if (write(fd, buf, r) < 0) break;
+        if (http_write_all(fd, buf, r) < 0) break;
         remain -= r;
     }
     fclose(fp);
@@ -339,7 +407,15 @@ static void *client_handler(app_ctx_t *app, int fd)
     char buf[HTTP_BUF_SIZE];
     const long max_body_bytes = 1024L * 1024L; /* 1MB */
 
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    ssize_t n;
+    /* 等待首个请求包到达（最多 30 秒）：fd 是非阻塞的，若数据未到立即 read
+       会返回 EAGAIN 而被当作连接异常关闭，慢客户端/网络拥塞时易误断 */
+    if (http_wait_fd(fd, EPOLLIN, 30000) <= 0) {
+        close(fd);
+        __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+        return NULL;
+    }
+    n = read(fd, buf, sizeof(buf) - 1);
     if (n <= 0) {
         close(fd);
         __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
@@ -430,7 +506,7 @@ static void *client_handler(app_ctx_t *app, int fd)
         { "/api/can/dbc",    0, "POST", http_can_dbc_upload_wrap, http_check_auth_root },
         { "/api/can/send",   0, "POST", http_can_send_wrap,   http_check_auth_root },
         { "/api/can/frames", 0, NULL,   http_can_rx_wrap,     NULL },
-        { "/api/can/toggle",0, NULL,   http_can_toggle_wrap,   http_check_auth_root },
+        { "/api/can/toggle",0, "POST", http_can_toggle_wrap, http_check_auth_root },
         { "/api/config",    0, "POST", http_config_post,  http_check_auth_root },
         { "/api/config",    0, NULL,   http_config_get,   http_check_auth_root },
         { "/api/reboot",    0, NULL,   http_reboot_wrap,       http_check_auth_root },

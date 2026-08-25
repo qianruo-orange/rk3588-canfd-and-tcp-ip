@@ -1,4 +1,4 @@
-# rk3588-canfd-and-tcp-ip-communication — 配置文件
+# rk3588-canfd-and-tcp-ip — 配置文件
 # 说明：本文件可由 Web 配置页（/config）读写并热生效；也可手动编辑后重启服务。
 # 格式：<key> <value>，'#' 开头为注释。
 

@@ -149,7 +149,7 @@ cd /home/orangepi/project1
 ./scripts/build.sh -C   # 清理构建产物与 logs
 ```
 
-构建产物：`./bin/rk3588-canfd-and-tcp-ip-communication`
+构建产物：`./bin/rk3588-canfd-and-tcp-ip`
 
 版本信息由 CMake 在配置阶段生成到 `include/core/version.h`，包括 `APP_NAME`、`APP_VERSION`、`APP_GIT_COMMIT`、`APP_GIT_BRANCH`、`APP_GIT_DIRTY`、`APP_BUILD_TYPE`、`APP_BUILD_DATE`。
 
@@ -157,7 +157,7 @@ cd /home/orangepi/project1
 
 ```bash
 cd /home/orangepi/project1
-./bin/rk3588-canfd-and-tcp-ip-communication
+./bin/rk3588-canfd-and-tcp-ip
 ```
 
 > 请在项目根目录运行，确保 `config/`、`html/` 和 `logs/` 目录可用。
@@ -174,7 +174,7 @@ sudo ./scripts/deploy.sh -r     # 重装（卸载后重新安装）
 sudo ./scripts/deploy.sh -h     # 查看帮助
 ```
 
-`deploy.sh` 需 root 权限，安装目录为 `/opt/rk3588-canfd-and-tcp-ip-communication/`，部署内容如下：
+`deploy.sh` 需 root 权限，安装目录为 `/opt/rk3588-canfd-and-tcp-ip/`，部署内容如下：
 
 | 源 | 目标 |
 | --- | --- |
@@ -184,13 +184,13 @@ sudo ./scripts/deploy.sh -h     # 查看帮助
 
 > 注：`config/config.txt` 与 `config/` 下的 DBC 模板文件**不会**被复制；首次部署使用程序内置默认值，后续通过 Web 配置页保存配置、上传 DBC 文件。
 
-服务名称：`rk3588-canfd-and-tcp-ip-communication`
+服务名称：`rk3588-canfd-and-tcp-ip`
 
 查看服务状态：
 
 ```bash
-systemctl status rk3588-canfd-and-tcp-ip-communication
-journalctl -u rk3588-canfd-and-tcp-ip-communication -f
+systemctl status rk3588-canfd-and-tcp-ip
+journalctl -u rk3588-canfd-and-tcp-ip -f
 ```
 
 部署要点：
@@ -274,8 +274,8 @@ journalctl -u rk3588-canfd-and-tcp-ip-communication -f
 
 ```text
 logs/
-├── rk3588-canfd-and-tcp-ip-communication_info_YYYYMMDD.log
-└── rk3588-canfd-and-tcp-ip-communication_error_YYYYMMDD.log
+├── rk3588-canfd-and-tcp-ip_info_YYYYMMDD.log
+└── rk3588-canfd-and-tcp-ip_error_YYYYMMDD.log
 ```
 
 ## 清理说明

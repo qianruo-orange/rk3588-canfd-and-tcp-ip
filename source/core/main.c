@@ -290,7 +290,10 @@ int main(void)
     }
 
     watchdog_register_thread(pthread_self(), "main", 15, 1);
-    while (g_app.running) { watchdog_feed_self("main"); sleep(1); }
+    while (g_app.running) { 
+        watchdog_feed_self("main"); 
+        sleep(1); 
+    }
     watchdog_unregister_self("main");
 
     /* 通知各模块停止，让工作线程尽快退出 */

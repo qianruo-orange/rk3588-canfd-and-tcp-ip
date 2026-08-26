@@ -3,6 +3,7 @@
  * YUYV→RGB、RGB 双线性缩放。纯函数，线程安全。
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <jpeglib.h>

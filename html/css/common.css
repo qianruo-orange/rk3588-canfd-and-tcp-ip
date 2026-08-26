@@ -1,14 +1,60 @@
-/* common.css — 全局共享样式 毛玻璃水滴风 */
+/* common.css — 全局共享样式 毛玻璃水滴风（支持深/浅主题） */
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:Segoe UI,sans-serif;background:linear-gradient(135deg,#0b1021 0%,#0f1b33 50%,#0b1628 100%);color:#c8d6e5;padding:24px;min-height:100vh}
-h1{color:#78c0f0;font-size:20px;margin-bottom:4px;text-shadow:0 0 20px rgba(108,180,238,.3)}
-.card{background:rgba(16,29,51,.55);border:1px solid rgba(108,180,238,.12);border-radius:18px;padding:18px;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);box-shadow:0 4px 24px rgba(0,0,0,.25),inset 0 1px 0 rgba(255,255,255,.04)}
-.card h3{font-size:14px;color:#8b9ec4;margin-bottom:10px}
-a{color:#78c0f0;text-decoration:none;transition:color .2s}
-a:hover{color:#a0d4f8}
-.bar{height:8px;background:rgba(255,255,255,.06);border-radius:10px;margin:4px 0;overflow:hidden;box-shadow:inset 0 1px 3px rgba(0,0,0,.3)}
+
+/* ---- 主题变量：默认深色 ---- */
+:root{
+  --bg:linear-gradient(135deg,#0b1021 0%,#0f1b33 50%,#0b1628 100%);
+  --text:#c8d6e5;
+  --text-strong:#ffffff;
+  --muted:#8b9ec4;
+  --muted-2:#5b6b85;
+  --accent:#78c0f0;
+  --accent-hover:#a0d4f8;
+  --card-bg:rgba(16,29,51,.55);
+  --card-border:rgba(108,180,238,.12);
+  --card-border2:rgba(108,180,238,.25);
+  --input-bg:rgba(10,17,32,.6);
+  --track:rgba(255,255,255,.06);
+  --btn-bg:rgba(255,255,255,.06);
+  --hover:rgba(108,180,238,.1);
+  --glow:rgba(108,180,238,.3);
+  --shadow:0 4px 24px rgba(0,0,0,.25);
+  --knob:#8b9ec4;
+}
+/* ---- 浅色主题 ---- */
+html[data-theme="light"]{
+  --bg:linear-gradient(135deg,#eef3fb 0%,#f7fafd 50%,#e8eef7 100%);
+  --text:#2c3a52;
+  --text-strong:#16233b;
+  --muted:#5a6b87;
+  --muted-2:#8a97ab;
+  --accent:#2f6fb0;
+  --accent-hover:#1c5591;
+  --card-bg:rgba(255,255,255,.78);
+  --card-border:rgba(47,111,176,.16);
+  --card-border2:rgba(47,111,176,.3);
+  --input-bg:#ffffff;
+  --track:rgba(44,58,82,.08);
+  --btn-bg:rgba(47,111,176,.06);
+  --hover:rgba(47,111,176,.1);
+  --glow:rgba(47,111,176,.15);
+  --shadow:0 4px 20px rgba(30,60,100,.12);
+  --knob:#5a6b87;
+}
+
+body{font-family:Segoe UI,sans-serif;background:var(--bg);color:var(--text);padding:24px;min-height:100vh;transition:background .3s,color .3s}
+h1{color:var(--accent);font-size:20px;margin-bottom:4px;text-shadow:0 0 20px var(--glow)}
+.card{background:var(--card-bg);border:1px solid var(--card-border);border-radius:18px;padding:18px;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);box-shadow:var(--shadow),inset 0 1px 0 rgba(255,255,255,.04)}
+.card h3{font-size:14px;color:var(--muted);margin-bottom:10px}
+a{color:var(--accent);text-decoration:none;transition:color .2s}
+a:hover{color:var(--accent-hover)}
+.bar{height:8px;background:var(--track);border-radius:10px;margin:4px 0;overflow:hidden;box-shadow:inset 0 1px 3px rgba(0,0,0,.3)}
 .bar div{height:100%;border-radius:10px;transition:width .5s;box-shadow:0 0 8px rgba(255,255,255,.1)}
 .green{background:linear-gradient(90deg,#3dcca0,#4ce0b0);box-shadow:0 0 10px rgba(76,201,160,.3)}
 .yellow{background:linear-gradient(90deg,#e8b84a,#f5cc60);box-shadow:0 0 10px rgba(240,192,96,.3)}
 .red{background:linear-gradient(90deg,#d44a5e,#e86878);box-shadow:0 0 10px rgba(224,85,106,.3)}
 .blue{background:linear-gradient(90deg,#5b9ad5,#78c0f0);box-shadow:0 0 10px rgba(108,180,238,.3)}
+
+/* ---- 主题切换按钮（右上角悬浮） ---- */
+.theme-btn{position:fixed;top:12px;right:12px;z-index:999;width:38px;height:38px;border-radius:50%;border:1px solid var(--card-border2);background:var(--btn-bg);color:var(--accent);cursor:pointer;font-size:17px;backdrop-filter:blur(8px);box-shadow:var(--shadow);transition:background .2s}
+.theme-btn:hover{background:var(--hover)}

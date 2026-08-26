@@ -512,6 +512,7 @@ static void *client_handler(app_ctx_t *app, int fd)
         { "/api/reboot",    0, NULL,   http_reboot_wrap,       http_check_auth_root },
         { "/api/shutdown",  0, NULL,   http_shutdown_wrap,     http_check_auth_root },
         { "/api/network",   0, NULL,   http_network_api_wrap,  NULL },
+        { "/api/network/ifaces",0,NULL,http_network_ifaces, NULL },
         { "/api/video/caps",1, NULL,  http_video_caps,   NULL },
         { "/api/video/devices",0,NULL, http_video_devices,NULL },
     };

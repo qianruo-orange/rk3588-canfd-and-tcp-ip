@@ -1,10 +1,38 @@
 #include <string.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netpacket/packet.h>
 /**
- * http_api_network.c — 网络接口流量统计 API。
- *   读取 /proc/net/dev，返回 eth0 / wlan0 的收发字节数。
+ * http_api_network.c — 网络接口流量统计 & 接口列表 API。
+ *   /api/network       读取 /proc/net/dev，返回 eth0 / wlan0 的收发字节数。
+ *   /api/network/ifaces 枚举系统全部网络接口（排除回环），用于配置页"绑定网卡"下拉框。
  */
 
 #include "http/http_internal.h"
+
+/* ---- /api/network/ifaces —— 枚举系统网络接口（排除回环） ---- */
+void http_network_ifaces(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf)
+{
+    (void)app; (void)method; (void)uri; (void)req_buf;
+    char json[1024];
+    int off = 0, first = 1;
+    JSON_ADD(json, off, "[");
+
+    struct ifaddrs *ifas = NULL;
+    if (getifaddrs(&ifas) == 0) {
+        for (struct ifaddrs *ifa = ifas; ifa; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_name || !ifa->ifa_addr) continue;
+            if (ifa->ifa_addr->sa_family != AF_PACKET) continue;  /* 每个接口只计一次 */
+            if (ifa->ifa_flags & IFF_LOOPBACK) continue;
+            JSON_ADD(json, off, "%s\"%s\"", first ? "" : ",", ifa->ifa_name);
+            first = 0;
+        }
+        freeifaddrs(ifas);
+    }
+
+    JSON_ADD(json, off, "]");
+    http_send_response(fd, 200, "OK", "application/json", json, off);
+}
 
 void http_network_api(app_ctx_t *app, int fd)
 {

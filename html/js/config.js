@@ -182,6 +182,19 @@
     el.appendChild(r);
   };
 
+  /* 加载网络接口列表，填充"绑定网卡"下拉框 */
+  async function loadIfaces() {
+    var sel = document.getElementById('bind');
+    sel.innerHTML = '<option value="">所有网卡</option>';
+    try {
+      var r = await fetch('/api/network/ifaces');
+      if (!r.ok) return;
+      var list = await r.json();
+      for (var i = 0; i < list.length; i++)
+        sel.innerHTML += '<option value="' + list[i] + '">' + list[i] + '</option>';
+    } catch(e) {}
+  }
+
   async function loadCfg() {
     try {
       var cfg = await (await fetch('/api/config')).json();
@@ -265,6 +278,6 @@
     try { await fetch('/api/shutdown'); } catch(e) {}
   };
 
-  /* 先扫描设备列表，再加载配置 */
-  loadDevices().then(function() { loadCfg(); });
+  /* 先扫描设备列表与网卡列表，再加载配置 */
+  loadDevices().then(loadIfaces).then(loadCfg);
 })();

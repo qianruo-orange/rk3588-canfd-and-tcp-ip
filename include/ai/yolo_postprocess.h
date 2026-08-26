@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "rknn/rknn_api.h"
+#include "ai/rknn_api.h"
 #include "ai/yolo_types.h"
 
 /**

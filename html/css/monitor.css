@@ -57,3 +57,26 @@
   h1{font-size:17px}
   #datetime{font-size:13px;margin-left:8px}
 }
+
+/* ---- 网络录像 ---- */
+.rec-bar{display:flex;align-items:center;gap:10px;margin-top:10px}
+.rec-btn{padding:6px 14px;background:var(--btn-bg);border:1px solid var(--card-border);border-radius:10px;font-size:13px;cursor:pointer;backdrop-filter:blur(8px);transition:all .2s;color:var(--text)}
+.rec-btn:hover{background:var(--hover)}
+.rec-btn.rec-on{background:rgba(224,85,106,.15);border-color:#e0556a;color:#e0556a}
+.rec-status{font-size:13px;color:var(--muted);font-family:monospace}
+.rec-status.rec-live{color:#e0556a;font-weight:bold;animation:rec-blink 1s infinite}
+@keyframes rec-blink{50%{opacity:.35}}
+.rec-card{margin-top:12px;padding:14px 18px;border-radius:14px;border:1px solid var(--card-border);background:var(--card-bg)}
+.rec-card h3{font-size:14px;color:var(--muted);margin:0 0 8px;display:flex;align-items:center;gap:8px}
+.rec-refresh{background:none;border:none;color:var(--accent);cursor:pointer;font-size:14px;padding:0}
+.rec-empty{color:var(--muted);font-size:13px}
+.rec-item{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--card-border);font-size:13px}
+.rec-item:last-child{border-bottom:none}
+.rec-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-family:monospace}
+.rec-size{color:var(--muted);white-space:nowrap}
+.rec-time{color:var(--muted);white-space:nowrap;font-size:12px}
+.rec-dl{color:var(--accent);text-decoration:none;white-space:nowrap}
+.rec-dl:hover{text-decoration:underline}
+.rec-del{background:none;border:1px solid var(--card-border);color:#e0556a;border-radius:6px;cursor:pointer;font-size:12px;padding:2px 8px}
+.rec-del:hover{background:rgba(224,85,106,.12)}
+@media(max-width:540px){.rec-time{display:none}}

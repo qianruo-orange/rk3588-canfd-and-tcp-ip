@@ -27,6 +27,7 @@
 #include "core/log.h"
 #include "core/common.h"
 #include "video/video_stream.h"
+#include "video/video_rec.h"
 #include "ai/rknn_yolo.h"
 
 /* 模块生命周期函数 */
@@ -149,6 +150,14 @@ static module_t g_modules[] = {
         .name = "watchdog",
         .ops  = { .init = watchdog_init, .dtor = NULL, .task = watchdog_task },
         .wd   = { .timeout = 0, .max_miss = 0 },
+        .thr  = { .stack_size = 0, .priority = 0, .cpu = -1 },
+    },
+    /* rec —— 网络录像（HTTP 控制）：空闲空转喂狗，录制中每帧喂狗 */
+    {
+        .tid  = 0,
+        .name = "rec",
+        .ops  = { .init = video_rec_init, .dtor = video_rec_destroy, .task = video_rec_task },
+        .wd   = { .timeout = 5, .max_miss = 3 },
         .thr  = { .stack_size = 0, .priority = 0, .cpu = -1 },
     },
     /* signal */

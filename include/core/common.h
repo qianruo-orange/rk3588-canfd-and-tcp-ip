@@ -26,6 +26,7 @@
 #define PATH_CONFIG   "config/config.txt"
 #define PATH_LOGS     "logs"
 #define PATH_WEBROOT  "html"
+#define PATH_RECORDINGS "recordings"
 
 /* 网络监控接口 */
 #define NET_IFACE_ETH  "eth0"

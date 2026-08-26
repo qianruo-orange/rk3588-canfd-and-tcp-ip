@@ -94,16 +94,19 @@ set(SOURCES
     source/http/http_api_video.c
     source/http/http_reboot.c
     source/video/video_stream.c
+    source/video/video_rec.c
+    source/video/rec_mp4.c
     source/ai/rknn_yolo.c
     source/ai/yolo_image.c
     source/ai/yolo_postprocess.c
     source/ai/yolo_draw.c
+    source/http/http_api_rec.c
     source/watchdog/watchdog.c
 )
 
 add_executable(rk3588-canfd-and-tcp-ip ${SOURCES})
 
-target_include_directories(rk3588-canfd-and-tcp-ip PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/third_party)
+target_include_directories(rk3588-canfd-and-tcp-ip PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include)
 
 # libnl3 headers are under /usr/include/libnl3
 target_include_directories(rk3588-canfd-and-tcp-ip PRIVATE /usr/include/libnl3)

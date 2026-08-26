@@ -625,6 +625,12 @@ static void http_process_request(http_conn_t *c)
         { "/api/network/ifaces",0,NULL,http_network_ifaces, NULL },
         { "/api/video/caps",1, NULL,  http_video_caps,   NULL },
         { "/api/video/devices",0,NULL, http_video_devices,NULL },
+        { "/api/rec/start",0, "POST", http_rec_handler,  http_check_auth_root },
+        { "/api/rec/stop", 0, "POST", http_rec_handler,  http_check_auth_root },
+        { "/api/rec/delete",0,"POST", http_rec_handler,  http_check_auth_root },
+        { "/api/rec/status",0, NULL,  http_rec_handler,  NULL },
+        { "/api/rec/list",  0, NULL,  http_rec_handler,  NULL },
+        { "/recfile/",      1, NULL,  http_rec_handler,  http_check_auth_root },
     };
 
     for (int i = 0; i < (int)(sizeof(rt)/sizeof(rt[0])); i++) {

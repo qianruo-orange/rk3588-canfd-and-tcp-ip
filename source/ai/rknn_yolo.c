@@ -24,7 +24,7 @@
 #include <stdint.h>
 #include <unistd.h>
 
-#include "rknn/rknn_api.h"
+#include "ai/rknn_api.h"
 
 #include "ai/rknn_yolo.h"
 #include "ai/yolo_image.h"

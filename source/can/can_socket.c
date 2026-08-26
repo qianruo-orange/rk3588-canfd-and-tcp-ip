@@ -26,6 +26,7 @@
 #include "http/http_api_dbc.h"
 #include "http/http_api_can.h"
 #include "core/common.h"
+#include "core/epoll_util.h"
 #include "core/log.h"
 #include "watchdog/watchdog.h"
 
@@ -378,12 +379,8 @@ void *can_recv_task(void *arg)
     LOG_INFO("can_recv_task started (%d iface(s))", ctx->count);
     while (app->running) {
         struct epoll_event events[64];
-        int nfds = epoll_wait(ctx->recv_epfd, events, 64, 500);
-        if (nfds < 0) {
-            if (errno == EINTR) { watchdog_feed_self("can_recv"); continue; }
-            LOG_ERROR("can recv epoll_wait"); break;
-        }
-        watchdog_feed_self("can_recv");
+        int nfds = epoll_wait_feed(ctx->recv_epfd, events, 64, 500, "can_recv");
+        if (nfds < 0) break;
         for (int i = 0; i < nfds; i++) {
             uint32_t tag = events[i].data.u32;
             if (tag < 1 || tag > (uint32_t)ctx->count) continue;
@@ -408,12 +405,8 @@ void *can_send_task(void *arg)
     LOG_INFO("can_send_task started (%d iface(s))", ctx->count);
     while (app->running) {
         struct epoll_event events[64];
-        int nfds = epoll_wait(ctx->send_epfd, events, 64, 500);
-        if (nfds < 0) {
-            if (errno == EINTR) { watchdog_feed_self("can_send"); continue; }
-            LOG_ERROR("can send epoll_wait"); break;
-        }
-        watchdog_feed_self("can_send");
+        int nfds = epoll_wait_feed(ctx->send_epfd, events, 64, 500, "can_send");
+        if (nfds < 0) break;
         for (int i = 0; i < nfds; i++) {
             uint32_t tag = events[i].data.u32;
             if (tag == 0) {

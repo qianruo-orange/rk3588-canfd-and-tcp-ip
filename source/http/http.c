@@ -33,6 +33,7 @@
 #include "video/video_stream.h"
 #include "watchdog/watchdog.h"
 #include "core/common.h"
+#include "core/epoll_util.h"
 
 /* ---- 全局变量 ---- */
 static int g_listen_fd = -1;
@@ -558,9 +559,7 @@ void http_serve_file(int fd, const char *uri)
     FILE *fp = fopen(path, "rb");
     if (!fp) { http_handle_404(fd, uri); return; }
 
-    fseek(fp, 0, SEEK_END);
-    size_t size = (size_t)ftell(fp);
-    fseek(fp, 0, SEEK_SET);
+    size_t size = http_file_size(fp);
     if (size > 20 * 1024 * 1024) {   /* 静态文件上限 20MB，防止大文件长时间占用连接 */
         fclose(fp);
         http_send_response(fd, 413, "Payload Too Large", "text/plain", "file too large", 15);
@@ -687,12 +686,8 @@ static void conn_read(http_conn_t *c)
         if (sep) {
             c->hdr_done = 1;
             c->hdr_len = (size_t)(sep - c->rbuf) + (sep[0] == '\r' ? 4 : 2);
-            const char *cl = strcasestr(c->rbuf, "Content-Length:");
-            if (cl) {
-                char *end = NULL;
-                long v = strtol(cl + 15, &end, 10);
-                if (end != cl + 15 && v > 0) c->body_cl = v;
-            }
+            long cl = http_content_length(c->rbuf);
+            if (cl > 0) c->body_cl = cl;
             if (c->body_cl > HTTP_BODY_MAX) {   /* body 过大：拒绝，避免读缓冲溢出 */
                 http_send_response(c->fd, 413, "Payload Too Large", "text/plain", "body too large", 15);
                 c->body_cl = -1;
@@ -801,13 +796,9 @@ void *http_server_task(void *arg)
 
     struct epoll_event events[64];
     while (app->running) {
-        int n = epoll_wait(epfd, events, sizeof(events) / sizeof(events[0]), 500);
-        if (n < 0) {
-            if (errno == EINTR) { watchdog_feed_self("http"); continue; }
-            break;
-        }
+        int n = epoll_wait_feed(epfd, events, sizeof(events) / sizeof(events[0]), 500, "http");
+        if (n < 0) break;
 
-        watchdog_feed_self("http");
         time_t now = time(NULL);
 
         for (int i = 0; i < n; i++) {

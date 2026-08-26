@@ -64,7 +64,7 @@ static int http_dbc_recent_json(dbc_dir_t dir, char *out, size_t out_size)
 
     pthread_mutex_lock(&g_decode_mutex);
     for (int i = 0; i < total; i++) {
-        int pos = ring_latest_pos(r, i, total);   /* 最新在前 */
+        int pos = ring_latest_pos(r, i);   /* 最新在前 */
         decode_entry_t *e = &g_decode_buf[dbc_dir_index(dir)][pos];
         int n = http_json_append(out, out_size, off,
                          "%s{\"ifname\":\"%s\",\"id\":\"0x%X\",\"name\":\"%s\",\"text\":\"%s\"}",

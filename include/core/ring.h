@@ -52,12 +52,17 @@ static inline int ring_total(const ring_t *r)
     return t > r->max ? r->max : t;
 }
 
-/* 最新在前的第 i 条（i=0 为最新）所在槽位；total 需为 ring_total() 的返回值 */
-static inline int ring_latest_pos(const ring_t *r, int i, int total)
+/* 最新在前的第 i 条（i=0 为最新）所在槽位。
+   槽位必须用"累计写入数"而不是 ring_total() 的截断值计算，
+   否则环形回绕后定位会偏移（与旧版 (count-1-i) % max 语义一致）。 */
+static inline int ring_latest_pos(const ring_t *r, int i)
 {
-    (void)r;
-    if (total <= 0 || i >= total) return 0;
-    return (total - 1 - i) % total;
+    if (!r) return 0;
+    int raw = atomic_load_explicit(&r->count, memory_order_relaxed);
+    if (raw <= 0) return 0;
+    int total = raw > r->max ? r->max : raw;
+    if (i >= total) return 0;
+    return (raw - 1 - i) % r->max;
 }
 
 #endif /* CORE_RING_H */

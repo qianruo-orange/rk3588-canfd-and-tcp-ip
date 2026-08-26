@@ -16,6 +16,7 @@
 #include "tcp/tcp_server.h"
 #include "tcp/tcp_queue.h"
 #include "core/common.h"
+#include "core/epoll_util.h"
 #include "core/log.h"
 #include "watchdog/watchdog.h"
 
@@ -241,12 +242,8 @@ void *tcp_task(void *arg)
     LOG_INFO("tcp_task started");
     while (app->running) {
         struct epoll_event events[64];
-        int nfds = epoll_wait(ctx->epfd, events, 64, 500);
-        if (nfds < 0) {
-            if (errno == EINTR) { watchdog_feed_self("tcp"); continue; }
-            LOG_ERROR("tcp epoll_wait"); break;
-        }
-        watchdog_feed_self("tcp");
+        int nfds = epoll_wait_feed(ctx->epfd, events, 64, 500, "tcp");
+        if (nfds < 0) break;
         for (int i = 0; i < nfds; i++) {
             uint32_t tag = events[i].data.u32;
             if (tag == 0) {

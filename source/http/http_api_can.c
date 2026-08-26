@@ -270,7 +270,7 @@ void http_can_rx(app_ctx_t *app, int fd)
 
     pthread_mutex_lock(&g_can_rx_mutex);
     for (int i = 0; i < total; i++) {
-        int pos = ring_latest_pos(&g_can_rx, i, total);   /* 最新在前 */
+        int pos = ring_latest_pos(&g_can_rx, i);   /* 最新在前 */
         if (i > 0 && (size_t)off < sizeof(json) - 1) json[off++] = ',';
         int n = can_rx_frame_json(&g_can_rx_buf[pos], json + off, sizeof(json) - (size_t)off);
         if (n < 0 || (size_t)n >= (int)(sizeof(json) - (size_t)off)) { off = (int)sizeof(json) - 1; break; }

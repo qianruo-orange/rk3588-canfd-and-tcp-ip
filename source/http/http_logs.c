@@ -102,9 +102,7 @@ static void serve_log_download(int fd, const char *rel)
     FILE *fp = fopen(path, "rb");
     if (!fp) { http_handle_404(fd, rel); return; }
 
-    fseek(fp, 0, SEEK_END);
-    size_t size = (size_t)ftell(fp);
-    fseek(fp, 0, SEEK_SET);
+    size_t size = http_file_size(fp);
 
     char disp[320];
     snprintf(disp, sizeof(disp),
@@ -183,9 +181,7 @@ static void serve_log_pack(int fd)
         http_err(fd, 500, "Internal Error", NULL);
         return;
     }
-    fseek(fp, 0, SEEK_END);
-    size_t size = (size_t)ftell(fp);
-    fseek(fp, 0, SEEK_SET);
+    size_t size = http_file_size(fp);
 
     http_serve_stream(fd, "application/gzip",
                       "Content-Disposition: attachment; filename=\"logs_pack.tar.gz\"\r\n",

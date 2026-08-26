@@ -566,19 +566,30 @@ void *http_server_task(void *arg)
         return NULL;
     }
 
+    /* 允许端口在 TIME_WAIT 残留时立即复用，避免重启后 bind 失败 */
+    int opt = 1;
+    setsockopt(g_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port        = htons(HTTP_DEFAULT_PORT);
 
-    if (bind(g_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        LOG_ERROR("http bind :%d", HTTP_DEFAULT_PORT);
-        close(g_listen_fd); g_listen_fd = -1; return NULL;
+    /* bind/listen 失败不退出：记录原因并定期重试（持续喂狗），保证 Web 服务最终恢复 */
+    while (app->running) {
+        if (bind(g_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
+            listen(g_listen_fd, 10) == 0)
+            break;
+        LOG_ERROR("http bind :%d failed: %s, retrying in 2s...",
+                  HTTP_DEFAULT_PORT, strerror(errno));
+        watchdog_feed_self("http");
+        usleep(2 * 1000 * 1000);
     }
-    if (listen(g_listen_fd, 10) < 0) {
-        LOG_ERROR("http listen :%d", HTTP_DEFAULT_PORT);
-        close(g_listen_fd); g_listen_fd = -1; return NULL;
+    if (!app->running) {
+        close(g_listen_fd);
+        g_listen_fd = -1;
+        return NULL;
     }
 
     int epfd = epoll_create1(0);

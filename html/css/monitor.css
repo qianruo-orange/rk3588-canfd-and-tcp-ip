@@ -35,7 +35,7 @@
 .nav a:hover{background:var(--hover);border-color:var(--card-border2)}
 .core-bars{display:grid;grid-template-columns:repeat(4,1fr);gap:2px 8px;margin-top:8px}
 #npu_cores{grid-template-columns:repeat(3,1fr)}
-.core-bar{height:6px;background:var(--track);border-radius:3px;overflow:hidden;box-shadow:inset 0 1px 2px rgba(0,0,0,.3)}
+.core-bar{height:6px;background:var(--track);border-radius:3px;overflow:hidden;box-shadow:inset 0 1px 2px var(--inset-shadow)}
 .core-bar div{height:100%;border-radius:3px;transition:width .5s}
 .core-label{font-size:10px;color:var(--muted);margin-bottom:2px;display:flex;justify-content:space-between}
 .net-iface{margin-bottom:8px}

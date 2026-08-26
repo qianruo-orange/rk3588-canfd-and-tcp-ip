@@ -92,27 +92,21 @@ int can_socket_configure(const char *ifname, int bitrate, int dbitrate,
         /* 接口已存在，用 ip 命令配置（MCP251xFD 等芯片需要原子操作） */
         char cmd[512];
         size_t off = 0;
-        /* 安全追加：缓冲区写满后安全截断，指针/长度均不越界 */
-#define APPEND(...) do { \
-            int _n = snprintf(cmd + off, sizeof(cmd) - off, __VA_ARGS__); \
-            if (_n < 0 || (size_t)_n >= sizeof(cmd) - off) { off = sizeof(cmd); break; } \
-            off += (size_t)_n; \
-        } while (0)
-        APPEND("ip link set %s down 2>/dev/null; ip link set %s type can bitrate %d",
+        /* 安全追加：缓冲区写满后安全截断，指针/长度均不越界（公共宏见 common.h） */
+        BUF_APPEND(cmd, off, "ip link set %s down 2>/dev/null; ip link set %s type can bitrate %d",
                ifname, ifname, bitrate);
-        if (fd_mode) APPEND(" fd on");
-        if (fd_mode && dbitrate > 0) APPEND(" dbitrate %d", dbitrate);
+        if (fd_mode) BUF_APPEND(cmd, off, " fd on");
+        if (fd_mode && dbitrate > 0) BUF_APPEND(cmd, off, " dbitrate %d", dbitrate);
         /* 用 ; 而非 &&：ip link set type can 对已有CAN接口可能返回 EEXIST */
-        APPEND(" 2>/dev/null");
-        if (bring_up) APPEND("; ip link set %s up 2>/dev/null", ifname);
-#undef APPEND
+        BUF_APPEND(cmd, off, " 2>/dev/null");
+        if (bring_up) BUF_APPEND(cmd, off, "; ip link set %s up 2>/dev/null", ifname);
         int rc = system(cmd);
         if (rc != 0 && bring_up) {
             /* type can 部分失败但 up 可能成功——验证接口是否真的 up */
             unsigned int flags = 0;
             struct ifreq ifr;
             memset(&ifr, 0, sizeof(ifr));
-            snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+            ifreq_set_name(&ifr, ifname);
             int sock = socket(AF_INET, SOCK_DGRAM, 0);
             if (sock >= 0) {
                 ioctl(sock, SIOCGIFFLAGS, &ifr);
@@ -176,7 +170,7 @@ int can_socket_open(const char *ifname, int fd_mode)
     if (s < 0) { LOG_ERROR("socket(PF_CAN)"); return -1; }
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
-    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+    ifreq_set_name(&ifr, ifname);
     if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) { LOG_ERROR("ioctl SIOCGIFINDEX for %s", ifname); close(s); return -1; }
     struct sockaddr_can addr;
     memset(&addr, 0, sizeof(addr));
@@ -191,8 +185,7 @@ int can_socket_open(const char *ifname, int fd_mode)
     }
 
     /* 非阻塞：配合 epoll 就绪通知，read/write 在无数据/不可写时返回 EAGAIN 而不是阻塞 */
-    int flags = fcntl(s, F_GETFL, 0);
-    if (flags < 0 || fcntl(s, F_SETFL, flags | O_NONBLOCK) < 0) {
+    if (set_nonblock(s) < 0) {
         LOG_ERROR("CAN %s: fcntl O_NONBLOCK: %s", ifname, strerror(errno));
         close(s);
         return -1;
@@ -208,23 +201,8 @@ int can_socket_open(const char *ifname, int fd_mode)
  */
 void can_socket_close(int fd) { if (fd >= 0) close(fd); }
 
-/* ---- TX 队列 + eventfd 跨线程唤醒 ---- */
-
-/* 写 eventfd：通知对端“有数据压入队列” */
-static void eventfd_signal(int efd)
-{
-    if (efd < 0) return;
-    uint64_t one = 1;
-    (void)write(efd, &one, sizeof(one));
-}
-
-/* 读 eventfd：清空通知计数，随后即可弹出队列 */
-static void eventfd_consume(int efd)
-{
-    if (efd < 0) return;
-    uint64_t v;
-    while (read(efd, &v, sizeof(v)) == (ssize_t)sizeof(v)) { }
-}
+/* ---- TX 队列 + eventfd 跨线程唤醒 ----
+   写/读 eventfd 的公共实现见 core/common.h（eventfd_signal / eventfd_consume） */
 
 /**
  * can_epoll_update_tx - 按该接口发送队列是否为空，动态切换 epoll 是否监听 EPOLLOUT。
@@ -514,7 +492,7 @@ int can_fd_supported(const char *ifname)
 
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
-    safe_strncpy(ifr.ifr_name, IFNAMSIZ, ifname);
+    ifreq_set_name(&ifr, ifname);
     if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) { close(s); return 0; }
 
     struct local_can_ioctl_data data;

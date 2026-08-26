@@ -243,9 +243,7 @@ int main(void)
                      path, cfg.args.can_ifaces[i].ifname, g_dbc[i].msg_count, g_dbc[i].sig_count);
     }
 
-    signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
-    signal(SIGPIPE, SIG_IGN);
-
+    /* 信号（SIGINT/SIGTERM/SIGPIPE）由 signal 模块的 init 统一注册，见 signal_setup */
     set_current_thread_name("main");
 
     for (int i = 0; i < MOD_COUNT; i++) {

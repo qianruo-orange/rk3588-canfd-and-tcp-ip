@@ -248,29 +248,24 @@ void http_can_record_rx(const char *ifname, const struct canfd_frame *frame)
     pthread_mutex_unlock(&g_can_rx_mutex);
 }
 
-/* 单帧序列化为 JSON 对象；返回写入字节数 */
+/* 单帧序列化为 JSON 对象；返回写入字节数（溢出返回 -1，复用 http_json_append） */
 static int can_rx_frame_json(const can_rx_entry_t *e, char *out, size_t out_size)
 {
     const struct canfd_frame *f = &e->frame;
-    int off = snprintf(out, out_size,
-                       "{\"ifname\":\"%s\",\"id\":\"0x%X\",\"len\":%u,\"data\":\"",
-                       e->ifname, f->can_id & CAN_EFF_MASK, (unsigned)f->len);
+    int off = http_json_append(out, out_size, 0,
+                    "{\"ifname\":\"%s\",\"id\":\"0x%X\",\"len\":%u,\"data\":\"",
+                    e->ifname, f->can_id & CAN_EFF_MASK, (unsigned)f->len);
     if (off < 0) return -1;
 
     for (unsigned i = 0; i < f->len; i++) {
-        if ((size_t)off + 3 >= out_size) { off = (int)out_size - 1; break; }
-        int n = snprintf(out + off, out_size - (size_t)off, "%02X", f->data[i]);
-        if (n < 0) return -1;
-        off += n;
+        off = http_json_append(out, out_size, off, "%02X", f->data[i]);
+        if (off < 0) return -1;
     }
 
-    if ((size_t)off + 32 < out_size) {
-        off += snprintf(out + off, out_size - (size_t)off,
-                        "\",\"flags\":\"%s%s%s\"}",
-                        (f->can_id & CAN_EFF_FLAG) ? "EFF" : "SFF",
-                        (f->len > 8) ? " FD" : "",
-                        (f->can_id & CAN_RTR_FLAG) ? " RTR" : "");
-    }
+    off = http_json_append(out, out_size, off, "\",\"flags\":\"%s%s%s\"}",
+                    (f->can_id & CAN_EFF_FLAG) ? "EFF" : "SFF",
+                    (f->len > 8) ? " FD" : "",
+                    (f->can_id & CAN_RTR_FLAG) ? " RTR" : "");
     return off;
 }
 

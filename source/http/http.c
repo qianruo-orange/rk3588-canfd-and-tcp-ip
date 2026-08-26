@@ -46,19 +46,28 @@ static _Atomic int g_http_active = 0;   /* 活跃 HTTP 连接数 */
 
 typedef void (*api_fn)(app_ctx_t *, int, const char *, const char *, const char *);
 
-/* ---- API 包装函数：统一 api_fn 签名，转发到各具体实现 ---- */
-static void http_system_api_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_system_api(app, fd); }
-static void http_can_status_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_status(app, fd); }
-static void http_can_ifaces_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_ifaces(app, fd); }
+/* ---- API 包装函数：统一 api_fn 签名，转发到各具体实现 ----
+   只接收 (app, fd) 的接口用宏批量生成（fn 形如 http_xxx，生成 http_xxx_wrap）；
+   需要访问 method/uri/req 的接口（toggle / dbc_upload / send）单独手写 */
+#define WRAP_API_NOBODY(fn) \
+    static void fn##_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) \
+    { (void)method; (void)uri; (void)req; fn(app, fd); }
+
+WRAP_API_NOBODY(http_system_api)
+WRAP_API_NOBODY(http_can_status)
+WRAP_API_NOBODY(http_can_ifaces)
+WRAP_API_NOBODY(http_can_decoded)
+WRAP_API_NOBODY(http_can_decoded_tx)
+WRAP_API_NOBODY(http_can_rx)
+WRAP_API_NOBODY(http_reboot)
+WRAP_API_NOBODY(http_shutdown)
+WRAP_API_NOBODY(http_network_api)
+
 static void http_can_toggle_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; http_can_toggle(app, fd, req); }
-static void http_can_decoded_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_decoded(app, fd); }
-static void http_can_decoded_tx_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_decoded_tx(app, fd); }
 static void http_can_dbc_upload_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { http_can_dbc_upload(app, fd, method, uri, req); }
 static void http_can_send_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { http_can_send(app, fd, method, uri, req); }
-static void http_can_rx_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_rx(app, fd); }
-static void http_reboot_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_reboot(app, fd); }
-static void http_shutdown_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_shutdown(app, fd); }
-static void http_network_api_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_network_api(app, fd); }
+
+#undef WRAP_API_NOBODY
 
 /* ---- 每连接状态机（Reactor 单线程） ---- */
 #define HTTP_WBUF_INIT 8192             /* 输出缓冲初始大小 */
@@ -718,13 +727,6 @@ static void conn_sweep(time_t now)
 
 /* ---- HTTP 主循环 ---- */
 
-static int set_socket_nonblocking(int fd)
-{
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0) return -1;
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
 void *http_server_task(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;
@@ -733,7 +735,7 @@ void *http_server_task(void *arg)
     g_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (g_listen_fd < 0) { LOG_ERROR("http socket"); return NULL; }
 
-    if (set_socket_nonblocking(g_listen_fd) < 0) {
+    if (set_nonblock(g_listen_fd) < 0) {
         LOG_ERROR("http set nonblocking");
         pthread_mutex_lock(&g_listen_mutex);
         close(g_listen_fd);
@@ -828,7 +830,7 @@ void *http_server_task(void *arg)
                         close(client_fd);
                         continue;
                     }
-                    set_socket_nonblocking(client_fd);   /* 客户端 socket 全部非阻塞 */
+                    set_nonblock(client_fd);   /* 客户端 socket 全部非阻塞 */
                     http_conn_t *c = conn_new(client_fd);
                     if (!c) {
                         close(client_fd);

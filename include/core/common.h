@@ -7,11 +7,14 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <sys/types.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 #include "can/dbc_parser.h"
 
@@ -72,5 +75,45 @@ static inline int ifname_valid(const char *name)
     }
     return 1;
 }
+
+/* 设置 fd 为非阻塞；成功返回 0，失败返回 -1（保留 errno）。
+   tcp/can/http 三层各自把 socket 设为非阻塞的同一套 fcntl 模式收口于此 */
+static inline int set_nonblock(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return -1;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+/* 填充 struct ifreq 的接口名（4 处 ifr_name 赋值统一） */
+static inline void ifreq_set_name(struct ifreq *ifr, const char *name)
+{
+    if (!ifr || !name) return;
+    snprintf(ifr->ifr_name, sizeof(ifr->ifr_name), "%s", name);
+}
+
+/* 写 eventfd：通知对端“有数据压入队列”（can TX 队列 / tcp TX 队列共用） */
+static inline void eventfd_signal(int efd)
+{
+    if (efd < 0) return;
+    uint64_t one = 1;
+    (void)write(efd, &one, sizeof(one));
+}
+
+/* 读 eventfd：清空通知计数，随后即可弹出队列 */
+static inline void eventfd_consume(int efd)
+{
+    if (efd < 0) return;
+    uint64_t v;
+    while (read(efd, &v, sizeof(v)) == (ssize_t)sizeof(v)) { }
+}
+
+/* 安全追加格式化文本到数组缓冲：写满即把 off 置为缓冲上限并 break（调用方
+   继续往下走，与 JSON_ADD 的 return 语义区分）。buf 必须是数组，不能是指针。 */
+#define BUF_APPEND(buf, off, fmt, ...) do { \
+        int _n = snprintf((buf) + (off), sizeof(buf) - (off), fmt, ##__VA_ARGS__); \
+        if (_n < 0 || (size_t)_n >= sizeof(buf) - (off)) { (off) = sizeof(buf); break; } \
+        (off) += (size_t)_n; \
+    } while (0)
 
 #endif /* COMMON_H */

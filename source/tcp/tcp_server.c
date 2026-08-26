@@ -32,7 +32,7 @@ int tcp_listen(int port, const char *bind_ifname)
     if (bind_ifname && bind_ifname[0]) {
         struct ifreq ifr;
         memset(&ifr, 0, sizeof(ifr));
-        snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", bind_ifname);
+        ifreq_set_name(&ifr, bind_ifname);
         if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, &ifr, sizeof(ifr)) < 0) {
             LOG_ERROR("tcp bind device %s: %s", bind_ifname, strerror(errno));
             close(fd); return -1;
@@ -52,8 +52,7 @@ int tcp_listen(int port, const char *bind_ifname)
         LOG_ERROR("tcp listen :%d: %s", port, strerror(errno));
         close(fd); return -1;
     }
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    if (set_nonblock(fd) < 0) {
         LOG_ERROR("tcp fcntl O_NONBLOCK: %s", strerror(errno));
         close(fd); return -1;
     }
@@ -75,8 +74,7 @@ static int tcp_accept(int listen_fd)
             LOG_ERROR("tcp accept: %s", strerror(errno));
         return -1;
     }
-    int flags = fcntl(client_fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(client_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    if (set_nonblock(client_fd) < 0) {
         LOG_ERROR("tcp client fcntl O_NONBLOCK: %s", strerror(errno));
         close(client_fd);
         return -1;
@@ -88,21 +86,8 @@ static int tcp_accept(int listen_fd)
     return client_fd;
 }
 
-/* ---- eventfd 跨线程唤醒：TX 队列有数据压入时通知 tcp_task ---- */
-
-static void eventfd_signal(int efd)
-{
-    if (efd < 0) return;
-    uint64_t one = 1;
-    (void)write(efd, &one, sizeof(one));
-}
-
-static void eventfd_consume(int efd)
-{
-    if (efd < 0) return;
-    uint64_t v;
-    while (read(efd, &v, sizeof(v)) == (ssize_t)sizeof(v)) { }
-}
+/* ---- eventfd 跨线程唤醒：TX 队列有数据压入时通知 tcp_task ----
+   写/读 eventfd 的公共实现见 core/common.h（eventfd_signal / eventfd_consume） */
 
 /*
  * tcp_tx_packet - 异步发送数据到客户端：压入 TX 队列，写 eventfd 唤醒 tcp_task。

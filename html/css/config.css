@@ -1,15 +1,15 @@
-/* config.css — 配置页面样式 毛玻璃水滴风 */
+/* config.css — 配置页面样式 毛玻璃水滴风（主题变量化） */
 body{padding:30px}
 h1{font-size:24px;margin-bottom:16px}
 .card{border-radius:18px;padding:20px;margin-bottom:16px;max-width:700px}
-.card h3{color:#78c0f0;border-bottom:1px solid rgba(108,180,238,.1);padding-bottom:6px;display:flex;align-items:center;gap:8px}
-#canSel{background:rgba(10,17,32,.6);border:1px solid rgba(108,180,238,.12);color:#c8d6e5;padding:4px 8px;border-radius:6px;font-size:14px;font-weight:600}
+.card h3{color:var(--accent);border-bottom:1px solid var(--card-border);padding-bottom:6px;display:flex;align-items:center;gap:8px}
+#canSel{background:var(--input-bg);border:1px solid var(--card-border);color:var(--text);padding:4px 8px;border-radius:6px;font-size:14px;font-weight:600}
 .top{display:flex;align-items:center;gap:16px;margin-bottom:16px}
 .top h1{margin-bottom:0}
 .row{display:flex;align-items:center;margin:8px 0}
-.row label{width:150px;color:#8b9ec4;font-size:14px}
-.row input,.row select{flex:1;background:rgba(10,17,32,.6);border:1px solid rgba(108,180,238,.12);color:#c8d6e5;padding:5px 8px;border-radius:6px;max-width:180px;font-size:13px;backdrop-filter:blur(4px)}
-.unit{color:#8b9ec4;font-size:12px;margin-left:4px;flex:none}
+.row label{width:150px;color:var(--muted);font-size:14px}
+.row input,.row select{flex:1;background:var(--input-bg);border:1px solid var(--card-border);color:var(--text);padding:5px 8px;border-radius:6px;max-width:180px;font-size:13px;backdrop-filter:blur(4px)}
+.unit{color:var(--muted);font-size:12px;margin-left:4px;flex:none}
 .cfg-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px 16px;margin-bottom:4px}
 .cfg-grid .row{margin:0}
 .cfg-grid .row label{width:auto;min-width:56px}
@@ -17,29 +17,29 @@ h1{font-size:24px;margin-bottom:16px}
 .btn{padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;margin:4px;transition:all .2s}
 .btn-save{background:linear-gradient(135deg,#236e4a,#2d8a5c);color:#fff;box-shadow:0 2px 12px rgba(35,110,74,.3)}
 .btn-save:hover{box-shadow:0 4px 16px rgba(35,110,74,.4)}
-.btn-back{background:rgba(255,255,255,.06);color:#c8d6e5;border:1px solid rgba(108,180,238,.1);backdrop-filter:blur(8px)}
-.btn-back:hover{background:rgba(108,180,238,.1)}
-.btn-query{background:rgba(108,180,238,.12);color:#78c0f0;border:1px solid rgba(108,180,238,.2);backdrop-filter:blur(8px);padding:5px 12px;font-size:12px;margin-left:8px;flex:none}
-.btn-query:hover{background:rgba(108,180,238,.2);color:#fff}
+.btn-back{background:var(--btn-bg);color:var(--text);border:1px solid var(--card-border);backdrop-filter:blur(8px)}
+.btn-back:hover{background:var(--hover)}
+.btn-query{background:var(--hover);color:var(--accent);border:1px solid var(--card-border2);backdrop-filter:blur(8px);padding:5px 12px;font-size:12px;margin-left:8px;flex:none}
+.btn-query:hover{background:var(--hover);color:var(--accent-hover)}
 #msg{padding:8px;margin:8px 0;border-radius:8px;display:none}
 #msg.ok{display:block;background:rgba(76,201,160,.08);border:1px solid rgba(76,201,160,.2);color:#4cc9a0}
 #msg.err{display:block;background:rgba(224,85,106,.08);border:1px solid rgba(224,85,106,.2);color:#e0556a}
 .toggle{position:relative;width:40px;height:22px;cursor:pointer;flex-shrink:0}
 .toggle input{display:none}
-.toggle .slider{position:absolute;inset:0;background:rgba(255,255,255,.08);border-radius:11px;transition:.2s}
-.toggle .slider:before{content:'';position:absolute;width:16px;height:16px;left:3px;bottom:3px;background:#8b9ec4;border-radius:50%;transition:.2s}
+.toggle .slider{position:absolute;inset:0;background:var(--track);border-radius:11px;transition:.2s}
+.toggle .slider:before{content:'';position:absolute;width:16px;height:16px;left:3px;bottom:3px;background:var(--knob);border-radius:50%;transition:.2s}
 .toggle input:checked+.slider{background:linear-gradient(135deg,#236e4a,#2d8a5c)}
 .toggle input:checked+.slider:before{transform:translateX(18px);background:#fff}
-.hint{display:none;color:#8b9ec4;font-size:13px;padding:6px 0}
-.filters{margin-top:10px;padding-top:8px;border-top:1px solid rgba(108,180,238,.1)}
-.filters h4{font-size:12px;color:#8b9ec4;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+.hint{display:none;color:var(--muted);font-size:13px;padding:6px 0}
+.filters{margin-top:10px;padding-top:8px;border-top:1px solid var(--card-border)}
+.filters h4{font-size:12px;color:var(--muted);margin-bottom:6px;display:flex;align-items:center;gap:8px}
 .filters h4 span{flex:1}
 #fil{display:flex;flex-wrap:wrap;gap:6px}
 .filter-row{display:grid;grid-template-columns:96px 96px 24px;gap:6px;align-items:center}
-.filter-row input{width:100%;min-width:0;background:rgba(10,17,32,.6);border:1px solid rgba(108,180,238,.12);color:#c8d6e5;padding:4px 6px;border-radius:4px;font-size:12px;font-family:monospace}
+.filter-row input{width:100%;min-width:0;background:var(--input-bg);border:1px solid var(--card-border);color:var(--text);padding:4px 6px;border-radius:4px;font-size:12px;font-family:monospace}
 .filter-row .del-btn{background:#c0394e;color:#fff;border:none;width:24px;height:24px;border-radius:4px;cursor:pointer;font-size:11px;display:flex;align-items:center;justify-content:center;padding:0}
-.add-btn{background:rgba(255,255,255,.05);color:#8b9ec4;border:1px solid rgba(108,180,238,.1);padding:2px 10px;border-radius:6px;cursor:pointer;font-size:11px;margin-top:4px;transition:all .2s}
-.add-btn:hover{color:#c8d6e5;background:rgba(108,180,238,.08)}
+.add-btn{background:var(--btn-bg);color:var(--muted);border:1px solid var(--card-border);padding:2px 10px;border-radius:6px;cursor:pointer;font-size:11px;margin-top:4px;transition:all .2s}
+.add-btn:hover{color:var(--text);background:var(--hover)}
 .can-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 #card_can{grid-column:1 / -1;grid-row:1}
 #card_net{grid-column:1;grid-row:2}

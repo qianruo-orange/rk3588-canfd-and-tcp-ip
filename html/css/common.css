@@ -20,6 +20,7 @@
   --glow:rgba(108,180,238,.3);
   --shadow:0 4px 24px rgba(0,0,0,.25);
   --knob:#8b9ec4;
+  --name:#4ce0b0;
 }
 /* ---- 浅色主题 ---- */
 html[data-theme="light"]{
@@ -40,6 +41,7 @@ html[data-theme="light"]{
   --glow:rgba(47,111,176,.15);
   --shadow:0 4px 20px rgba(30,60,100,.12);
   --knob:#5a6b87;
+  --name:#1a8f6b;
 }
 
 body{font-family:Segoe UI,sans-serif;background:var(--bg);color:var(--text);padding:24px;min-height:100vh;transition:background .3s,color .3s}

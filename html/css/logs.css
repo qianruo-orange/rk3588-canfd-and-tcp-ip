@@ -1,16 +1,16 @@
-/* logs.css — 日志文件页面样式 毛玻璃水滴风 */
+/* logs.css — 日志文件页面样式 毛玻璃水滴风（主题变量化） */
 .top-bar{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
 .top-bar h1{margin:0}
 .btn{display:inline-block;padding:8px 14px;border-radius:8px;border:none;cursor:pointer;font-size:13px;text-decoration:none;backdrop-filter:blur(8px)}
 .btn-pack{background:rgba(30,111,212,.7);color:#fff}
 .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin-top:8px;border-radius:10px}
-table{border-collapse:collapse;width:100%;min-width:480px;background:rgba(16,29,51,.5);backdrop-filter:blur(12px);border:1px solid rgba(108,180,238,.1);border-radius:10px;overflow:hidden}
-th,td{padding:8px 12px;text-align:left;border-bottom:1px solid rgba(108,180,238,.08);white-space:nowrap}
-th{color:#8b9ec4;font-size:12px}
+table{border-collapse:collapse;width:100%;min-width:480px;background:var(--card-bg);backdrop-filter:blur(12px);border:1px solid var(--card-border);border-radius:10px;overflow:hidden}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--card-border);white-space:nowrap}
+th{color:var(--muted);font-size:12px}
 td{font-size:13px}
 .del{background:rgba(192,57,78,.8);color:#fff;border:none;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:8px}
-.dl{color:#78c0f0}
-.back-link{display:inline-block;padding:6px 12px;background:rgba(255,255,255,.05);backdrop-filter:blur(8px);border:1px solid rgba(108,180,238,.1);border-radius:8px;font-size:13px;margin-bottom:12px}
+.dl{color:var(--accent)}
+.back-link{display:inline-block;padding:6px 12px;background:var(--btn-bg);backdrop-filter:blur(8px);border:1px solid var(--card-border);border-radius:8px;font-size:13px;margin-bottom:12px}
 @media(max-width:540px){
   body{padding:12px}
   h1{font-size:18px}

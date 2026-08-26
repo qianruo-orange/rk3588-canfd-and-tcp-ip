@@ -71,26 +71,34 @@ int config_load(struct app_config_t *cfg)
             memset(ifc, 0, sizeof(*ifc)); ifc->sock_fd = -1;
             safe_strncpy(ifc->ifname, sizeof(ifc->ifname), val);
         } else if (strcmp(key, "can_bitrate") == 0) {
-            char nm[64]; int r; if (sscanf(val, "%63s %d", nm, &r) == 2)
-                for (int i = 0; i < a->can_count; i++) if (!strcmp(a->can_ifaces[i].ifname, nm)) { a->can_ifaces[i].bitrate = r; break; }
+            char nm[64]; int r; if (sscanf(val, "%63s %d", nm, &r) == 2) {
+                int i = can_iface_index(a->can_ifaces, a->can_count, nm);
+                if (i >= 0) a->can_ifaces[i].bitrate = r;
+            }
         } else if (strcmp(key, "can_dbitrate") == 0) {
-            char nm[64]; int r; if (sscanf(val, "%63s %d", nm, &r) == 2)
-                for (int i = 0; i < a->can_count; i++) if (!strcmp(a->can_ifaces[i].ifname, nm)) { a->can_ifaces[i].dbitrate = r; break; }
+            char nm[64]; int r; if (sscanf(val, "%63s %d", nm, &r) == 2) {
+                int i = can_iface_index(a->can_ifaces, a->can_count, nm);
+                if (i >= 0) a->can_ifaces[i].dbitrate = r;
+            }
         } else if (strcmp(key, "can_fd") == 0) {
-            char nm[64], m[8]; if (sscanf(val, "%63s %7s", nm, m) == 2)
-                for (int i = 0; i < a->can_count; i++) if (!strcmp(a->can_ifaces[i].ifname, nm)) { a->can_ifaces[i].fd_mode = !strcmp(m, "on"); break; }
+            char nm[64], m[8]; if (sscanf(val, "%63s %7s", nm, m) == 2) {
+                int i = can_iface_index(a->can_ifaces, a->can_count, nm);
+                if (i >= 0) a->can_ifaces[i].fd_mode = !strcmp(m, "on");
+            }
         } else if (strcmp(key, "can_up") == 0) {
-            char nm[64], m[8]; if (sscanf(val, "%63s %7s", nm, m) == 2)
-                for (int i = 0; i < a->can_count; i++) if (!strcmp(a->can_ifaces[i].ifname, nm)) { a->can_ifaces[i].up = !strcmp(m, "on"); break; }
+            char nm[64], m[8]; if (sscanf(val, "%63s %7s", nm, m) == 2) {
+                int i = can_iface_index(a->can_ifaces, a->can_count, nm);
+                if (i >= 0) a->can_ifaces[i].up = !strcmp(m, "on");
+            }
         } else if (strcmp(key, "can_filter") == 0) {
             char nm[64]; unsigned int id = 0, mask = 0;
-            if (sscanf(val, "%63s %x %x", nm, &id, &mask) == 3)
-                for (int i = 0; i < a->can_count; i++)
-                    if (!strcmp(a->can_ifaces[i].ifname, nm) &&
-                        a->can_ifaces[i].filter_count < CAN_MAX_FILTERS) {
-                        can_filter_t *flt = &a->can_ifaces[i].filters[a->can_ifaces[i].filter_count++];
-                        flt->id = (canid_t)id; flt->mask = (canid_t)mask; break;
-                    }
+            if (sscanf(val, "%63s %x %x", nm, &id, &mask) == 3) {
+                int i = can_iface_index(a->can_ifaces, a->can_count, nm);
+                if (i >= 0 && a->can_ifaces[i].filter_count < CAN_MAX_FILTERS) {
+                    can_filter_t *flt = &a->can_ifaces[i].filters[a->can_ifaces[i].filter_count++];
+                    flt->id = (canid_t)id; flt->mask = (canid_t)mask;
+                }
+            }
         } else if (strcmp(key, "tcp_port") == 0) a->tcp_port = parse_int_clamped(val, 1, 65535, 6666);
         else if (strcmp(key, "max_clients") == 0) a->max_clients = parse_int_clamped(val, 1, TCP_MAX_CLIENTS, 16);
         else if (strcmp(key, "tcp_bind") == 0) safe_strncpy(a->tcp_bind, sizeof(a->tcp_bind), val);
@@ -99,8 +107,10 @@ int config_load(struct app_config_t *cfg)
         else if (strcmp(key, "video_height") == 0) cfg->video_height = parse_int_clamped(val, 1, 4096, 480);
         else if (strcmp(key, "can_dbc") == 0) {
             char nm[64], path[256];
-            if (sscanf(val, "%63s %255s", nm, path) == 2)
-                for (int i = 0; i < a->can_count; i++) if (!strcmp(a->can_ifaces[i].ifname, nm)) { safe_strncpy(a->can_ifaces[i].dbc_path, sizeof(a->can_ifaces[i].dbc_path), path); break; }
+            if (sscanf(val, "%63s %255s", nm, path) == 2) {
+                int i = can_iface_index(a->can_ifaces, a->can_count, nm);
+                if (i >= 0) safe_strncpy(a->can_ifaces[i].dbc_path, sizeof(a->can_ifaces[i].dbc_path), path);
+            }
         }
     }
     fclose(fp);

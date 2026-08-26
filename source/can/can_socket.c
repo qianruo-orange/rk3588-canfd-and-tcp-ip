@@ -250,10 +250,7 @@ int can_tx_frame(app_ctx_t *app, const char *ifname, const struct canfd_frame *f
     if (!app || !app->can || !ifname || !frame) { errno = EINVAL; return -1; }
     can_ctx_t *ctx = app->can;
 
-    int idx = -1;
-    for (int i = 0; i < ctx->count; i++) {
-        if (strcmp(ctx->ifaces[i].ifname, ifname) == 0) { idx = i; break; }
-    }
+    int idx = can_iface_index(ctx->ifaces, ctx->count, ifname);
     if (idx < 0) { LOG_ERROR("can_tx: unknown interface '%s'", ifname); errno = ENODEV; return -1; }
 
     /* 发送统一走 TX 队列：由 can_send_task 弹出写 socket 并做发送方向 DBC 解析 */

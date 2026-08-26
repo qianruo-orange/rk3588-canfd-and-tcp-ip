@@ -49,13 +49,6 @@ void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri
 /* 表单字段容量：8 接口 × 5 基础项 + 8×16 过滤器 × 2 + 6 全局项 = 302，留余量 */
 #define MAX_FORM_FIELDS 320
 
-static int find_iface(can_ctx_t *can, const char *name)
-{
-    for (int i = 0; i < can->count; i++)
-        if (strcmp(can->ifaces[i].ifname, name) == 0) return i;
-    return -1;
-}
-
 void http_config_post(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body)
 {
     (void)method; (void)uri;
@@ -85,7 +78,7 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         const char *ifn = http_form_find(fields, count, kn);
         if (!ifn) continue;
         if (!ifname_valid(ifn)) { LOG_ERROR("config: invalid CAN ifname '%s'", ifn); continue; }
-        int idx = find_iface(can, ifn);
+        int idx = can_iface_index(can->ifaces, can->count, ifn);
         if (idx < 0) {
             /* 表单新增了运行态中没有的 CAN 接口：动态加入，并在下方统一重配置 */
             if (can->count >= CAN_MAX_IFACES) {

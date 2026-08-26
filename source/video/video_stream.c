@@ -16,6 +16,7 @@
 #include "video/video_stream.h"
 #include "core/log.h"
 #include "core/common.h"
+#include "core/epoll_util.h"
 #include "watchdog/watchdog.h"
 
 typedef struct { unsigned char *data; size_t len; } frame_t;
@@ -268,14 +269,10 @@ void *video_stream_task(void *arg)
 
         while (vs->app->running && !__atomic_load_n(&vs->restart_req, __ATOMIC_ACQUIRE)) {
             struct epoll_event out;
-            int ret = epoll_wait(epfd, &out, 1, 500);
-            if (ret < 0) {
-                if (errno == EINTR) { watchdog_feed_self("video"); continue; }
-                LOG_ERROR("video_stream: epoll_wait failed");
-                break;
-            }
-            /* 无论是否有帧都保持喂狗：相机空闲/无数据时线程仍存活，避免误判卡死 */
-            watchdog_feed_self("video");
+            /* epoll_wait_feed：EINTR 重试并喂狗；无论是否有帧都保持喂狗
+               （相机空闲/无数据时线程仍存活，避免误判卡死） */
+            int ret = epoll_wait_feed(epfd, &out, 1, 500, "video");
+            if (ret < 0) break;
             if (ret == 0) continue;
             if (!(out.events & EPOLLIN)) continue;
 
@@ -384,29 +381,8 @@ void video_stream_restart(void)
 }
 
 /* ---- MJPEG 推流线程（每连接一个，detached，由 video 模块创建） ---- */
-
-/* 完整写入非阻塞推流 socket：处理 EAGAIN/EWOULDBLOCK 与部分写入，
-   避免慢客户端导致 MJPEG 流数据错位（部分写入后继续写下一段） */
-static int video_write_all(int fd, const void *data, size_t len)
-{
-    const char *p = (const char *)data;
-    size_t off = 0;
-    while (off < len) {
-        ssize_t w = write(fd, p + off, len - off);
-        if (w > 0) { off += (size_t)w; continue; }
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-                if (poll(&pfd, 1, 3000) <= 0) return -1;   /* 等待可写超时视为失败 */
-                continue;
-            }
-            return -1;
-        }
-        return -1;   /* write 返回 0，视为对端异常 */
-    }
-    return 0;
-}
+/* 完整写入非阻塞推流 socket 统一走 core/common.h 的 fd_write_all_blocking（处理
+   EAGAIN/EWOULDBLOCK 与部分写入，避免慢客户端导致 MJPEG 流数据错位） */
 
 typedef struct {
     int fd;
@@ -423,7 +399,7 @@ static void *video_stream_client_task(void *arg)
     const char *hdr = "HTTP/1.1 200 OK\r\n"
                       "Content-Type: multipart/x-mixed-replace; boundary=--frame\r\n"
                       "Connection: close\r\n\r\n";
-    video_write_all(fd, hdr, strlen(hdr));
+    fd_write_all_blocking(fd, hdr, strlen(hdr));
     int last = 0;
     time_t last_write = time(NULL);   /* 最近一次成功写帧的时间，用于空闲超时 */
     while (g_ctx && g_ctx->app->running) {
@@ -448,9 +424,9 @@ static void *video_stream_client_task(void *arg)
         int hlen = snprintf(mhdr, sizeof(mhdr),
                             "--frame\r\nContent-Type: image/jpeg\r\n"
                             "Content-Length: %zu\r\n\r\n", flen);
-        if (video_write_all(fd, mhdr, (size_t)hlen) < 0) { free(frame); break; }
-        if (video_write_all(fd, frame, flen) < 0) { free(frame); break; }
-        if (video_write_all(fd, "\r\n", 2) < 0) { free(frame); break; }
+        if (fd_write_all_blocking(fd, mhdr, (size_t)hlen) < 0) { free(frame); break; }
+        if (fd_write_all_blocking(fd, frame, flen) < 0) { free(frame); break; }
+        if (fd_write_all_blocking(fd, "\r\n", 2) < 0) { free(frame); break; }
         free(frame);
         last_write = time(NULL);
     }

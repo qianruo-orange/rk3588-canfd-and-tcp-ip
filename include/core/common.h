@@ -12,6 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
+#include <poll.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -106,6 +108,30 @@ static inline void eventfd_consume(int efd)
     if (efd < 0) return;
     uint64_t v;
     while (read(efd, &v, sizeof(v)) == (ssize_t)sizeof(v)) { }
+}
+
+/* 完整写入 fd（阻塞语义，容忍非阻塞 fd）：处理 EINTR / EAGAIN / EWOULDBLOCK
+   与部分写入，EAGAIN 时 poll 等待可写最多 3 秒。成功返回 0，失败返回 -1。
+   http 非连接上下文的兜底发送与 video 推流线程原为逐字重复，收口于此 */
+static inline int fd_write_all_blocking(int fd, const void *data, size_t len)
+{
+    const char *p = (const char *)data;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, p + off, len - off);
+        if (w > 0) { off += (size_t)w; continue; }
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+                if (poll(&pfd, 1, 3000) <= 0) return -1;
+                continue;
+            }
+            return -1;
+        }
+        return -1;   /* write 返回 0：对端异常 */
+    }
+    return 0;
 }
 
 /* 安全追加格式化文本到数组缓冲：写满即把 off 置为缓冲上限并 break（调用方

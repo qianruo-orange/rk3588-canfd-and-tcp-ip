@@ -291,28 +291,9 @@ static const char *http_mime_type(const char *path)
     return "text/plain";
 }
 
-/* 阻塞版完整写入：仅用于非连接上下文（如视频推流线程等），连接处理一律走
-   http_send_response / http_serve_stream 的非阻塞输出缓冲 */
-static int http_write_all_blocking(int fd, const void *data, size_t len)
-{
-    const char *p = (const char *)data;
-    size_t off = 0;
-    while (off < len) {
-        ssize_t w = write(fd, p + off, len - off);
-        if (w > 0) { off += (size_t)w; continue; }
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-                if (poll(&pfd, 1, 3000) <= 0) return -1;
-                continue;
-            }
-            return -1;
-        }
-        return -1;
-    }
-    return 0;
-}
+/* 非连接上下文（如视频推流线程等）的完整写入统一走 core/common.h 的
+   fd_write_all_blocking；连接处理一律走 http_send_response / http_serve_stream
+   的非阻塞输出缓冲 */
 
 /**
  * http_write_all - 完整写入客户端 socket。
@@ -323,7 +304,7 @@ int http_write_all(int fd, const void *data, size_t len)
 {
     http_conn_t *c = conn_find(fd);
     if (c) return conn_append(c, data, len) == 0 ? 0 : -1;
-    return http_write_all_blocking(fd, data, len);
+    return fd_write_all_blocking(fd, data, len);
 }
 
 /**
@@ -345,8 +326,8 @@ void http_send_response(int fd, int code, const char *status,
     if (off < 0) return;
     http_conn_t *c = conn_find(fd);
     if (!c) {   /* 非连接上下文：阻塞发送兜底 */
-        http_write_all_blocking(fd, header, (size_t)off);
-        if (body && len > 0) http_write_all_blocking(fd, body, len);
+        fd_write_all_blocking(fd, header, (size_t)off);
+        if (body && len > 0) fd_write_all_blocking(fd, body, len);
         return;
     }
     conn_append(c, header, (size_t)off);

@@ -18,6 +18,7 @@
 #include "core/common.h"
 #include "core/epoll_util.h"
 #include "watchdog/watchdog.h"
+#include "ai/rknn_yolo.h"
 
 typedef struct { unsigned char *data; size_t len; } frame_t;
 
@@ -34,6 +35,7 @@ typedef struct {
     pthread_mutex_t    frame_mutex;  /* 保护 frame_obj 指针生命周期（防 use-after-free） */
     char               device[128];
     int                width, height;
+    int                pixfmt;   /* 实际像素格式（V4L2_PIX_FMT_*） */
     int                fd;
     struct { void *start; size_t length; } *buffers;
     int                nbuffers;
@@ -94,6 +96,7 @@ static int init_video_device(video_ctx_t *vs, int verbose)
     /* 记录实际使用的参数 */
     vs->width  = fmt.fmt.pix.width;
     vs->height = fmt.fmt.pix.height;
+    vs->pixfmt = (int)fmt.fmt.pix.pixelformat;
     LOG_INFO("video_stream: fmt=%c%c%c%c %dx%d",
         (char)(fmt.fmt.pix.pixelformat & 0xFF),
         (char)((fmt.fmt.pix.pixelformat >> 8) & 0xFF),

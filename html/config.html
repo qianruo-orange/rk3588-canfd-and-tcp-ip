@@ -4,7 +4,7 @@
 <script src="/js/theme.js"></script>
 </head><body>
 <button id="themeBtn" class="theme-btn" onclick="toggleTheme()" title="切换主题">🌙</button>
-<div class="top"><h1> 配置</h1><a href="/" class="btn btn-back">← 返回</a><a href="#" onclick="reboot()" class="btn btn-back" style="background:#c0394e;color:#fff"> 重启</a><a href="#" onclick="shutdown()" class="btn btn-back" style="background:#8b4513;color:#fff"> 关机</a></div>
+<div class="top"><h1> 配置</h1><a href="/" class="btn btn-back">← 返回</a><button type="button" class="btn btn-back" onclick="loadCfg()">🔄 查询</button><a href="#" onclick="reboot()" class="btn btn-back" style="background:#c0394e;color:#fff"> 重启</a><a href="#" onclick="shutdown()" class="btn btn-back" style="background:#8b4513;color:#fff"> 关机</a></div>
 
 <form id="f">
 <div class="can-grid">
@@ -34,7 +34,6 @@
 <input type="hidden" id="vw"><input type="hidden" id="vh">
 </div>
 </div>
-<button type="button" class="btn btn-back" onclick="loadCfg()">🔄 查询</button>
 <div id="msg"></div>
 </form>
 

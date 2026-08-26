@@ -108,6 +108,109 @@ static int rec_take_raw_frame(unsigned char **out, size_t *len, int *w, int *h)
     return 0;
 }
 
+/* ---- 色彩转换：统一转 NV12（编码器输入） ---- */
+
+/* RGB24 → NV12（BT.601 limited，整数定点） */
+static void rgb_to_nv12(const unsigned char *rgb, int w, int h,
+                        unsigned char *nv12)
+{
+    unsigned char *Y = nv12;
+    unsigned char *UV = nv12 + (size_t)w * h;
+    for (int y = 0; y < h; y++) {
+        const unsigned char *row = rgb + (size_t)y * w * 3;
+        unsigned char *Yrow = Y + (size_t)y * w;
+        for (int x = 0; x < w; x++) {
+            const unsigned char *p = row + x * 3;
+            int r = p[0], g = p[1], b = p[2];
+            Yrow[x] = (unsigned char)((66 * r + 129 * g + 25 * b + 128) / 256 + 16);
+            if ((y & 1) == 0 && (x & 1) == 0) {
+                unsigned char *uv = UV + (size_t)(y / 2) * w + x;
+                uv[0] = (unsigned char)((-38 * r - 74 * g + 112 * b + 128) / 256 + 128);
+                uv[1] = (unsigned char)((112 * r - 94 * g - 18 * b + 128) / 256 + 128);
+            }
+        }
+    }
+}
+
+/* YUYV → NV12（4:2:2 → 4:2:0，垂直抽样偶数行） */
+static void yuyv_to_nv12(const unsigned char *src, int w, int h,
+                         unsigned char *nv12)
+{
+    unsigned char *Y = nv12;
+    unsigned char *UV = nv12 + (size_t)w * h;
+    for (int y = 0; y < h; y++) {
+        const unsigned char *row = src + (size_t)y * w * 2;
+        unsigned char *Yrow = Y + (size_t)y * w;
+        for (int x = 0; x < w; x++)
+            Yrow[x] = row[x * 2];
+        if ((y & 1) == 0) {
+            unsigned char *uv = UV + (size_t)(y / 2) * w;
+            for (int x = 0; x < w; x += 2) {
+                uv[x]     = row[x * 2 + 1];   /* U */
+                uv[x + 1] = row[x * 2 + 3];   /* V */
+            }
+        }
+    }
+}
+
+/* 把一帧（JPEG / YUYV）转为 NV12；成功返回 0，*nv12 为 malloc（调用方 free），
+   输出实际宽高。 */
+static int rec_to_nv12(const unsigned char *data, size_t len, int fmt,
+                       int w, int h, unsigned char **nv12, size_t *nv12_len)
+{
+    if (fmt == VIDEO_FMT_MJPEG) {
+        unsigned char *rgb = NULL;
+        int rw = 0, rh = 0;
+        if (yolo_jpeg_to_rgb(data, len, &rgb, &rw, &rh) != 0 || !rgb)
+            return -1;
+        unsigned char *out = malloc((size_t)rw * rh * 3 / 2);
+        if (!out) { free(rgb); return -1; }
+        rgb_to_nv12(rgb, rw, rh, out);
+        free(rgb);
+        *nv12 = out;
+        *nv12_len = (size_t)rw * rh * 3 / 2;
+        return 0;
+    }
+    /* YUYV */
+    unsigned char *out = malloc((size_t)w * h * 3 / 2);
+    if (!out) return -1;
+    yuyv_to_nv12(data, w, h, out);
+    *nv12 = out;
+    *nv12_len = (size_t)w * h * 3 / 2;
+    return 0;
+}
+
+/* 实测帧率（不写死）：连续抓若干新帧取平均间隔，fps = 1000/avg_ms。
+   失败返回 0（无视频帧）。 */
+static int rec_measure_fps(app_ctx_t *app)
+{
+    enum { N = 8 };
+    uint64_t ts[N];
+    int n = 0;
+    uint64_t last = 0;
+    uint64_t t0 = now_ms();
+    while (n < N && app->running) {
+        watchdog_feed_self("rec");
+        unsigned char *f = NULL; size_t flen = 0;
+        if (rec_take_raw_frame(&f, &flen, NULL, NULL) == 0) {
+            uint64_t t = now_ms();
+            if (t != last) { ts[n++] = t; last = t; }
+            free(f);
+        } else {
+            usleep(20000);
+        }
+        if (now_ms() - t0 > 2000) break;   /* 2s 量测超时 */
+    }
+    if (n < 3) return 0;
+    uint64_t span = ts[n - 1] - ts[0];
+    uint64_t avg = span / (n - 1);
+    if (avg == 0) avg = 1;
+    int fps = (int)(1000 / avg);
+    if (fps < 1) fps = 1;
+    if (fps > 120) fps = 120;
+    return fps;
+}
+
 /* ---- 录制线程 ---- */
 
 void *video_rec_task(void *arg)

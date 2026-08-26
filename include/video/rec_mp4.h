@@ -8,7 +8,7 @@
  * video/rec_mp4.h — 最小 MP4(MJPEG track) 封装器。
  *
  * 文件布局（ISO BMFF，moov 末尾回写，通用播放器可播）：
- *   ftyp(16) + mdat(8+N 帧 JPEG) + moov(574+8N 字节)
+ *   ftyp(28) + mdat(8+N 帧 JPEG) + moov(564+8N 字节)
  *   stbl 记录每帧绝对偏移（stco）/ 大小（stsz）/ 平均帧间隔（stts），
  *   无需硬件编码器，VLC / ffplay / 浏览器按 MJPEG 解码。
  *

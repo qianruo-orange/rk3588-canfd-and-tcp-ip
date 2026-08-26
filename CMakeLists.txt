@@ -74,37 +74,11 @@ if(DEBUG)
     add_compile_definitions(DEBUG)
 endif()
 
-set(SOURCES
-    source/core/main.c
-    source/core/log.c
-    source/core/config.c
-    source/can/can_queue.c
-    source/can/can_socket.c
-    source/can/dbc_parser.c
-    source/tcp/tcp_server.c
-    source/tcp/tcp_queue.c
-    source/http/http.c
-    source/http/http_util.c
-    source/http/http_api_dbc.c
-    source/http/http_logs.c
-    source/http/http_api_system.c
-    source/http/http_api_can.c
-    source/http/http_api_config.c
-    source/http/http_api_network.c
-    source/http/http_api_video.c
-    source/http/http_reboot.c
-    source/video/video_stream.c
-    source/video/video_rec.c
-    source/video/rec_mp4.c
-    source/ai/rknn_yolo.c
-    source/ai/yolo_image.c
-    source/ai/yolo_postprocess.c
-    source/ai/yolo_draw.c
-    source/http/http_api_rec.c
-    source/watchdog/watchdog.c
-)
+# 通配符收集源文件与头文件（新增模块无需再改 CMakeLists）
+file(GLOB APP_SOURCES CONFIGURE_DEPENDS source/**/*.c)
+file(GLOB APP_HEADERS CONFIGURE_DEPENDS include/**/*.h)
 
-add_executable(rk3588-canfd-and-tcp-ip ${SOURCES})
+add_executable(rk3588-canfd-and-tcp-ip ${APP_SOURCES} ${APP_HEADERS})
 
 target_include_directories(rk3588-canfd-and-tcp-ip PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include)
 

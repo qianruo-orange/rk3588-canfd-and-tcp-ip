@@ -106,8 +106,8 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
                            uint32_t delta)
 {
     uint32_t N = n;
-    /* moov 总大小 = 574 + 8N（见模块注释推导） */
-    uint32_t moov_size = 574u + 8u * N;
+    /* moov 总大小 = 564 + 8N（各子盒实际写入字节数推导） */
+    uint32_t moov_size = 564u + 8u * N;
     uint32_t duration  = delta * N;
 
     box_hdr(fp, moov_size, "moov");
@@ -127,7 +127,7 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
     be32(fp, 2);                    /* next_track_id */
 
     /* ---- trak ---- */
-    box_hdr(fp, 458u + 8u * N, "trak");
+    box_hdr(fp, 448u + 8u * N, "trak");
 
     /* ---- tkhd ---- */
     box_hdr(fp, 92, "tkhd");
@@ -145,7 +145,7 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
     be32(fp, (uint32_t)((unsigned)s->h << 16));
 
     /* ---- mdia ---- */
-    box_hdr(fp, 358u + 8u * N, "mdia");
+    box_hdr(fp, 348u + 8u * N, "mdia");
 
     /* ---- mdhd ---- */
     box_hdr(fp, 32, "mdhd");
@@ -157,7 +157,7 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
     be16(fp, 0);
 
     /* ---- hdlr ---- */
-    box_hdr(fp, 52, "hdlr");
+    box_hdr(fp, 48, "hdlr");
     be32(fp, 0);
     be32(fp, 0);                    /* pre_defined */
     fwrite("vide", 1, 4, fp);       /* handler_type */
@@ -166,7 +166,7 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
     be32(fp, 0);
 
     /* ---- minf ---- */
-    box_hdr(fp, 266u + 8u * N, "minf");
+    box_hdr(fp, 260u + 8u * N, "minf");
 
     /* ---- vmhd ---- */
     box_hdr(fp, 20, "vmhd");
@@ -183,13 +183,13 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
     be32(fp, 1);                    /* flags=1 (self-contained) */
 
     /* ---- stbl ---- */
-    box_hdr(fp, 202u + 8u * N, "stbl");
+    box_hdr(fp, 196u + 8u * N, "stbl");
 
     /* ---- stsd：MJPEG VisualSampleEntry（'jpeg'） ---- */
-    box_hdr(fp, 102, "stsd");
+    box_hdr(fp, 100, "stsd");
     be32(fp, 0);
     be32(fp, 1);                    /* entry_count */
-    box_hdr(fp, 86, "jpeg");        /* VisualSampleEntry 86 字节 */
+    box_hdr(fp, 84, "jpeg");        /* VisualSampleEntry 84 字节 */
     be32(fp, 0); be16(fp, 1);       /* reserved 6 + data_reference_index */
     be16(fp, 0); be16(fp, 0);       /* pre_defined + reserved */
     be32(fp, 0); be32(fp, 0); be32(fp, 0);   /* pre_defined 12 */
@@ -227,7 +227,7 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
     for (uint32_t i = 0; i < N; i++) be32(fp, s->samples[i].size);
 
     /* ---- stco：绝对文件偏移 ---- */
-    box_hdr(fp, 20u + 4u * N, "stco");
+    box_hdr(fp, 16u + 4u * N, "stco");
     be32(fp, 0);
     be32(fp, N);
     for (uint32_t i = 0; i < N; i++) be32(fp, s->samples[i].offset);
@@ -264,6 +264,7 @@ rec_mp4_t *rec_mp4_create(const char *dir, const char *prefix, int w, int h,
     /* mdat header：size 占位（finalize 时回填） */
     be32(s->fp, 0);
     fwrite("mdat", 1, 4, s->fp);
+    s->mdat_start = 28u;   /* = ftyp 总大小 */
 
     if (name_out && name_size) snprintf(name_out, name_size, "%s", s->name);
     return s;
@@ -304,10 +305,10 @@ int rec_mp4_finalize(rec_mp4_t *s)
     if (!s) return -1;
     int rc = -1;
     if (s->fp) {
-        /* 回填 mdat 总大小（ftyp 16 字节后） */
+        /* 回填 mdat 总大小（ftyp 之后） */
         if (s->n_samples > 0) {
             long cur = ftell(s->fp);
-            fseek(s->fp, 16L, SEEK_SET);
+            fseek(s->fp, (long)s->mdat_start, SEEK_SET);
             be32(s->fp, 8u + s->data_len);
             fseek(s->fp, cur, SEEK_SET);
 

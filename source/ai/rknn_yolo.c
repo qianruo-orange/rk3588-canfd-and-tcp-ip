@@ -5,7 +5,7 @@
  *   video_stream_get_frame（取最新采集帧 JPEG/YUYV）
  *   → 解码/转换 RGB24 → 双线性缩放到模型输入
  *   → rknn_inputs_set / rknn_run / rknn_outputs_get
- *   → YOLO26 后处理（端到端无 NMS 单头为主，兼容经典三头 + NMS）
+ *   → YOLO26 后处理（经典三输出头 + sigmoid + stride 解码 + 类别内 NMS）
  *   → 检测结果快照 + 画框编码 JPEG 快照（供 /video/mjpeg_ai 推流）
  *
  * 优雅降级：无模型 / NPU 驱动未加载 / 推理失败 → enabled=0，原视频流照常，
@@ -33,7 +33,7 @@
 #include "watchdog/watchdog.h"
 #include "video/video_stream.h"
 
-#define AI_MAX_OUTPUTS 4
+#define AI_MAX_OUTPUTS 3   /* YOLO26 三输出模式（P3/P4/P5 检测头） */
 #define AI_JPEG_QUALITY 85
 
 /* 与 ai/rknn_yolo.h 的解耦：画框帧快照类型在此定义（须在 g_ai 之前） */
@@ -236,164 +236,115 @@ static float sigmoid(float x)
     return 1.0f / (1.0f + expf(-x));
 }
 
-static float clamp01(float v)
-{
-    return v < 0 ? 0 : (v > 1 ? 1 : v);
-}
-
-/* ---- YOLO26 后处理 ----
-   布局 1（端到端无 NMS，YOLO26 一对一检测头，单输出）：
-     输出形状 [1, N, 4+nc] 或 [1, 4+nc, N] 或 [N, 4+nc]，行内为
-     cx,cy,w,h（输入坐标系）+ nc 个类别分数（导出时通常已插入 sigmoid）。
-   布局 2（经典三头，YOLOv8 风格，3 输出）：
-     各输出 [1, H*W, 4+nc]（NHWC）或 [1, 4+nc, H, W]（NCHW），
-     4+nc 为原始 logits，需 sigmoid 后按网格 stride 解码，再做 NMS。
+/* ---- YOLO26 后处理（三输出模式，YOLOv8 风格）----
+   模型须为经典三检测头（P3/P4/P5），共 3 个输出：
+     各输出 [1, 4+nc, H, W]（NCHW）或 [1, H*W, 4+nc]（NHWC），
+     4+nc 为原始 logits，需 sigmoid 后按网格 stride 解码，再做类别内 NMS。
+   输出数非 3（如端到端单头模型）视为模型不匹配，返回 0 检测并记日志。
    @return 检测数（已按 conf 过滤并缩放回原图坐标） */
 static int yolo_postprocess(const float **out_buf, const rknn_tensor_attr *attrs,
                             uint32_t n_output, int frame_w, int frame_h,
                             yolo_det_t *dets, int max_dets, float conf, float nms)
 {
+    if (n_output != 3) {
+        if (!ai_logged_layout) {
+            ai_logged_layout = 1;
+            LOG_ERROR("ai: output count=%u, YOLO26 三输出模式需要 3 个输出头", n_output);
+        }
+        return 0;
+    }
     float sx = (float)frame_w / (float)g_ai.in_w;
     float sy = (float)frame_h / (float)g_ai.in_h;
     int ndet = 0;
     float cand[YOLO_MAX_DETS * 6];   /* x1,y1,x2,y2,score,cls */
     int ncand = 0;
 
-    if (n_output == 1) {
-        const rknn_tensor_attr *a = &attrs[0];
+    /* 类别数：所有检测头通道维一致，取 ch-4（布局由 dims 启发式推断，不依赖 fmt） */
+    int nc = 0;
+    for (uint32_t o = 0; o < n_output; o++) {
+        uint32_t nd = attrs[o].n_dims;
+        uint32_t ch = 0;
+        if (nd == 4)                                       ch = attrs[o].dims[1];
+        else if (nd == 3 && attrs[o].dims[1] < attrs[o].dims[2]) ch = attrs[o].dims[1];
+        else if (nd == 3)                                  ch = attrs[o].dims[2];
+        else { if (!ai_logged_layout) { ai_logged_layout = 1; LOG_ERROR("ai: unsupported 3-head dims=%u", nd); } return 0; }
+        if (ch > (uint32_t)nc) nc = (int)ch;
+    }
+    nc -= 4;
+    g_ai.nc = nc > 0 ? nc : 80;
+    if (nc <= 0) nc = 80;
+
+    for (uint32_t o = 0; o < n_output && ncand < (int)sizeof(cand)/6; o++) {
+        const rknn_tensor_attr *a = &attrs[o];
+        const float *buf = out_buf[o];
         uint32_t nd = a->n_dims;
-        uint32_t ch = 0, N = 0;
-        if (nd == 3 && a->dims[1] < a->dims[2]) { ch = a->dims[1]; N = a->dims[2]; }
-        else if (nd == 3)                       { N = a->dims[1]; ch = a->dims[2]; }
-        else if (nd == 2)                       { N = a->dims[0]; ch = a->dims[1]; }
-        else { if (!ai_logged_layout) { ai_logged_layout = 1; LOG_ERROR("ai: unsupported e2e output dims=%u", nd); } return 0; }
-        if (ch < 5 || N == 0 || (uint64_t)N * ch != a->n_elems) {
-            if (!ai_logged_layout) { ai_logged_layout = 1; LOG_ERROR("ai: e2e layout mismatch ch=%u N=%u elems=%u", ch, N, a->n_elems); }
-            return 0;
-        }
-        int nc = (int)ch - 4;
-        g_ai.nc = nc;
-        const float *buf = out_buf[0];
-        /* 探测是否需要 sigmoid：任意类别分 >1 说明是原始 logits */
-        int need_sigmoid = 0;
-        for (uint32_t i = 0; i < N && !need_sigmoid; i++) {
-            const float *row = buf + (size_t)i * ch + 4;
-            for (int c = 0; c < nc; c++)
-                if (row[c] > 1.001f) { need_sigmoid = 1; break; }
-        }
-        for (uint32_t i = 0; i < N && ncand < (int)sizeof(cand)/6; i++) {
-            const float *row = buf + (size_t)i * ch;
+        uint32_t ch = 0, H = 0, W = 0;
+        int nchw = 0;
+        if (nd == 4) { nchw = 1; ch = a->dims[1]; H = a->dims[2]; W = a->dims[3]; }
+        else if (nd == 3 && a->dims[1] < a->dims[2]) { nchw = 1; ch = a->dims[1]; H = a->dims[2]; W = a->dims[3] ? a->dims[3] : 1; }
+        else if (nd == 3) { ch = a->dims[2]; W = a->dims[1]; H = 1; }
+        else { if (!ai_logged_layout) { ai_logged_layout = 1; LOG_ERROR("ai: unsupported 3-head dims=%u", nd); } return 0; }
+        if (ch < 5 || H == 0 || W == 0) continue;
+        uint32_t A = H * W;
+        if ((uint64_t)A * ch != a->n_elems) continue;
+        int stride = (int)roundf((float)g_ai.in_w / (float)W);
+        if (stride <= 0) stride = 8;
+        for (uint32_t a_i = 0; a_i < A && ncand < (int)sizeof(cand)/6; a_i++) {
+            /* NHWC：row[a_i*ch+c]；NCHW：row[c*A+a_i] */
+            const float *row;
+            float tmp[5];
+            int cx0, cy0;
+            if (nchw) {
+                /* 网格坐标 a_i = gy*W + gx */
+                cy0 = (int)(a_i / W); cx0 = (int)(a_i % W);
+                for (int c = 0; c < 5; c++) tmp[c] = buf[(size_t)c * A + a_i];
+                row = tmp;
+            } else {
+                cy0 = (int)(a_i / W); cx0 = (int)(a_i % W);
+                row = buf + (size_t)a_i * ch;
+            }
+            float bs = sigmoid(row[4]);
+            if (bs < conf) continue;
             int best = 0;
-            float bests = need_sigmoid ? sigmoid(row[4]) : clamp01(row[4]);
+            float bests = bs;
             for (int c = 1; c < nc; c++) {
-                float s = need_sigmoid ? sigmoid(row[4 + c]) : clamp01(row[4 + c]);
+                float s = sigmoid(nchw ? buf[(size_t)(4 + c) * A + a_i] : row[4 + c]);
                 if (s > bests) { bests = s; best = c; }
             }
             if (bests < conf) continue;
-            float cx = row[0], cy = row[1], bw = row[2], bh = row[3];
-            float x1 = (cx - bw * 0.5f) * sx, y1 = (cy - bh * 0.5f) * sy;
-            float x2 = (cx + bw * 0.5f) * sx, y2 = (cy + bh * 0.5f) * sy;
-            cand[ncand * 6 + 0] = x1; cand[ncand * 6 + 1] = y1;
-            cand[ncand * 6 + 2] = x2; cand[ncand * 6 + 3] = y2;
+            float x = (sigmoid(row[0]) * 2.0f - 0.5f + (float)cx0) * (float)stride;
+            float y = (sigmoid(row[1]) * 2.0f - 0.5f + (float)cy0) * (float)stride;
+            float bw = sigmoid(row[2]) * sigmoid(row[2]) * 4.0f * (float)stride;
+            float bh = sigmoid(row[3]) * sigmoid(row[3]) * 4.0f * (float)stride;
+            cand[ncand * 6 + 0] = (x - bw * 0.5f) * sx; cand[ncand * 6 + 1] = (y - bh * 0.5f) * sy;
+            cand[ncand * 6 + 2] = (x + bw * 0.5f) * sx; cand[ncand * 6 + 3] = (y + bh * 0.5f) * sy;
             cand[ncand * 6 + 4] = bests; cand[ncand * 6 + 5] = (float)best;
             ncand++;
         }
-    } else if (n_output == 3) {
-        /* 经典三头：先收集全部候选（sigmoid + stride 解码），再 NMS */
-        int nc = 0;
-        for (uint32_t o = 0; o < n_output; o++)
-            if (attrs[o].n_dims >= 3) {
-                uint32_t ch = (attrs[o].fmt == RKNN_TENSOR_NHWC && attrs[o].n_dims == 3)
-                              ? attrs[o].dims[2] : attrs[o].dims[1];
-                if (ch > (uint32_t)nc) nc = (int)ch;
-            }
-        nc -= 4;
-        g_ai.nc = nc > 0 ? nc : 80;
-        if (nc <= 0) nc = 80;
-        for (uint32_t o = 0; o < n_output && ncand < (int)sizeof(cand)/6; o++) {
-            const rknn_tensor_attr *a = &attrs[o];
-            const float *buf = out_buf[o];
-            uint32_t nd = a->n_dims;
-            uint32_t ch = 0, H = 0, W = 0;
-            int nchw = 0;
-            if (nd == 4) { nchw = 1; ch = a->dims[1]; H = a->dims[2]; W = a->dims[3]; }
-            else if (nd == 3 && a->dims[1] < a->dims[2]) { nchw = 1; ch = a->dims[1]; H = a->dims[2]; W = a->dims[3] ? a->dims[3] : 1; }
-            else if (nd == 3) { ch = a->dims[2]; W = a->dims[1]; H = 1; }
-            else { if (!ai_logged_layout) { ai_logged_layout = 1; LOG_ERROR("ai: unsupported 3-head dims=%u", nd); } return 0; }
-            if (ch < 5 || H == 0 || W == 0) continue;
-            uint32_t A = H * W;
-            if ((uint64_t)A * ch != a->n_elems) continue;
-            int stride = (int)roundf((float)g_ai.in_w / (float)W);
-            if (stride <= 0) stride = 8;
-            for (uint32_t a_i = 0; a_i < A && ncand < (int)sizeof(cand)/6; a_i++) {
-                /* NHWC：row[a_i*ch+c]；NCHW：row[c*A+a_i] */
-                const float *row;
-                float tmp[5];
-                int cx0, cy0;
-                if (nchw) {
-                    /* 网格坐标 a_i = gy*W + gx */
-                    cy0 = (int)(a_i / W); cx0 = (int)(a_i % W);
-                    for (int c = 0; c < 5; c++) tmp[c] = buf[(size_t)c * A + a_i];
-                    row = tmp;
-                } else {
-                    cy0 = (int)(a_i / W); cx0 = (int)(a_i % W);
-                    row = buf + (size_t)a_i * ch;
-                }
-                float bs = sigmoid(row[4]);
-                if (bs < conf) continue;
-                int best = 0;
-                float bests = bs;
-                for (int c = 1; c < nc; c++) {
-                    float s = sigmoid(nchw ? buf[(size_t)(4 + c) * A + a_i] : row[4 + c]);
-                    if (s > bests) { bests = s; best = c; }
-                }
-                if (bests < conf) continue;
-                float x = (sigmoid(row[0]) * 2.0f - 0.5f + (float)cx0) * (float)stride;
-                float y = (sigmoid(row[1]) * 2.0f - 0.5f + (float)cy0) * (float)stride;
-                float bw = sigmoid(row[2]) * sigmoid(row[2]) * 4.0f * (float)stride;
-                float bh = sigmoid(row[3]) * sigmoid(row[3]) * 4.0f * (float)stride;
-                cand[ncand * 6 + 0] = (x - bw * 0.5f) * sx; cand[ncand * 6 + 1] = (y - bh * 0.5f) * sy;
-                cand[ncand * 6 + 2] = (x + bw * 0.5f) * sx; cand[ncand * 6 + 3] = (y + bh * 0.5f) * sy;
-                cand[ncand * 6 + 4] = bests; cand[ncand * 6 + 5] = (float)best;
-                ncand++;
-            }
-        }
-        /* NMS（类别内抑制） */
-        static char suppressed[YOLO_MAX_DETS];
-        for (int i = 0; i < ncand; i++) suppressed[i] = 0;
-        for (int i = 0; i < ncand && ndet < max_dets; i++) {
-            if (suppressed[i]) continue;
-            float bx1 = cand[i*6+0], by1 = cand[i*6+1], bx2 = cand[i*6+2], by2 = cand[i*6+3];
-            float bi = (bx2 - bx1) * (by2 - by1);
-            for (int j = i + 1; j < ncand; j++) {
-                if (suppressed[j]) continue;
-                if (cand[i*6+5] != cand[j*6+5]) continue;   /* 仅同类抑制 */
-                float ix1 = bx1 > cand[j*6+0] ? bx1 : cand[j*6+0];
-                float iy1 = by1 > cand[j*6+1] ? by1 : cand[j*6+1];
-                float ix2 = bx2 < cand[j*6+2] ? bx2 : cand[j*6+2];
-                float iy2 = by2 < cand[j*6+3] ? by2 : cand[j*6+3];
-                if (ix2 <= ix1 || iy2 <= iy1) continue;
-                float inter = (ix2 - ix1) * (iy2 - iy1);
-                float bj = (cand[j*6+2] - cand[j*6+0]) * (cand[j*6+3] - cand[j*6+1]);
-                float uni = bi + bj - inter;
-                if (uni <= 0) continue;
-                if (inter / uni > nms) suppressed[j] = 1;
-            }
-            dets[ndet].x1 = bx1; dets[ndet].y1 = by1;
-            dets[ndet].x2 = bx2; dets[ndet].y2 = by2;
-            dets[ndet].conf = cand[i*6+4]; dets[ndet].cls = (int)cand[i*6+5];
-            ndet++;
-        }
-        return ndet;
-    } else {
-        if (!ai_logged_layout) { ai_logged_layout = 1; LOG_ERROR("ai: unsupported output count=%u (expect 1 or 3)", n_output); }
-        return 0;
     }
-
-    /* 端到端：直接输出（无 NMS） */
+    /* NMS（类别内抑制） */
+    static char suppressed[YOLO_MAX_DETS];
+    for (int i = 0; i < ncand; i++) suppressed[i] = 0;
     for (int i = 0; i < ncand && ndet < max_dets; i++) {
-        dets[ndet].x1 = cand[i*6+0]; dets[ndet].y1 = cand[i*6+1];
-        dets[ndet].x2 = cand[i*6+2]; dets[ndet].y2 = cand[i*6+3];
+        if (suppressed[i]) continue;
+        float bx1 = cand[i*6+0], by1 = cand[i*6+1], bx2 = cand[i*6+2], by2 = cand[i*6+3];
+        float bi = (bx2 - bx1) * (by2 - by1);
+        for (int j = i + 1; j < ncand; j++) {
+            if (suppressed[j]) continue;
+            if (cand[i*6+5] != cand[j*6+5]) continue;   /* 仅同类抑制 */
+            float ix1 = bx1 > cand[j*6+0] ? bx1 : cand[j*6+0];
+            float iy1 = by1 > cand[j*6+1] ? by1 : cand[j*6+1];
+            float ix2 = bx2 < cand[j*6+2] ? bx2 : cand[j*6+2];
+            float iy2 = by2 < cand[j*6+3] ? by2 : cand[j*6+3];
+            if (ix2 <= ix1 || iy2 <= iy1) continue;
+            float inter = (ix2 - ix1) * (iy2 - iy1);
+            float bj = (cand[j*6+2] - cand[j*6+0]) * (cand[j*6+3] - cand[j*6+1]);
+            float uni = bi + bj - inter;
+            if (uni <= 0) continue;
+            if (inter / uni > nms) suppressed[j] = 1;
+        }
+        dets[ndet].x1 = bx1; dets[ndet].y1 = by1;
+        dets[ndet].x2 = bx2; dets[ndet].y2 = by2;
         dets[ndet].conf = cand[i*6+4]; dets[ndet].cls = (int)cand[i*6+5];
         ndet++;
     }
@@ -461,8 +412,13 @@ int rknn_yolo_init(void *arg)
         LOG_ERROR("ai: rknn_query IN_OUT_NUM failed");
         goto fail_ctx;
     }
-    if (io_num.n_input < 1 || io_num.n_output > AI_MAX_OUTPUTS) {
-        LOG_ERROR("ai: unexpected io_num in=%u out=%u", io_num.n_input, io_num.n_output);
+    if (io_num.n_input < 1) {
+        LOG_ERROR("ai: no input");
+        goto fail_ctx;
+    }
+    if (io_num.n_output != 3) {
+        LOG_ERROR("ai: outputs=%u != 3, 需要 YOLO26 三输出模式（P3/P4/P5 检测头）模型, AI disabled",
+                  io_num.n_output);
         goto fail_ctx;
     }
     g_ai.n_output = io_num.n_output;

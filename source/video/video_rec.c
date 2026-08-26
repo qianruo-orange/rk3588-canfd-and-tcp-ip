@@ -4,8 +4,10 @@
  * 封装细节见 video/rec_mp4.c（ISO BMFF，moov 末尾回写，无需硬件编码器）。
  *
  * 线程模型：main 模块表 "rec" 线程，空闲时 100ms 轮询喂狗；
- *   HTTP 线程通过 video_rec_start/stop 下发命令，录制循环每轮检查
- *   recording 标志（≤1 帧间隔退出，帧快照轮询 20ms）。
+ *   默认自动录制：任务启动即开始，按天分目录（recordings/YYYYMMDD），
+ *   达到会话上限（帧数/体积）自动续录下一段；HTTP 线程可下发
+ *   video_rec_start/stop 手动控制，手动停止后不再自动续录。
+ * 录制分辨率取摄像头配置（cfg->video_width/height），未配置时退回首帧探测。
  */
 
 #define _GNU_SOURCE
@@ -108,101 +110,126 @@ static int rec_take_raw_frame(unsigned char **out, size_t *len, int *w, int *h)
 void *video_rec_task(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;
+    int auto_rec = 1;                    /* 默认自动开启录制 */
 
     while (app->running) {
         watchdog_feed_self("rec");
 
-        /* 取命令（无命令则 100ms 空转喂狗） */
+        /* 取命令（无命令则空转喂狗） */
         pthread_mutex_lock(&g_rec.lock);
         int cmd = g_rec.cmd;
         g_rec.cmd = REC_CMD_NONE;
         pthread_mutex_unlock(&g_rec.lock);
 
-        if (cmd == REC_CMD_START && !g_rec.recording) {
-            /* 开新会话（需先有视频帧可用，用其宽高定会话尺寸） */
-            unsigned char *probe = NULL; size_t plen = 0;
-            int pw = 0, ph = 0;
-            if (rec_take_raw_frame(&probe, &plen, &pw, &ph) != 0 ||
-                pw <= 0 || ph <= 0) {
-                if (probe) free(probe);
-                pthread_mutex_lock(&g_rec.lock);
-                g_rec.start_fail = 1;   /* 无视频帧：拒绝录制 */
-                pthread_mutex_unlock(&g_rec.lock);
-            } else {
-                free(probe);
-                char fname[128] = "";
-                rec_mp4_t *s = rec_mp4_create(REC_DIR, "rec", pw, ph,
-                                              fname, sizeof(fname));
-                if (!s) {
-                    pthread_mutex_lock(&g_rec.lock);
-                    g_rec.start_fail = 2;
-                    pthread_mutex_unlock(&g_rec.lock);
-                    LOG_ERROR("rec: create recording file failed");
-                } else {
-                    LOG_INFO("rec: recording started -> %s (%dx%d)", fname, pw, ph);
-                    pthread_mutex_lock(&g_rec.lock);
-                    g_rec.recording = 1;
-                    g_rec.start_fail = 0;
-                    g_rec.start_ms = rec_mp4_start_ms(s);
-                    g_rec.frames = 0;
-                    g_rec.bytes = 0;
-                    g_rec.last_frame_ts = 0;
-                    safe_strncpy(g_rec.file, sizeof(g_rec.file), fname);
-                    pthread_mutex_unlock(&g_rec.lock);
-
-                    /* ---- 录制内层循环：快照轮询 20ms ---- */
-                    int done = 0;
-                    while (app->running && !done) {
-                        watchdog_feed_self("rec");
-                        pthread_mutex_lock(&g_rec.lock);
-                        int still = g_rec.recording;
-                        pthread_mutex_unlock(&g_rec.lock);
-                        if (!still) break;
-
-                        unsigned char *jpeg = NULL; size_t jlen = 0;
-                        int fw = 0, fh = 0;
-                        if (rec_take_ai_frame(&jpeg, &jlen) == 0) {
-                            /* 画框帧：宽高沿用会话首帧尺寸 */
-                        } else if (rec_take_raw_frame(&jpeg, &jlen, &fw, &fh) == 0) {
-                            if (jpeg && (fw != pw || fh != ph)) { free(jpeg); jpeg = NULL; }
-                        }
-                        if (!jpeg) { usleep(20000); continue; }
-
-                        uint64_t ts = now_ms();
-                        if (rec_mp4_write_frame(s, jpeg, jlen, ts) != 0) {
-                            free(jpeg);
-                            done = 1;   /* 达上限或写失败：自动停止 */
-                            break;
-                        }
-                        free(jpeg);
-
-                        pthread_mutex_lock(&g_rec.lock);
-                        g_rec.frames = rec_mp4_frames(s);
-                        g_rec.bytes  = rec_mp4_bytes(s);
-                        g_rec.last_frame_ts = ts;
-                        pthread_mutex_unlock(&g_rec.lock);
-                    }
-
-                    /* ---- 结束会话（finalize 内部释放对象） ---- */
-                    uint32_t n_frames = rec_mp4_frames(s);
-                    uint32_t n_bytes  = rec_mp4_bytes(s);
-                    rec_mp4_finalize(s);
-                    pthread_mutex_lock(&g_rec.lock);
-                    g_rec.recording = 0;
-                    g_rec.start_fail = 0;
-                    g_rec.file[0] = '\0';
-                    pthread_mutex_unlock(&g_rec.lock);
-                    if (n_frames > 0)
-                        LOG_INFO("rec: recording finished -> %s (%u frames, %u bytes)",
-                                 fname, n_frames, n_bytes);
-                    else
-                        LOG_INFO("rec: recording aborted (no frames): %s", fname);
-                }
-            }
+        if (cmd == REC_CMD_START) {
+            auto_rec = 1;
         } else if (cmd == REC_CMD_STOP) {
             pthread_mutex_lock(&g_rec.lock);
             g_rec.recording = 0;
             pthread_mutex_unlock(&g_rec.lock);
+            auto_rec = 0;                /* 手动停止后不再自动续录 */
+        }
+
+        if (auto_rec && !g_rec.recording) {
+            /* ---- 开始一个录制会话（自动开启/续录或命令启动） ---- */
+            int pw = app->cfg->video_width, ph = app->cfg->video_height;
+            if (pw <= 0 || ph <= 0) {    /* 配置未设分辨率：首帧探测 */
+                unsigned char *probe = NULL; size_t plen = 0;
+                if (rec_take_raw_frame(&probe, &plen, &pw, &ph) != 0 ||
+                    pw <= 0 || ph <= 0) {
+                    if (probe) free(probe);
+                    pthread_mutex_lock(&g_rec.lock);
+                    g_rec.start_fail = 1;   /* 无视频帧且无配置分辨率 */
+                    pthread_mutex_unlock(&g_rec.lock);
+                    usleep(100000);
+                    continue;
+                }
+                free(probe);
+            }
+
+            /* 按天分目录：recordings/YYYYMMDD */
+            time_t t = time(NULL);
+            struct tm tm;
+            localtime_r(&t, &tm);
+            char day[16];
+            snprintf(day, sizeof(day), "%04d%02d%02d",
+                     tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+            char dir[512];
+            snprintf(dir, sizeof(dir), "%s/%s", REC_DIR, day);
+
+            char fname[128] = "";
+            rec_mp4_t *s = rec_mp4_create(dir, "rec", pw, ph,
+                                          fname, sizeof(fname));
+            if (!s) {
+                pthread_mutex_lock(&g_rec.lock);
+                g_rec.start_fail = 2;
+                pthread_mutex_unlock(&g_rec.lock);
+                LOG_ERROR("rec: create recording file failed");
+                usleep(100000);
+                continue;
+            }
+            char rel[192];
+            snprintf(rel, sizeof(rel), "%s/%s", day, fname);
+            LOG_INFO("rec: recording started -> %s (%dx%d)", rel, pw, ph);
+            pthread_mutex_lock(&g_rec.lock);
+            g_rec.recording = 1;
+            g_rec.start_fail = 0;
+            g_rec.start_ms = rec_mp4_start_ms(s);
+            g_rec.frames = 0;
+            g_rec.bytes = 0;
+            g_rec.last_frame_ts = 0;
+            safe_strncpy(g_rec.file, sizeof(g_rec.file), rel);
+            pthread_mutex_unlock(&g_rec.lock);
+
+            /* ---- 录制内层循环：快照轮询 20ms ---- */
+            int done = 0;
+            while (app->running && !done) {
+                watchdog_feed_self("rec");
+                pthread_mutex_lock(&g_rec.lock);
+                int still = g_rec.recording;
+                pthread_mutex_unlock(&g_rec.lock);
+                if (!still) break;
+
+                unsigned char *jpeg = NULL; size_t jlen = 0;
+                int fw = 0, fh = 0;
+                if (rec_take_ai_frame(&jpeg, &jlen) == 0) {
+                    /* 画框帧：宽高沿用会话尺寸 */
+                } else if (rec_take_raw_frame(&jpeg, &jlen, &fw, &fh) == 0) {
+                    if (jpeg && (fw != pw || fh != ph)) { free(jpeg); jpeg = NULL; }
+                }
+                if (!jpeg) { usleep(20000); continue; }
+
+                uint64_t ts = now_ms();
+                if (rec_mp4_write_frame(s, jpeg, jlen, ts) != 0) {
+                    free(jpeg);
+                    done = 1;   /* 达上限或写失败：结束本段（自动续录下一段） */
+                    break;
+                }
+                free(jpeg);
+
+                pthread_mutex_lock(&g_rec.lock);
+                g_rec.frames = rec_mp4_frames(s);
+                g_rec.bytes  = rec_mp4_bytes(s);
+                g_rec.last_frame_ts = ts;
+                pthread_mutex_unlock(&g_rec.lock);
+            }
+
+            /* ---- 结束会话（finalize 内部释放对象） ---- */
+            uint32_t n_frames = rec_mp4_frames(s);
+            uint32_t n_bytes  = rec_mp4_bytes(s);
+            rec_mp4_finalize(s);
+            pthread_mutex_lock(&g_rec.lock);
+            g_rec.recording = 0;
+            g_rec.start_fail = 0;
+            g_rec.file[0] = '\0';
+            pthread_mutex_unlock(&g_rec.lock);
+            if (n_frames > 0)
+                LOG_INFO("rec: recording finished -> %s (%u frames, %u bytes)",
+                         rel, n_frames, n_bytes);
+            else
+                LOG_INFO("rec: recording aborted (no frames): %s", rel);
+
+            if (n_frames > 0 && auto_rec) continue;  /* 达上限：立即续录下一段 */
         }
 
         usleep(100000);   /* 空转：响应命令与喂狗 */

@@ -4,7 +4,7 @@
   var lastCores = [];
   var npuInited = false;
 
-  /* ---- 网络录像 ---- */
+  /* ---- 网络录像（默认自动开启，仅显示状态） ---- */
   var rec = { recording:false, startTs:0, frames:0, bytes:0, fps:0 };
 
   function fmtBytes(n) {
@@ -30,71 +30,20 @@
       if (rec.recording && !rec.startTs) rec.startTs = Date.now();
       if (!rec.recording) rec.startTs = 0;
 
-      var btn = document.getElementById('rec_btn');
       var st = document.getElementById('rec_status');
+      if (!st) return;
       if (rec.recording) {
-        btn.textContent = '⏹ 停止录制';
-        btn.className = 'rec-btn rec-on';
         st.textContent = '● REC ' + fmtDur(Date.now() - rec.startTs)
           + ' · ' + fmtBytes(rec.bytes);
         st.className = 'rec-status rec-live';
       } else {
-        btn.textContent = '⏺ 开始录制';
-        btn.className = 'rec-btn';
         st.textContent = rec.frames > 0 ? '已停止' : '';
         st.className = 'rec-status';
       }
     } catch(e) {}
   }
 
-  async function loadRecList() {
-    try {
-      var r = await fetch('/api/rec/list');
-      if (!r.ok) return;
-      var d = await r.json();
-      var box = document.getElementById('rec_list');
-      if (!d.files || !d.files.length) {
-        box.innerHTML = '<span class="rec-empty">无录制文件</span>';
-        return;
-      }
-      var h = '';
-      d.files.forEach(function(f, i) {
-        h += '<div class="rec-item">'
-          + '<span class="rec-name" title="' + f.name + '">' + f.name + '</span>'
-          + '<span class="rec-size">' + fmtBytes(f.size) + '</span>'
-          + '<span class="rec-time">' + f.mtime + '</span>'
-          + '<a class="rec-dl" href="/recfile/' + encodeURIComponent(f.name) + '">下载</a>'
-          + '<button class="rec-del" data-name="' + f.name + '" onclick="delRec(this)">删除</button>'
-          + '</div>';
-      });
-      box.innerHTML = h;
-    } catch(e) {}
-  }
-
-  async function toggleRec() {
-    var action = rec.recording ? 'stop' : 'start';
-    try {
-      var r = await fetch('/api/rec/' + action, {method:'POST'});
-      if (!r.ok) { alert(action === 'start' ? '录制启动失败（无视频帧或已在录制）' : '停止失败（未在录制）'); }
-    } catch(e) { alert('网络错误'); }
-    updateRec();
-    if (action === 'stop') loadRecList();
-  }
-
-  async function delRec(btn) {
-    var name = btn.getAttribute('data-name');
-    if (!confirm('删除录像 ' + name + '？')) return;
-    try {
-      var r = await fetch('/api/rec/delete', {method:'POST', body:name});
-      if (r.ok) loadRecList();
-      else alert('删除失败');
-    } catch(e) { alert('网络错误'); }
-  }
-
-  /* 暴露给 inline onclick */
-  window.toggleRec = toggleRec;
-  window.loadRecList = loadRecList;
-  window.delRec = delRec;
+  /* 录像文件列表已合并到日志页（/logs），此处不再渲染 */
 
   /* 网络速度跟踪 */
   var lastNet = {eth0:{rx:0,tx:0,ts:0},wlan0:{rx:0,tx:0,ts:0}};
@@ -287,7 +236,5 @@
   }
 
   update();
-  loadRecList();
   setInterval(update, 200);
-  setInterval(loadRecList, 5000);
 })();

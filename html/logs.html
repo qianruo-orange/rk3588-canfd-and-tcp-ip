@@ -1,11 +1,27 @@
-<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>日志文件</title>
+<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>日志与录像</title>
 <link rel="stylesheet" href="/css/common.css">
 <link rel="stylesheet" href="/css/logs.css">
 <script src="/js/theme.js"></script>
 </head><body>
 <button id="themeBtn" class="theme-btn" onclick="toggleTheme()" title="切换主题">🌙</button>
 <a href="/" class="back-link">← 返回首页</a>
-<div class="top-bar"><h1>📋 日志文件</h1><a href="/logs/pack" class="btn btn-pack">📦 打包下载</a></div>
-<div class="tbl-wrap"><table><thead><tr><th>日期</th><th>文件名</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="top-bar">
+  <h1>📁 文件下载</h1>
+  <div class="tab-bar">
+    <button class="tab-btn tab-on" data-tab="logs" onclick="switchTab('logs')">📋 日志</button>
+    <button class="tab-btn" data-tab="rec" onclick="switchTab('rec')">🎬 录像</button>
+  </div>
+  <a href="/logs/pack" class="btn btn-pack" id="pack_btn">📦 打包下载</a>
+</div>
+<div class="tbl-wrap">
+  <table id="tbl_logs">
+    <thead><tr><th>日期</th><th>文件名</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
+    <tbody id="rows_logs"></tbody>
+  </table>
+  <table id="tbl_rec" style="display:none">
+    <thead><tr><th>日期</th><th>文件名</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead>
+    <tbody id="rows_rec"></tbody>
+  </table>
+</div>
 <script src="/js/logs.js"></script>
 </body></html>

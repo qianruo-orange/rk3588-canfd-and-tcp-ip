@@ -16,27 +16,6 @@
 #define LOG_DIR PATH_LOGS
 #define LOG_PACK_MAX (100UL * 1024 * 1024)  /* 日志打包体积上限 100MB，防止长时间阻塞 HTTP */
 
-/* URL 解码：前端用 encodeURIComponent 会把 '/' 编码为 %2F，这里还原 */
-static void url_decode(const char *src, char *dst, size_t dst_size)
-{
-    size_t i = 0, o = 0;
-    while (src[i] && o + 1 < dst_size) {
-        if (src[i] == '%' &&
-            isxdigit((unsigned char)src[i+1]) &&
-            isxdigit((unsigned char)src[i+2])) {
-            int hi = isdigit((unsigned char)src[i+1]) ? src[i+1] - '0'
-                                                      : (tolower((unsigned char)src[i+1]) - 'a' + 10);
-            int lo = isdigit((unsigned char)src[i+2]) ? src[i+2] - '0'
-                                                      : (tolower((unsigned char)src[i+2]) - 'a' + 10);
-            dst[o++] = (char)((hi << 4) | lo);
-            i += 3;
-        } else {
-            dst[o++] = src[i++];
-        }
-    }
-    dst[o] = '\0';
-}
-
 /* 解析日志相对路径，要求为 YYYYMMDD/filename 形式且不含 '..' */
 static int logs_resolve_rel(const char *rel, char *subdir, size_t subdir_size,
                             char *name, size_t name_size)
@@ -61,7 +40,7 @@ static void serve_log_list_json(int fd)
 {
     DIR *dir = opendir(LOG_DIR);
     if (!dir) {
-        http_send_response(fd, 500, "Error", "application/json", "{\"logs\":[]}", 11);
+        http_err(fd, 500, "Error", NULL);
         return;
     }
 
@@ -93,20 +72,19 @@ static void serve_log_list_json(int fd)
             strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M",
                      localtime(&st.st_mtime));
 
-            int n = snprintf(json + off, sizeof(json) - off,
+            off = http_json_append(json, sizeof(json), off,
                 "%s{\"name\":\"%s/%s\",\"size\":%lld,\"mtime\":\"%s\"}",
                 first ? "" : ",", de->d_name, fde->d_name,
                 (long long)st.st_size, time_str);
-            if (n < 0 || n >= (int)(sizeof(json) - off)) break;
-            off += n;
+            if (off < 0) break;
             first = 0;
         }
         closedir(sd);
     }
     closedir(dir);
 
-    off += snprintf(json + off, sizeof(json) - off, "]}");
-    http_send_response(fd, 200, "OK", "application/json; charset=utf-8", json, (size_t)off);
+    off = http_json_append(json, sizeof(json), off, "]}");
+    http_ok_json(fd, json, (size_t)off);
 }
 
 /* 下载单个日志文件：复用 http_serve_stream 流式发送 */
@@ -139,15 +117,15 @@ static void serve_log_delete(int fd, const char *rel)
 {
     char subdir[64], name[256];
     if (logs_resolve_rel(rel, subdir, sizeof(subdir), name, sizeof(name)) != 0) {
-        http_send_response(fd, 400, "Bad Request", "text/plain", "", 0);
+        http_err(fd, 400, "Bad Request", NULL);
         return;
     }
     char path[512];
     snprintf(path, sizeof(path), "%s/%s/%s", LOG_DIR, subdir, name);
     if (unlink(path) == 0)
-        http_send_response(fd, 200, "OK", "text/plain", "ok", 2);
+        http_ok_text(fd, "ok");
     else
-        http_send_response(fd, 404, "Not Found", "text/plain", "", 0);
+        http_err(fd, 404, "Not Found", NULL);
 }
 
 /* 统计日志目录总大小，用于打包前的体积限制 */
@@ -185,7 +163,7 @@ static void serve_log_pack(int fd)
 {
     if (logs_total_size() > (int64_t)LOG_PACK_MAX) {
         LOG_INFO("logs pack: total size exceeds %lld bytes, rejected", (long long)LOG_PACK_MAX);
-        http_send_response(fd, 413, "Payload Too Large", "text/plain", "logs too large", 14);
+        http_err(fd, 413, "Payload Too Large", "logs too large");
         return;
     }
 
@@ -195,14 +173,14 @@ static void serve_log_pack(int fd)
     snprintf(cmd, sizeof(cmd), "tar -czf %s -C %s . 2>/dev/null", tmppath, LOG_DIR);
     if (system(cmd) != 0 || access(tmppath, F_OK) != 0) {
         unlink(tmppath);
-        http_send_response(fd, 500, "Internal Error", "text/plain", "", 0);
+        http_err(fd, 500, "Internal Error", NULL);
         return;
     }
 
     FILE *fp = fopen(tmppath, "rb");
     if (!fp) {
         unlink(tmppath);
-        http_send_response(fd, 500, "Internal Error", "text/plain", "", 0);
+        http_err(fd, 500, "Internal Error", NULL);
         return;
     }
     fseek(fp, 0, SEEK_END);
@@ -226,7 +204,7 @@ void http_logs_handler(app_ctx_t *app, int fd, const char *method, const char *u
         serve_log_pack(fd);
     else if (strncmp(uri, "/logfile/", 9) == 0) {
         char rel[512];
-        url_decode(uri + 9, rel, sizeof(rel));
+        http_url_decode(uri + 9, rel, sizeof(rel));
         if (strcmp(method, "DELETE") == 0)
             serve_log_delete(fd, rel);
         else

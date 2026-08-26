@@ -87,22 +87,22 @@ void http_system_api(app_ctx_t *app, int fd)
     }
 
     /* 组装 JSON（使用边界检查宏） */
-    JSON_ADD("{"
+    JSON_ADD(json, off, "{"
         "\"load\":[%.2f,%.2f,%.2f],"
         "\"cpu_user\":%ld,\"cpu_sys\":%ld,\"cpu_idle\":%ld,\"cpu_total\":%ld,",
         load1, load5, load15,
         cpu_user, cpu_sys, cpu_idle, cpu_total);
 
-    JSON_ADD("\"cpu_cores\":[");
+    JSON_ADD(json, off, "\"cpu_cores\":[");
     for (int i = 0; i < num_cores; i++)
-        JSON_ADD("%s{\"u\":%ld,\"s\":%ld,\"i\":%ld}",
+        JSON_ADD(json, off, "%s{\"u\":%ld,\"s\":%ld,\"i\":%ld}",
             i > 0 ? "," : "", core_user[i], core_sys[i], core_idle[i]);
-    JSON_ADD("],");
+    JSON_ADD(json, off, "],");
 
-    JSON_ADD("\"npu_cores\":[%d,%d,%d],",
+    JSON_ADD(json, off, "\"npu_cores\":[%d,%d,%d],",
         npu_cores[0], npu_cores[1], npu_cores[2]);
 
-    JSON_ADD(
+    JSON_ADD(json, off,
         "\"mem_pct\":%d,\"mem_total\":%ld,\"mem_avail\":%ld,"
         "\"disk_total\":%ld,\"disk_avail\":%ld,"
         "\"temp\":%d,"

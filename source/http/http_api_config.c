@@ -15,7 +15,7 @@ void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri
 {
     (void)method; (void)uri; (void)req;
     if (!app || !app->cfg || !app->can || !app->tcp) {
-        http_send_response(fd, 500, "Error", "text/plain", "", 0);
+        http_err(fd, 500, "Error", NULL);
         return;
     }
     struct app_config_t *cfg = app->cfg;
@@ -23,42 +23,27 @@ void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri
     tcp_ctx_t *tcp = app->tcp;
 
     char json[4096]; int off = 0;
-#define J(fmt, ...) do { \
-        int _n = snprintf(json + off, sizeof(json) - off, fmt, ##__VA_ARGS__); \
-        if (_n < 0 || _n >= (int)(sizeof(json) - off)) break; \
-        off += _n; \
-    } while(0)
 
-    J("{\"cans\":{");
+    JSON_ADD(json, off, "{\"cans\":{");
     for (int i = 0; i < can->count; i++) {
         can_iface_t *iface = &can->ifaces[i];
-        J("%s\"%s\":{\"bitrate\":%d,\"fd\":\"%s\",\"dbitrate\":%d,\"up\":\"%s\",\"filters\":[",
+        JSON_ADD(json, off, "%s\"%s\":{\"bitrate\":%d,\"fd\":\"%s\",\"dbitrate\":%d,\"up\":\"%s\",\"filters\":[",
             i > 0 ? "," : "", iface->ifname,
             iface->bitrate, iface->fd_mode ? "on" : "off", iface->dbitrate,
             iface->up ? "on" : "off");
         for (int k = 0; k < iface->filter_count; k++)
-            J("%s{\"id\":\"%X\",\"mask\":\"%X\"}",
+            JSON_ADD(json, off, "%s{\"id\":\"%X\",\"mask\":\"%X\"}",
                 k > 0 ? "," : "", iface->filters[k].id, iface->filters[k].mask);
-        J("]}");
+        JSON_ADD(json, off, "]}");
     }
-    J("},");
+    JSON_ADD(json, off, "},");
 
-    J("\"tcp_port\":%d,\"max_clients\":%d,\"tcp_bind\":\"%s\"", tcp->port, tcp->max_clients, tcp->bind_ifname);
-    if (cfg->video_device[0]) J(",\"video_device\":\"%s\"", cfg->video_device);
-    J(",\"video_width\":%d,\"video_height\":%d", cfg->video_width, cfg->video_height);
-    J("}");
+    JSON_ADD(json, off, "\"tcp_port\":%d,\"max_clients\":%d,\"tcp_bind\":\"%s\"", tcp->port, tcp->max_clients, tcp->bind_ifname);
+    if (cfg->video_device[0]) JSON_ADD(json, off, ",\"video_device\":\"%s\"", cfg->video_device);
+    JSON_ADD(json, off, ",\"video_width\":%d,\"video_height\":%d", cfg->video_width, cfg->video_height);
+    JSON_ADD(json, off, "}");
 
-#undef J
-    http_send_response(fd, 200, "OK", "application/json", json, off);
-}
-
-/* 从 POST 表单中查找 key */
-static const char *form_find(char keys[][64], char vals[][256], int count, const char *key)
-{
-    for (int i = 0; i < count; i++)
-        if (strcmp(keys[i], key) == 0 && vals[i][0])
-            return vals[i];
-    return NULL;
+    http_ok_json(fd, json, (size_t)off);
 }
 
 /* 表单字段容量：8 接口 × 5 基础项 + 8×16 过滤器 × 2 + 6 全局项 = 302，留余量 */
@@ -71,58 +56,22 @@ static int find_iface(can_ctx_t *can, const char *name)
     return -1;
 }
 
-/* 校验 CAN 接口名：字母数字 / 下划线 / 连字符，避免非法名称进入系统命令 */
-static int ifname_valid(const char *name)
-{
-    if (!name || !*name) return 0;
-    size_t len = strlen(name);
-    if (len >= IFNAMSIZ) return 0;
-    for (size_t i = 0; i < len; i++) {
-        char c = name[i];
-        if (!isalnum((unsigned char)c) && c != '_' && c != '-') return 0;
-    }
-    return 1;
-}
-
 void http_config_post(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body)
 {
     (void)method; (void)uri;
     if (!body || !app || !app->cfg || !app->can || !app->tcp) {
-        http_send_response(fd, 400, "Bad Request", "text/plain", "", 0);
+        http_err(fd, 400, "Bad Request", NULL);
         return;
     }
 
     /* 整个配置应用过程加锁：串行化并发 POST，并与 CAN 重连互斥 */
     pthread_mutex_lock(&app->can_mutex);
 
-    /* 跳过 HTTP 头部，定位 POST body */
-    const char *p = strstr(body, "\r\n\r\n");
-    if (!p) p = strstr(body, "\n\n");
-    if (p) p += (p[0] == '\r') ? 4 : 2;
-    else p = body;
-
-    char keys[MAX_FORM_FIELDS][64], vals[MAX_FORM_FIELDS][256]; int count = 0;
-    while (*p && count < MAX_FORM_FIELDS) {
-        const char *eq = strchr(p, '='), *amp = strchr(p, '&');
-        if (!eq) break;
-        int klen = (int)(eq - p); if (klen > 63) klen = 63;
-        memcpy(keys[count], p, klen); keys[count][klen] = '\0';
-        const char *vs = eq + 1;
-        int vlen = amp ? (int)(amp - vs) : (int)strlen(vs);
-        if (vlen > 254) vlen = 254;
-        int vi = 0;
-        for (int i = 0; i < vlen && vi < 254; i++) {
-            if (vs[i] == '%' && i+2 < vlen) {
-                unsigned int h = 0;
-                if (sscanf(vs+i+1, "%2x", &h) == 1) vals[count][vi++] = (char)h;
-                i += 2;
-            } else if (vs[i] == '+') vals[count][vi++]=' ';
-            else vals[count][vi++]=vs[i];
-        }
-        vals[count][vi]='\0'; count++;
-        p = amp ? amp + 1 : vs + vlen;
-    }
-    if (*p) LOG_ERROR("config POST: fields exceed %d, tail ignored", MAX_FORM_FIELDS);
+    /* 解析 URL 编码表单（公共实现，自动跳过 HTTP 头） */
+    http_form_field_t fields[MAX_FORM_FIELDS];
+    int count = http_form_parse(body, fields, MAX_FORM_FIELDS);
+    if (count == MAX_FORM_FIELDS)
+        LOG_ERROR("config POST: fields exceed %d, tail ignored", MAX_FORM_FIELDS);
 
     struct app_config_t *cfg = app->cfg;
     can_ctx_t *can = app->can;
@@ -133,7 +82,7 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
     for (int i = 0; i < CAN_MAX_IFACES; i++) {
         char kn[32];
         snprintf(kn, sizeof(kn), "ifname%d", i);
-        const char *ifn = form_find(keys, vals, count, kn);
+        const char *ifn = http_form_find(fields, count, kn);
         if (!ifn) continue;
         if (!ifname_valid(ifn)) { LOG_ERROR("config: invalid CAN ifname '%s'", ifn); continue; }
         int idx = find_iface(can, ifn);
@@ -157,19 +106,19 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         }
 
         snprintf(kn, sizeof(kn), "bitrate%d", i);
-        const char *v = form_find(keys, vals, count, kn);
+        const char *v = http_form_find(fields, count, kn);
         if (v) can->ifaces[idx].bitrate = atoi(v);
 
         snprintf(kn, sizeof(kn), "fd%d", i);
-        v = form_find(keys, vals, count, kn);
+        v = http_form_find(fields, count, kn);
         if (v) can->ifaces[idx].fd_mode = (strcmp(v, "on") == 0) ? 1 : 0;
 
         snprintf(kn, sizeof(kn), "dbitrate%d", i);
-        v = form_find(keys, vals, count, kn);
+        v = http_form_find(fields, count, kn);
         if (v) can->ifaces[idx].dbitrate = atoi(v);
 
         snprintf(kn, sizeof(kn), "up%d", i);
-        v = form_find(keys, vals, count, kn);
+        v = http_form_find(fields, count, kn);
         if (v) can->ifaces[idx].up = (strcmp(v, "on") == 0) ? 1 : 0;
 
         can->ifaces[idx].filter_count = 0;
@@ -177,8 +126,8 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
             char kn_id[32], kn_mask[32];
             snprintf(kn_id,   sizeof(kn_id),   "filter_id_%d_%d", i, f);
             snprintf(kn_mask, sizeof(kn_mask), "filter_mask_%d_%d", i, f);
-            const char *fid  = form_find(keys, vals, count, kn_id);
-            const char *fmsk = form_find(keys, vals, count, kn_mask);
+            const char *fid  = http_form_find(fields, count, kn_id);
+            const char *fmsk = http_form_find(fields, count, kn_mask);
             if (fid && fmsk) {
                 unsigned int id, mask;
                 if (sscanf(fid, "%x", &id) == 1 && sscanf(fmsk, "%x", &mask) == 1) {
@@ -246,8 +195,8 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
     }
 
     /* -- 应用 TCP 监听配置（端口 / 绑定网卡） -- */
-    const char *pv = form_find(keys, vals, count, "tcp_port");
-    const char *bv = form_find(keys, vals, count, "tcp_bind");
+    const char *pv = http_form_find(fields, count, "tcp_port");
+    const char *bv = http_form_find(fields, count, "tcp_bind");
 
     int  want_port = pv ? atoi(pv) : tcp->port;
     char want_bind[IFNAMSIZ];
@@ -281,7 +230,7 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         LOG_INFO("config: TCP listen changed to %s:%d", want_bind[0] ? want_bind : "*", want_port);
     }
 
-    const char *v = form_find(keys, vals, count, "max_clients");
+    const char *v = http_form_find(fields, count, "max_clients");
     if (v) {
         int mc = atoi(v);
         if (mc < 1) mc = 1;
@@ -289,17 +238,17 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         tcp->max_clients = mc;
     }
 
-    v = form_find(keys, vals, count, "video_device");
+    v = http_form_find(fields, count, "video_device");
     int vid_changed = (v != NULL);
     if (v) safe_strncpy(cfg->video_device, sizeof(cfg->video_device), v);
-    v = form_find(keys, vals, count, "video_width");
+    v = http_form_find(fields, count, "video_width");
     if (v) { vid_changed = 1; cfg->video_width = parse_int_clamped(v, 1, 4096, cfg->video_width > 0 ? cfg->video_width : 640); }
-    v = form_find(keys, vals, count, "video_height");
+    v = http_form_find(fields, count, "video_height");
     if (v) { vid_changed = 1; cfg->video_height = parse_int_clamped(v, 1, 4096, cfg->video_height > 0 ? cfg->video_height : 480); }
 
     LOG_INFO("config: applied to runtime, saving to file");
     config_save(app);
-    http_send_response(fd, 200, "OK", "text/plain", "saved", 5);
+    http_ok_text(fd, "saved");
 
     /* 视频参数变更后重启视频流 */
     if (vid_changed) video_stream_restart();

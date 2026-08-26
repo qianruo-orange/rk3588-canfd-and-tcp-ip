@@ -30,21 +30,10 @@
 #include "watchdog/watchdog.h"
 
 /**
- * ifname_valid - 检查 CAN 接口名是否合法，避免无效名称导致 netlink 或 socket 配置失败。
+ * ifname_valid - 检查 CAN 接口名是否合法（公共实现见 core/common.h 内联函数）。
  * @name: 待校验的接口名。
  * @return: 合法返回 1，否则返回 0。
  */
-static int ifname_valid(const char *name)
-{
-    if (!name || !*name) return 0;
-    size_t len = strlen(name);
-    if (len == 0 || len >= IFNAMSIZ) return 0;
-    for (size_t i = 0; i < len; i++) {
-        char c = name[i];
-        if (!isalnum((unsigned char)c) && c != '_' && c != '-') return 0;
-    }
-    return 1;
-}
 
 /**
  * apply_dbitrate - 使用 netlink 设置 CAN FD 数据位时钟参数，确保接口工作在指定数据速率。

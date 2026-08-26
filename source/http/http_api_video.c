@@ -30,13 +30,7 @@ void http_video_devices(app_ctx_t *app, int fd, const char *method, const char *
         if (ioctl(dev_fd, VIDIOC_QUERYCAP, &cap) == 0 &&
             (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
             char card[64];
-            int ci = 0;
-            for (int j = 0; cap.card[j] && ci < 60; j++) {
-                char c = cap.card[j];
-                if (c == '"' || c == '\\') { card[ci++] = '\\'; card[ci++] = c; }
-                else if (c >= 32 && c < 127) card[ci++] = c;
-            }
-            card[ci] = '\0';
+            http_json_escape((const char *)cap.card, card, sizeof(card));
             JSON_ADD(json, off, "%s{\"path\":\"%s\",\"card\":\"%s\"}",
                      first ? "" : ",", path, card);
             first = 0;
@@ -44,7 +38,7 @@ void http_video_devices(app_ctx_t *app, int fd, const char *method, const char *
         close(dev_fd);
     }
     JSON_ADD(json, off, "]");
-    http_send_response(fd, 200, "OK", "application/json", json, off);
+    http_ok_json(fd, json, (size_t)off);
 }
 
 /* ---- /api/video/caps —— 枚举真实格式与分辨率 ---- */
@@ -55,16 +49,6 @@ static const struct { int w, h; } kStdSizes[] = {
     { 1280,720 },{ 1920,1080 },{ 2560,1440 },{ 3840,2160 },
 };
 #define kStdN ((int)(sizeof(kStdSizes)/sizeof(kStdSizes[0])))
-
-/* 带边界的 JSON 追加；缓冲区不足返回 -1（调用方终止填充并回退预设） */
-static int json_append(char *json, int size, int off, const char *fmt, ...)
-{
-    va_list ap; va_start(ap, fmt);
-    int n = vsnprintf(json + off, (size_t)(size - off), fmt, ap);
-    va_end(ap);
-    if (n < 0 || n >= size - off) return -1;
-    return off + n;
-}
 
 static void caps_add_size(int *sw, int *sh, int *sn, int w, int h)
 {
@@ -95,7 +79,7 @@ static int video_caps_fill(int dev_fd, char *json, int json_size,
                            const char *device, const char *card)
 {
     int off = 0;
-    off = json_append(json, json_size, off,
+    off = http_json_append(json, (size_t)json_size, off,
                       "{\"device\":\"%s\",\"card\":\"%s\",\"formats\":[", device, card);
     if (off < 0) return 0;
 
@@ -130,24 +114,24 @@ static int video_caps_fill(int dev_fd, char *json, int json_size,
         }
         if (sn == 0) continue;   /* 驱动无该格式的分辨率信息 */
 
-        off = json_append(json, json_size, off, "%s{\"fmt\":\"%s\",\"desc\":\"%s\",\"sizes\":[",
+        off = http_json_append(json, (size_t)json_size, off, "%s{\"fmt\":\"%s\",\"desc\":\"%s\",\"sizes\":[",
                           fmt_first ? "" : ",",
                           fmtd.pixelformat == V4L2_PIX_FMT_MJPEG ? "MJPG" : "YUYV",
                           fmtd.pixelformat == V4L2_PIX_FMT_MJPEG ? "MJPEG" : "YUYV 4:2:2");
         if (off < 0) return 0;
         for (int k = 0; k < sn; k++) {
-            off = json_append(json, json_size, off, "%s{\"w\":%d,\"h\":%d}",
+            off = http_json_append(json, (size_t)json_size, off, "%s{\"w\":%d,\"h\":%d}",
                               k > 0 ? "," : "", sw[k], sh[k]);
             if (off < 0) return 0;
         }
-        off = json_append(json, json_size, off, "]}");
+        off = http_json_append(json, (size_t)json_size, off, "]}");
         if (off < 0) return 0;
         fmt_first = 0;
         emitted = 1;
     }
 
     if (!emitted) return 0;
-    off = json_append(json, json_size, off, "]}");
+    off = http_json_append(json, (size_t)json_size, off, "]}");
     return off < 0 ? 0 : 1;
 }
 
@@ -181,19 +165,12 @@ void http_video_caps(app_ctx_t *app, int fd, const char *method, const char *uri
     int dev_fd = open(device, O_RDONLY | O_NONBLOCK);
     if (dev_fd >= 0) {
         struct v4l2_capability cap;
-        if (ioctl(dev_fd, VIDIOC_QUERYCAP, &cap) == 0) {
-            int ci = 0;
-            for (int j = 0; cap.card[j] && ci < 60; j++) {
-                char c = cap.card[j];
-                if (c == '"' || c == '\\') { card[ci++] = '\\'; card[ci++] = c; }
-                else if (c >= 32 && c < 127) card[ci++] = c;
-            }
-            card[ci] = '\0';
-        }
+        if (ioctl(dev_fd, VIDIOC_QUERYCAP, &cap) == 0)
+            http_json_escape((const char *)cap.card, card, sizeof(card));
         /* 真实枚举成功即用真实能力返回 */
         if (video_caps_fill(dev_fd, json, sizeof(json), device, card)) {
             close(dev_fd);
-            http_send_response(fd, 200, "OK", "application/json", json, strlen(json));
+            http_ok_json(fd, json, strlen(json));
             return;
         }
         close(dev_fd);
@@ -228,6 +205,6 @@ void http_video_caps(app_ctx_t *app, int fd, const char *method, const char *uri
                  i > 0 ? "," : "", presets[i].w, presets[i].h, presets[i].label);
 
     JSON_ADD(json, off, "]}]}");
-    http_send_response(fd, 200, "OK", "application/json", json, off);
+    http_ok_json(fd, json, (size_t)off);
 #undef NP
 }

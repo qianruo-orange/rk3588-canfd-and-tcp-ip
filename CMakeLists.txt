@@ -84,6 +84,7 @@ set(SOURCES
     source/tcp/tcp_server.c
     source/tcp/tcp_queue.c
     source/http/http.c
+    source/http/http_util.c
     source/http/http_api_dbc.c
     source/http/http_logs.c
     source/http/http_api_system.c

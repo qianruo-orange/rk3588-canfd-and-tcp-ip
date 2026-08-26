@@ -66,14 +66,14 @@ void http_can_status(app_ctx_t *app, int fd)
         FILE *sfp = fopen(sysfs, "r");
         if (sfp) { if (fscanf(sfp, "%u", &dbitrate) != 1) dbitrate = 0; fclose(sfp); }
 
-        JSON_ADD("%s{\"name\":\"%s\",\"up\":%d,\"bitrate\":%u,\"dbitrate\":%u,\"fd\":%d}",
+        JSON_ADD(json, off, "%s{\"name\":\"%s\",\"up\":%d,\"bitrate\":%u,\"dbitrate\":%u,\"fd\":%d}",
              off > 1 ? "," : "", name, up, bitrate, dbitrate, fd_mode);
         rtnl_link_put(link);
     }
     nl_socket_free(sk);
 
 done:
-    JSON_ADD("]");
+    JSON_ADD(json, off, "]");
     http_ok_json(fd, json, (size_t)off);
 }
 
@@ -121,13 +121,13 @@ void http_can_toggle(app_ctx_t *app, int fd, const char *body)
     nl_socket_free(sk);
 
     if (rc < 0) {
-        http_send_response(fd, 500, "Error", "text/plain", "link change failed", 19);
+        http_err(fd, 500, "Error", "link change failed");
         return;
     }
 
     char msg[64];
     snprintf(msg, sizeof(msg), "{\"result\":\"%s %s\"}", ifname, action);
-    http_send_response(fd, 200, "OK", "application/json", msg, strlen(msg));
+    http_ok_json(fd, msg, strlen(msg));
 }
 
 /* DBC 文件上传：POST /api/can/dbc?ifname=can0，body 为 DBC 文本内容 */
@@ -135,15 +135,15 @@ void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char 
 {
     (void)method;
     if (!app || !app->cfg || !app->can || !uri || !body) {
-        http_send_response(fd, 400, "Bad Request", "text/plain", "", 0);
+        http_err(fd, 400, "Bad Request", NULL);
         return;
     }
 
     /* 从 query string 解析目标通道名 */
     char ifname[32] = {0};
     const char *q = strchr(uri, '?');
-    if (!q || !url_get_param(q, "ifname=", ifname, sizeof(ifname)) || !ifname_valid(ifname)) {
-        http_send_response(fd, 400, "Bad Request", "text/plain", "bad ifname", 10);
+    if (!q || !http_form_get_param(q, "ifname=", ifname, sizeof(ifname)) || !ifname_valid(ifname)) {
+        http_err(fd, 400, "Bad Request", "bad ifname");
         return;
     }
 
@@ -152,7 +152,7 @@ void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char 
     for (int i = 0; i < can->count; i++)
         if (strcmp(can->ifaces[i].ifname, ifname) == 0) { idx = i; break; }
     if (idx < 0) {
-        http_send_response(fd, 404, "Not Found", "text/plain", "iface not found", 15);
+        http_err(fd, 404, "Not Found", "iface not found");
         return;
     }
 
@@ -165,16 +165,14 @@ void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char 
         cl = strtol(cl_hdr + 15, &end, 10);
         if (end == cl_hdr + 15 || cl < 0) cl = 0;
     }
-    const char *sep = strstr(body, "\r\n\r\n");
-    if (!sep) sep = strstr(body, "\n\n");
-    const char *content = sep ? sep + (sep[0] == '\r' ? 4 : 2) : body;
+    const char *content = http_body_start(body);
     /* 实际接收到的 body 长度（HTTP 层已把读取到的数据 NUL 结尾）。
        不盲信 Content-Length：即使客户端头声称值大于实际数据，也以实际长度为上限，
        避免 fwrite 读到未接收的缓冲区 */
     size_t real_len = strlen(content);
     long content_len = (cl > 0 && (unsigned long)cl <= real_len) ? cl : (long)real_len;
     if (content_len <= 0 || content_len > 256 * 1024) {
-        http_send_response(fd, 413, "Payload Too Large", "text/plain", "empty or too large", 19);
+        http_err(fd, 413, "Payload Too Large", "empty or too large");
         return;
     }
 
@@ -184,14 +182,14 @@ void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char 
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
     FILE *fp = fopen(tmp_path, "w");
     if (!fp) {
-        http_send_response(fd, 500, "Error", "text/plain", "cannot write file", 17);
+        http_err(fd, 500, "Error", "cannot write file");
         return;
     }
     size_t w = fwrite(content, 1, (size_t)content_len, fp);
     fclose(fp);
     if (w != (size_t)content_len) {
         remove(tmp_path);
-        http_send_response(fd, 500, "Error", "text/plain", "write failed", 12);
+        http_err(fd, 500, "Error", "write failed");
         return;
     }
 
@@ -204,14 +202,14 @@ void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char 
 
     if (rc < 0) {
         remove(tmp_path);   /* 解析失败：不残留临时文件 */
-        http_send_response(fd, 400, "Bad Request", "text/plain", "invalid dbc", 12);
+        http_err(fd, 400, "Bad Request", "invalid dbc");
         return;
     }
 
     /* 验证通过：替换为正式文件 */
     if (rename(tmp_path, path) != 0) {
         remove(tmp_path);
-        http_send_response(fd, 500, "Error", "text/plain", "cannot write file", 17);
+        http_err(fd, 500, "Error", "cannot write file");
         return;
     }
 
@@ -223,7 +221,7 @@ void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char 
     snprintf(msg, sizeof(msg),
              "{\"result\":\"ok\",\"ifname\":\"%s\",\"messages\":%d,\"signals\":%d}",
              ifname, msg_count, sig_count);
-    http_send_response(fd, 200, "OK", "application/json", msg, strlen(msg));
+    http_ok_json(fd, msg, strlen(msg));
 }
 
 /* ---- CAN 原始报文收发接口 ---- */
@@ -295,33 +293,33 @@ void http_can_rx(app_ctx_t *app, int fd)
     pthread_mutex_unlock(&g_can_rx_mutex);
 
     if ((size_t)off < sizeof(json) - 1) json[off++] = ']';
-    http_send_response(fd, 200, "OK", "application/json", json, (size_t)off);
+    http_ok_json(fd, json, (size_t)off);
 }
 
 /* 发送 CAN 报文：POST /api/can/send，body 形如 ifname=can0&id=0x123&data=01 02 03 */
 void http_can_send(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body)
 {
     (void)method; (void)uri;
-    if (!app || !body) { http_send_response(fd, 400, "Bad Request", "text/plain", "", 0); return; }
+    if (!app || !body) { http_err(fd, 400, "Bad Request", NULL); return; }
 
     char ifname[32] = {0}, idstr[32] = {0}, datastr[512] = {0};
-    url_get_param(body, "ifname=", ifname, sizeof(ifname));
-    url_get_param(body, "id=", idstr, sizeof(idstr));
-    url_get_param(body, "data=", datastr, sizeof(datastr));
+    http_form_get_param(body, "ifname=", ifname, sizeof(ifname));
+    http_form_get_param(body, "id=", idstr, sizeof(idstr));
+    http_form_get_param(body, "data=", datastr, sizeof(datastr));
 
     if (!ifname_valid(ifname)) {
-        http_send_response(fd, 400, "Bad Request", "text/plain", "bad ifname", 10);
+        http_err(fd, 400, "Bad Request", "bad ifname");
         return;
     }
     if (!idstr[0]) {
-        http_send_response(fd, 400, "Bad Request", "text/plain", "bad id", 6);
+        http_err(fd, 400, "Bad Request", "bad id");
         return;
     }
 
     char *end = NULL;
     unsigned long id = strtoul(idstr, &end, 0);   /* base=0：支持 0x 前缀十六进制与十进制 */
     if (!end || *end != '\0' || id > 0x1FFFFFFFUL) {
-        http_send_response(fd, 400, "Bad Request", "text/plain", "bad id", 6);
+        http_err(fd, 400, "Bad Request", "bad id");
         return;
     }
 
@@ -343,7 +341,7 @@ void http_can_send(app_ctx_t *app, int fd, const char *method, const char *uri, 
         }
     }
     if (len < 0 || hi >= 0) {   /* 非法字符 / 奇数个 hex 字符 / 超长 */
-        http_send_response(fd, 400, "Bad Request", "text/plain", "bad data", 8);
+        http_err(fd, 400, "Bad Request", "bad data");
         return;
     }
 
@@ -355,11 +353,11 @@ void http_can_send(app_ctx_t *app, int fd, const char *method, const char *uri, 
             if (strcmp(app->can->ifaces[i].ifname, ifname) == 0) { iface_idx = i; break; }
     }
     if (iface_idx < 0) {
-        http_send_response(fd, 404, "Not Found", "text/plain", "iface not found", 15);
+        http_err(fd, 404, "Not Found", "iface not found");
         return;
     }
     if (!app->can->ifaces[iface_idx].fd_mode && len > 8) {
-        http_send_response(fd, 400, "Bad Request", "text/plain", "classic CAN max 8 bytes", 23);
+        http_err(fd, 400, "Bad Request", "classic CAN max 8 bytes");
         return;
     }
 
@@ -372,13 +370,12 @@ void http_can_send(app_ctx_t *app, int fd, const char *method, const char *uri, 
 
     int rc = can_tx_frame(app, ifname, &frame);
     if (rc < 0) {
-        http_send_response(fd, 502, "Bad Gateway", "application/json",
-                           "{\"result\":\"error\"}", 17);
+        http_err(fd, 502, "Bad Gateway", NULL);
         return;
     }
 
     char msg[128];
     snprintf(msg, sizeof(msg), "{\"result\":\"%s\",\"bytes\":%d}",
              rc == 0 ? "queued" : "sent", rc);
-    http_send_response(fd, 200, "OK", "application/json", msg, strlen(msg));
+    http_ok_json(fd, msg, strlen(msg));
 }

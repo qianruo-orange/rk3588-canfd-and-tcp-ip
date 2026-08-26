@@ -43,7 +43,7 @@ void http_network_api(app_ctx_t *app, int fd)
 
     FILE *fp = fopen("/proc/net/dev", "r");
     if (!fp) {
-        JSON_ADD("\"%s\":{\"rx\":0,\"tx\":0},\"%s\":{\"rx\":0,\"tx\":0}}",
+        JSON_ADD(json, off, "\"%s\":{\"rx\":0,\"tx\":0},\"%s\":{\"rx\":0,\"tx\":0}}",
              ifaces[0], ifaces[1]);
         http_ok_json(fd, json, (size_t)off);
         return;
@@ -60,7 +60,7 @@ void http_network_api(app_ctx_t *app, int fd)
             for (int j = 0; j < 2; j++)
                 if (strcmp(ifname, ifaces[j]) == 0) { match = 1; break; }
             if (!match) continue;
-            JSON_ADD("%s\"%s\":{\"rx\":%lu,\"tx\":%lu}",
+            JSON_ADD(json, off, "%s\"%s\":{\"rx\":%lu,\"tx\":%lu}",
                  found > 0 ? "," : "", ifname, rx_bytes, tx_bytes);
             found++;
         }
@@ -70,11 +70,11 @@ void http_network_api(app_ctx_t *app, int fd)
     /* 补全缺失接口 */
     for (int i = 0, need = (found > 0); i < 2; i++) {
         if (strstr(json, ifaces[i])) continue;
-        JSON_ADD("%s\"%s\":{\"rx\":0,\"tx\":0}",
+        JSON_ADD(json, off, "%s\"%s\":{\"rx\":0,\"tx\":0}",
              need ? "," : "", ifaces[i]);
         need = 1;
     }
 
-    JSON_ADD("}");
+    JSON_ADD(json, off, "}");
     http_ok_json(fd, json, (size_t)off);
 }

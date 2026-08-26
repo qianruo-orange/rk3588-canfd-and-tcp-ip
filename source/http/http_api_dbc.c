@@ -66,16 +66,16 @@ static int http_dbc_recent_json(dbc_dir_t dir, char *out, size_t out_size)
     for (int i = 0; i < count; i++) {
         int pos = (total - 1 - i) % DECODE_RING_MAX;   /* 最新在前 */
         decode_entry_t *e = &g_decode_ring[d][pos];
-        int n = snprintf(out + off, out_size - (size_t)off,
+        int n = http_json_append(out, out_size, off,
                          "%s{\"ifname\":\"%s\",\"id\":\"0x%X\",\"name\":\"%s\",\"text\":\"%s\"}",
                          i > 0 ? "," : "", e->ifname, e->can_id, e->name, e->text);
-        if (n < 0 || (size_t)n >= out_size - (size_t)off) { off = (int)out_size - 1; break; }
-        off += n;
+        if (n < 0) { off = (int)out_size - 1; break; }
+        off = n;
     }
     pthread_mutex_unlock(&g_decode_mutex);
 
     if (off < (int)out_size - 1)
-        off += snprintf(out + off, out_size - (size_t)off, "]");
+        off = http_json_append(out, out_size, off, "]");
     return off;
 }
 
@@ -85,7 +85,7 @@ void http_can_decoded(app_ctx_t *app, int fd)
     char json[8192];
     int n = http_dbc_recent_json(DBC_DIR_RX, json, sizeof(json));
     if (n < 0) n = 0;
-    http_send_response(fd, 200, "OK", "application/json", json, (size_t)n);
+    http_ok_json(fd, json, (size_t)n);
 }
 
 void http_can_decoded_tx(app_ctx_t *app, int fd)
@@ -94,5 +94,5 @@ void http_can_decoded_tx(app_ctx_t *app, int fd)
     char json[8192];
     int n = http_dbc_recent_json(DBC_DIR_TX, json, sizeof(json));
     if (n < 0) n = 0;
-    http_send_response(fd, 200, "OK", "application/json", json, (size_t)n);
+    http_ok_json(fd, json, (size_t)n);
 }

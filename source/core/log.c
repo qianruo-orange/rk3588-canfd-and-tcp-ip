@@ -36,19 +36,29 @@ static void rotate_if_needed(const char *path)
     }
 }
 
-/* 每次写入前检查当前文件大小，超限即轮转（解决同一天内不轮转的问题） */
+/* 每次写入前检查：日志文件被外部删除（Web 端删除）后重建；超限即轮转
+   （解决同一天内不轮转的问题） */
 static void rotate_check(int is_error)
 {
     FILE **fpp = is_error ? &g_log.fp_error : &g_log.fp_info;
     if (!*fpp || *fpp == stderr) return;
-    struct stat st;
-    if (fstat(fileno(*fpp), &st) != 0 || st.st_size <= LOG_MAX_SIZE) return;
 
     char subdir[PATH_MAX], path[PATH_MAX], bak[PATH_MAX];
     snprintf(subdir, sizeof(subdir), "%s/%s", g_log.dir, g_log.date);
     /* 规范化命名：日期已体现在按天目录（logs/YYYYMMDD/） */
     snprintf(path, sizeof(path), "%s/%s_%s.log",
              subdir, APP_NAME, is_error ? "error" : "info");
+
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        /* 文件被 unlink（Web 端删除日志）：关闭旧句柄，重新创建文件 */
+        fclose(*fpp);
+        *fpp = fopen(path, "a");
+        if (!*fpp) *fpp = stderr;
+        return;
+    }
+    if (st.st_size <= LOG_MAX_SIZE) return;
+
     snprintf(bak, sizeof(bak), "%s.1", path);
     fclose(*fpp);
     rename(path, bak);

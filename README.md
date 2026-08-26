@@ -143,16 +143,22 @@ rk3588-canfd-and-tcp-ip/
 │   │   ├── common.h                  # 应用上下文与公共工具
 │   │   ├── config.h                  # 配置结构
 │   │   ├── log.h                     # 日志接口
+│   │   ├── ring.h                    # 无锁环形队列
+│   │   ├── epoll_util.h              # epoll 辅助工具
 │   │   └── version.h                 # 版本宏（CMake 生成）
 │   ├── can/
 │   │   ├── can_queue.h               # CAN 收发队列
 │   │   ├── can_socket.h              # SocketCAN 接口
 │   │   └── dbc_parser.h              # DBC 解析接口
 │   ├── tcp/
-│   │   └── tcp_server.h              # TCP 服务接口
+│   │   ├── tcp_server.h              # TCP 服务接口
+│   │   └── tcp_queue.h               # TCP 发送队列
 │   ├── http/
 │   │   ├── http.h                    # HTTP 服务接口
-│   │   └── http_internal.h           # HTTP 内部定义
+│   │   ├── http_internal.h           # HTTP 内部定义
+│   │   ├── http_util.h               # HTTP 表单/URL 解析工具
+│   │   ├── http_api_can.h            # CAN API 接口声明
+│   │   └── http_api_dbc.h            # DBC API 接口声明
 │   ├── video/
 │   │   ├── video_stream.h            # V4L2 视频流接口
 │   │   ├── video_rec.h               # 网络录像模块接口
@@ -176,16 +182,18 @@ rk3588-canfd-and-tcp-ip/
 │   │   ├── can_socket.c              # SocketCAN 收发
 │   │   └── dbc_parser.c              # DBC 解析实现
 │   ├── tcp/
-│   │   └── tcp_server.c              # TCP 服务实现
+│   │   ├── tcp_server.c              # TCP 服务实现
+│   │   └── tcp_queue.c               # TCP 发送队列实现
 │   ├── http/
 │   │   ├── http.c                    # HTTP 路由与静态文件
+│   │   ├── http_util.c               # HTTP 表单/URL 解析工具
 │   │   ├── http_api_can.c            # CAN 相关 API
 │   │   ├── http_api_dbc.c            # DBC 解码结果 API
 │   │   ├── http_api_config.c         # 配置 API
 │   │   ├── http_api_network.c        # 网络 API
 │   │   ├── http_api_system.c         # 系统 API
 │   │   ├── http_api_video.c          # 视频 API
-│   │   ├── http_api_rec.c            # 录像 API（start/stop/status/list/delete/下载）
+│   │   ├── http_api_rec.c            # 录像 API（start/stop/status/list/delete/pack/下载）
 │   │   ├── http_logs.c               # 日志查看
 │   │   └── http_reboot.c             # 重启 / 关机
 │   ├── video/
@@ -200,19 +208,20 @@ rk3588-canfd-and-tcp-ip/
 │   └── watchdog/
 │       └── watchdog.c                # 看门狗实现
 ├── html/                             # Web 前端
-│   ├── index.html                    # 监控页
+│   ├── index.html                    # 监控页（CAN/TCP 数据网关仪表盘）
 │   ├── config.html                   # 配置页
 │   ├── dbc.html                      # DBC 解析页
-│   ├── logs.html                     # 日志页
+│   ├── logs.html                     # 文件下载页（日志 / 录像双 TAB）
 │   ├── css/
 │   │   ├── common.css                # 全局共享样式
 │   │   ├── config.css                # 配置页样式
-│   │   ├── logs.css                  # 日志页样式
+│   │   ├── logs.css                  # 文件下载页样式
 │   │   └── monitor.css               # 监控页样式
 │   └── js/
+│       ├── theme.js                  # 主题切换
 │       ├── config.js                 # 配置页脚本
 │       ├── dbc.js                    # DBC 页脚本
-│       ├── logs.js                   # 日志页脚本
+│       ├── logs.js                   # 文件下载页脚本（日志 / 录像）
 │       └── monitor.js                # 监控页脚本
 ├── config/                           # 运行时配置
 │   ├── config.txt                    # 主配置
@@ -318,6 +327,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | `can_dbitrate` | `<name> <bps>` | FD 数据比特率，默认 2000000 |
 | `can_fd` | `<name> on\|off` | CAN FD 开关 |
 | `can_up` | `<name> on\|off` | 启动时 bring up |
+| `can_filter` | `<name> <id> <mask>` | 按 CAN 通道设置接收过滤器（16 进制 id / mask，可重复添加） |
 | `tcp_port` | `<port>` | TCP 端口，默认 6666 |
 | `max_clients` | `<n>` | 最大客户端数，默认 16 |
 | `tcp_bind` | `<ifname>` | TCP 监听绑定网卡名，留空表示绑定所有网卡（`INADDR_ANY`） |
@@ -350,7 +360,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 - `/`：仪表盘
 - `/dbc`：DBC 信号解析
 - `/config`：运行配置
-- `/logs`：日志管理
+- `/logs`：文件下载（日志 / 录像双 TAB）
 
 ### REST API
 
@@ -358,6 +368,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | --- | --- | --- | --- |
 | GET | `/api/system` | 无 | 系统监控数据 |
 | GET | `/api/can` | 无 | CAN 接口状态 |
+| GET | `/api/can/ifaces` | 无 | 系统 CAN 接口枚举（含 FD 能力） |
 | GET | `/api/can/decoded` | 无 | 接收方向 DBC 解析后的最近 CAN 信号（JSON） |
 | GET | `/api/can/decoded/tx` | 无 | 发送方向 DBC 解析后的最近 CAN 信号（JSON） |
 | GET | `/api/can/frames` | 无 | 最近接收的原始 CAN 帧 |
@@ -366,6 +377,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | POST | `/api/can/toggle` | root | 切换 CAN 接口开关 |
 | GET/POST | `/api/config` | root | 读取 / 写入配置 |
 | GET | `/api/network` | 无 | 网络统计 |
+| GET | `/api/network/ifaces` | 无 | 网络接口信息 |
 | GET | `/api/video/devices` | 无 | 摄像头设备列表 |
 | GET | `/api/video/caps` | 无 | 视频参数列表 |
 | GET | `/video/mjpeg` | 无 | MJPEG 视频流 |
@@ -378,8 +390,9 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | GET | `/recfile/<日期/文件名>` | root | 下载录像文件 |
 | GET | `/api/rec/pack` | root | 打包下载全部录像（tar.gz，上限 2GB） |
 | GET | `/api/logs`、`/logs`、`/logfile/*` | root | 日志列表 / 下载 / 删除 |
+| GET | `/logs/pack` | root | 打包下载全部日志（tar.gz） |
 
-> 监控页与 DBC 页需要普通用户认证；配置页与写操作接口要求 root 权限。
+> 认证说明：监控页（`/`）与 DBC 页（`/dbc`）需要普通用户认证；配置页（`/config`）、文件下载页（`/logs`）与所有写操作接口要求 root 权限。
 
 ## AI 目标检测
 
@@ -412,12 +425,13 @@ RKNN + YOLO26 三输出模式（YOLOv8 风格 P3/P4/P5 检测头），由 `rknn-
 
 ## 日志管理
 
-日志按级别与日期归档，单文件超过 10MB 自动轮转。
+日志按级别与日期归档，按天分目录（日期已体现在目录名，文件名不再重复日期），单文件超过 10MB 自动轮转。
 
 ```text
 logs/
-├── rk3588-canfd-and-tcp-ip_info_YYYYMMDD.log
-└── rk3588-canfd-and-tcp-ip_error_YYYYMMDD.log
+└── YYYYMMDD/
+    ├── rk3588-canfd-and-tcp-ip_info.log
+    └── rk3588-canfd-and-tcp-ip_error.log
 ```
 
 ## 清理说明

@@ -231,13 +231,22 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         tcp->max_clients = mc;
     }
 
+    int vid_changed = 0;
     v = http_form_find(fields, count, "video_device");
-    int vid_changed = (v != NULL);
-    if (v) safe_strncpy(cfg->video_device, sizeof(cfg->video_device), v);
+    if (v && strcmp(v, cfg->video_device) != 0) {
+        vid_changed = 1;
+        safe_strncpy(cfg->video_device, sizeof(cfg->video_device), v);
+    }
     v = http_form_find(fields, count, "video_width");
-    if (v) { vid_changed = 1; cfg->video_width = parse_int_clamped(v, 1, 4096, cfg->video_width > 0 ? cfg->video_width : 640); }
+    if (v) {
+        int nw = parse_int_clamped(v, 1, 4096, cfg->video_width > 0 ? cfg->video_width : 640);
+        if (nw != cfg->video_width) { vid_changed = 1; cfg->video_width = nw; }
+    }
     v = http_form_find(fields, count, "video_height");
-    if (v) { vid_changed = 1; cfg->video_height = parse_int_clamped(v, 1, 4096, cfg->video_height > 0 ? cfg->video_height : 480); }
+    if (v) {
+        int nh = parse_int_clamped(v, 1, 4096, cfg->video_height > 0 ? cfg->video_height : 480);
+        if (nh != cfg->video_height) { vid_changed = 1; cfg->video_height = nh; }
+    }
 
     LOG_INFO("config: applied to runtime, saving to file");
     config_save(app);

@@ -154,9 +154,10 @@ static void yuyv_to_nv12(const unsigned char *src, int w, int h,
 }
 
 /* 把一帧（JPEG / YUYV）转为 NV12；成功返回 0，*nv12 为 malloc（调用方 free），
-   输出实际宽高。 */
+   输出实际宽高（JPEG 以解码尺寸为准；YUYV 即输入 w/h）。 */
 static int rec_to_nv12(const unsigned char *data, size_t len, int fmt,
-                       int w, int h, unsigned char **nv12, size_t *nv12_len)
+                       int w, int h, unsigned char **nv12, size_t *nv12_len,
+                       int *out_w, int *out_h)
 {
     if (fmt == VIDEO_FMT_MJPEG) {
         unsigned char *rgb = NULL;
@@ -169,6 +170,8 @@ static int rec_to_nv12(const unsigned char *data, size_t len, int fmt,
         free(rgb);
         *nv12 = out;
         *nv12_len = (size_t)rw * rh * 3 / 2;
+        if (out_w) *out_w = rw;
+        if (out_h) *out_h = rh;
         return 0;
     }
     /* YUYV */
@@ -177,6 +180,8 @@ static int rec_to_nv12(const unsigned char *data, size_t len, int fmt,
     yuyv_to_nv12(data, w, h, out);
     *nv12 = out;
     *nv12_len = (size_t)w * h * 3 / 2;
+    if (out_w) *out_w = w;
+    if (out_h) *out_h = h;
     return 0;
 }
 
@@ -217,6 +222,7 @@ void *video_rec_task(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;
     int auto_rec = 1;                    /* 默认自动开启录制 */
+    int init_fail_cnt = 0;               /* 编码器连续初始化失败计数（日志退避） */
 
     while (app->running) {
         watchdog_feed_self("rec");
@@ -267,13 +273,17 @@ void *video_rec_task(void *arg)
             if (bitrate > 16000000) bitrate = 16000000;
             h264_encoder_t *enc = h264_encoder_create(pw, ph, fps, bitrate);
             if (!enc) {
+                init_fail_cnt++;
                 pthread_mutex_lock(&g_rec.lock);
                 g_rec.start_fail = 2;   /* 编码器不可用 */
                 pthread_mutex_unlock(&g_rec.lock);
-                LOG_ERROR("rec: h264 encoder init failed (%dx%d)", pw, ph);
-                usleep(200000);
+                /* 日志退避：首次与每 25 次失败打一条，避免设备不可用时刷屏 */
+                if (init_fail_cnt == 1 || init_fail_cnt % 25 == 0)
+                    LOG_ERROR("rec: h264 encoder init failed (%dx%d), retrying...", pw, ph);
+                usleep(500000);
                 continue;
             }
+            init_fail_cnt = 0;
 
             /* 按天分目录：recordings/YYYYMMDD */
             time_t t = time(NULL);
@@ -325,8 +335,16 @@ void *video_rec_task(void *arg)
                 unsigned char *jpeg = NULL; size_t jlen = 0;
                 int fw = 0, fh = 0, took = -1;
                 if (rec_take_ai_frame(&jpeg, &jlen) == 0) {
+                    int aw = 0, ah = 0;
                     if (rec_to_nv12(jpeg, jlen, VIDEO_FMT_MJPEG, pw, ph,
-                                    &nv12, &nlen) == 0) took = 0;
+                                    &nv12, &nlen, &aw, &ah) == 0) {
+                        if (aw == pw && ah == ph) {
+                            took = 0;
+                        } else {   /* AI 帧分辨率与编码器不符：丢弃，走原始帧 */
+                            free(nv12);
+                            nv12 = NULL;
+                        }
+                    }
                     free(jpeg);
                 }
                 if (took < 0) {
@@ -336,7 +354,8 @@ void *video_rec_task(void *arg)
                         seq != g_raw_seq) {
                         g_raw_seq = seq;
                         if (fw == pw && fh == ph &&
-                            rec_to_nv12(raw, raw_len, fmt, fw, fh, &nv12, &nlen) == 0)
+                            rec_to_nv12(raw, raw_len, fmt, fw, fh,
+                                        &nv12, &nlen, NULL, NULL) == 0)
                             took = 0;
                     }
                     if (raw) free(raw);

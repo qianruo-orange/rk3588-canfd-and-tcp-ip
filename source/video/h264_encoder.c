@@ -143,9 +143,18 @@ h264_encoder_t *h264_encoder_create(int w, int h, int fps, int bitrate_bps)
     }
 
     struct v4l2_capability cap;
-    if (ioctl(e->fd, VIDIOC_QUERYCAP, &cap) < 0 ||
-        !(cap.capabilities & V4L2_CAP_VIDEO_M2M_MPLANE)) {
-        LOG_ERROR("h264: %s not M2M MPLANE", ENC_DEV);
+    if (ioctl(e->fd, VIDIOC_QUERYCAP, &cap) < 0) {
+        LOG_ERROR("h264: QUERYCAP failed: %s", strerror(errno));
+        goto fail;
+    }
+    /* Rockchip 编码器固件差异：有的只在 device_caps 报 M2M，有的仅报 M2M 不带 MPLANE，
+       统一按 device_caps 优先，并放宽容忍输出/捕获 MPLANE 组合 */
+    uint32_t caps = (cap.capabilities & V4L2_CAP_DEVICE_CAPS)
+                        ? cap.device_caps : cap.capabilities;
+    if (!(caps & (V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_VIDEO_M2M |
+                  V4L2_CAP_VIDEO_OUTPUT_MPLANE | V4L2_CAP_VIDEO_CAPTURE_MPLANE))) {
+        LOG_ERROR("h264: %s not M2M (caps=0x%x device_caps=0x%x)",
+                  ENC_DEV, cap.capabilities, cap.device_caps);
         goto fail;
     }
 
@@ -222,11 +231,12 @@ void h264_encoder_destroy(h264_encoder_t *e)
     free(e);
 }
 
-/* 逐行拷贝 NV12 到 output 缓冲（bytesperline 可能大于宽度，逐行复制最稳） */
-static void nv12_copy(h264_encoder_t *e, const unsigned char *nv12)
+/* 逐行拷贝 NV12 到 output 缓冲（bytesperline 可能大于宽度，逐行复制最稳）。
+   @idx 为 VIDIOC_DQBUF 归还的缓冲索引：必须写回该缓冲，不能固定 [0]。 */
+static void nv12_copy(h264_encoder_t *e, const unsigned char *nv12, int idx)
 {
     int w = e->w, h = e->h;
-    unsigned char *dst = e->buf_in[0];
+    unsigned char *dst = e->buf_in[idx];
     for (int y = 0; y < h; y++) {
         memcpy(dst + (size_t)y * w, nv12 + (size_t)y * w, (size_t)w);
     }
@@ -280,7 +290,7 @@ int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
         LOG_ERROR("h264: DQBUF out failed: %s", strerror(errno));
         return -1;
     }
-    nv12_copy(e, nv12);
+    nv12_copy(e, nv12, (int)ob.index);
     op.bytesused = (uint32_t)((size_t)e->w * e->h * 3 / 2);
     if (ioctl(e->fd, VIDIOC_QBUF, &ob) < 0) {
         LOG_ERROR("h264: QBUF out failed: %s", strerror(errno));
@@ -309,32 +319,40 @@ int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
             LOG_ERROR("h264: DQBUF cap failed: %s", strerror(errno));
             return -1;
         }
-        /* 归还 capture 缓冲 */
-        ioctl(e->fd, VIDIOC_QBUF, &cb);
 
+        /* 先扫描/拷贝再归还缓冲：归还后驱动可能立即填充覆盖 */
         unsigned char *data = e->buf_out[cb.index];
         size_t len = (size_t)cp.bytesused;
 
         int kf = 0;
         h264_scan(e, data, len, &kf);
-        if (!kf && len >= 4) {
-            /* 无 IDR：仅 SPS/PPS 配置帧，丢弃并继续等 VCL 帧 */
+        if (!kf) {
+            /* 无 IDR：可能是纯 SPS/PPS 配置帧（无 VCL），丢弃并继续等 VCL 帧；
+               含非 IDR slice（type 1）的帧要接受，但不算关键帧 */
+            int has_vcl = 0;
             long pos = nal_find(data, len, 0);
             while (pos >= 0 && (size_t)pos < len) {
                 unsigned char t = data[pos] & 0x1F;
-                if (t == 1 || t == 5) { kf = 1; break; }
+                if (t == 5) { kf = 1; has_vcl = 1; break; }
+                if (t == 1) has_vcl = 1;
                 long next = nal_find(data, len, pos + 1);
+                if (next <= pos) break;
                 pos = next;
             }
-            if (!kf) {
-                /* 纯配置帧：丢弃，等下一轮 */
+            if (!has_vcl) {
+                ioctl(e->fd, VIDIOC_QBUF, &cb);   /* 纯配置帧：归还后丢弃 */
                 continue;
             }
         }
 
         unsigned char *copy = malloc(len);
-        if (!copy) { LOG_ERROR("h264: out alloc failed"); return -1; }
+        if (!copy) {
+            ioctl(e->fd, VIDIOC_QBUF, &cb);
+            LOG_ERROR("h264: out alloc failed");
+            return -1;
+        }
         memcpy(copy, data, len);
+        ioctl(e->fd, VIDIOC_QBUF, &cb);   /* 拷贝完成后再归还 */
         *out = copy;
         *out_len = len;
         if (keyframe) *keyframe = kf;

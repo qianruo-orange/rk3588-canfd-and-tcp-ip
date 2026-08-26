@@ -279,39 +279,54 @@
   }
   window.loadCfg = loadCfg;
 
-  document.getElementById('f').addEventListener('submit', async function(e) {
-    e.preventDefault();
-    collectCan();
-
-    var d = {};
-    for (var i = 0; i < canNames.length; i++) {
-      var name = canNames[i];
-      var f = cansCfg[name] || {bitrate: '', fd: 'off', dbitrate: '', up: 'off', filters: []};
-      d['ifname' + i] = name;
-      d['bitrate' + i] = f.bitrate;
-      d['fd' + i] = f.fd;
-      d['dbitrate' + i] = f.dbitrate;
-      d['up' + i] = f.up;
-      var filters = f.filters || [];
-      for (var k = 0; k < filters.length; k++) {
-        d['filter_id_' + i + '_' + k] = filters[k].id;
-        d['filter_mask_' + i + '_' + k] = filters[k].mask;
-      }
-    }
-
-    d['tcp_port'] = document.getElementById('tp').value;
-    d['max_clients'] = document.getElementById('mc').value;
-    d['tcp_bind'] = document.getElementById('bind').value;
-    d['video_device'] = document.getElementById('vd').value;
-    d['video_width'] = document.getElementById('vw').value;
-    d['video_height'] = document.getElementById('vh').value;
-
+  /* 提交一个模块的配置（target 指定模块，后端只应用该模块并重启对应模块） */
+  async function postConfig(d) {
     try {
       var r = await fetch('/api/config', {method: 'POST', body: new URLSearchParams(d)});
-      show(r.ok ? 'ok' : 'err', r.ok ? '✓ 已保存，立即生效' : '失败(' + r.status + ')');
+      show(r.ok ? 'ok' : 'err', r.ok ? '✓ 已保存，模块已重启生效' : '失败(' + r.status + ')');
       if (r.ok) setTimeout(function() { document.getElementById('msg').className = ''; }, 3000);
     } catch(e) { show('err', '请求失败'); }
-  });
+  }
+
+  /* 保存当前 CAN 通道配置并重新配置该通道 */
+  window.saveCan = async function() {
+    collectCan();
+    var name = canNames[curCan];
+    if (!name) { show('err', '无可用 CAN 接口'); return; }
+    var f = cansCfg[name] || {};
+    var d = {target: 'can'};
+    d['ifname' + curCan] = name;
+    d['bitrate' + curCan] = f.bitrate;
+    d['fd' + curCan] = f.fd;
+    d['dbitrate' + curCan] = f.dbitrate;
+    d['up' + curCan] = f.up;
+    var filters = f.filters || [];
+    for (var k = 0; k < filters.length; k++) {
+      d['filter_id_' + curCan + '_' + k] = filters[k].id;
+      d['filter_mask_' + curCan + '_' + k] = filters[k].mask;
+    }
+    await postConfig(d);
+  };
+
+  /* 保存网络配置并重启 TCP 监听 */
+  window.saveNet = async function() {
+    await postConfig({
+      target: 'net',
+      tcp_port: document.getElementById('tp').value,
+      max_clients: document.getElementById('mc').value,
+      tcp_bind: document.getElementById('bind').value
+    });
+  };
+
+  /* 保存视频配置并重启视频流 */
+  window.saveVideo = async function() {
+    await postConfig({
+      target: 'video',
+      video_device: document.getElementById('vd').value,
+      video_width: document.getElementById('vw').value,
+      video_height: document.getElementById('vh').value
+    });
+  };
 
   window.reboot = async function() {
     if (!confirm('确定要重启设备吗？')) return;

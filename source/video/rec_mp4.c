@@ -153,8 +153,8 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
     uint32_t N = n, K = n_key;
 
     /* 子盒尺寸（全部动态推导） */
-    uint32_t avcC_size = 18u + s->sps_len + s->pps_len;        /* 8+7+3+sps+pps */
-    uint32_t avc1_size = 86u + avcC_size;                      /* 8+78+avcC */
+    uint32_t avcC_size = 19u + s->sps_len + s->pps_len;        /* 8+6+2+sps+1+2+pps */
+    uint32_t avc1_size = 86u + avcC_size;                      /* 8 hdr + 78 body + avcC 盒 */
     uint32_t stsd_size = 16u + avc1_size;                      /* 8+8+entry */
     uint32_t stss_size = 16u + 4u * K;
     uint32_t stts_size = 24u;
@@ -256,7 +256,8 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
     be32(fp, 0);
     be32(fp, 1);                    /* entry_count */
     box_hdr(fp, avc1_size, "avc1");
-    be32(fp, 0); be16(fp, 1);       /* reserved 6 + data_reference_index */
+    be32(fp, 0); be16(fp, 0);       /* reserved 6 */
+    be16(fp, 1);                    /* data_reference_index */
     be16(fp, 0); be16(fp, 0);       /* pre_defined + reserved */
     be32(fp, 0); be32(fp, 0); be32(fp, 0);   /* pre_defined 12 */
     be16(fp, (uint16_t)s->w);

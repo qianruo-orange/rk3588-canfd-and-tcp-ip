@@ -10,7 +10,7 @@
 - Web 管理界面：数据监控、配置修改、日志查看与重启 / 关机控制
 - 视频流服务：通过 V4L2 接入摄像头并输出 MJPEG 视频流
 - AI 目标检测：RKNN + YOLO26 三输出模式，多线程推理池并行加速，检测结果实时画框推流
-- 网络录像：默认自动开启录屏（按天分目录 `recordings/YYYYMMDD/`，AI 画框帧优先），封装为 MP4(MJPEG) 文件，分辨率取自摄像头配置；下载界面与日志合并为「文件下载」页（/logs 双 TAB），支持下载、删除、打包下载
+- 网络录像：默认自动开启录屏（按天分目录 `recordings/YYYYMMDD/`，AI 画框帧优先），RK3588 硬件编码为 H.264 并封装 MP4(avc1) 文件，分辨率取自摄像头配置；下载界面与日志合并为「文件下载」页（/logs 双 TAB），支持下载、删除、打包下载
 - systemd 看门狗：监控关键线程心跳，防止异常卡死
 - 热更新配置：Web 页面修改后立即生效
 - 运行维护：日志按日期与大小自动轮转（按天分目录、文件名不含重复日期）、清理脚本、部署脚本
@@ -27,7 +27,7 @@
         ├─► http_task     ──► Web 管理 + REST API + MJPEG 推流
         ├─► video_task    ──► V4L2 采集
         ├─► ai_task       ──► 采样帧 → 投递推理队列（多线程池并行推理）→ 画框帧快照
-        ├─► rec_task      ──► 网络录像（AI 画框帧优先，回退原始帧）→ MP4(MJPEG)
+        ├─► rec_task      ──► 网络录像（AI 画框帧优先，回退原始帧）→ H.264 硬件编码 → MP4(avc1)
         └─► watchdog_task ──► 心跳监控 + sd_notify
 ```
 
@@ -40,7 +40,7 @@
 | `http` | HTTP 管理服务主循环、REST API、MJPEG 推流 |
 | `video` | V4L2 MJPEG 采集与帧发布 |
 | `ai` | 帧采样、推理任务投递；模型加载与多线程推理池（每线程独立 rknn context） |
-| `rec` | 网络录像：AI 画框帧优先（回退原始帧）→ MP4(MJPEG) 封装落盘 |
+| `rec` | 网络录像：AI 画框帧优先（回退原始帧）→ H.264 硬件编码 → MP4(avc1) 封装落盘 |
 | `watchdog` | 线程心跳监控与 `sd_notify` |
 
 > 注：`signal` 模块仅注册信号处理（`init`），`task` 为空，不创建线程。
@@ -55,12 +55,12 @@ V4L2 摄像头（MJPEG / YUYV）
         ├► http 线程逐连接推流 ─► /video/mjpeg（原始帧，多部分 MJPEG）
         ├► ai_task 采样 ─► 推理队列 ─► worker×N 并行推理（RKNN）─► 画框帧快照（JPEG）
         │       └► http 线程逐连接推流 ─► /video/mjpeg_ai（AI 不可用回退原始帧）
-        └► rec_task 每 20ms 快照 ─► MP4(MJPEG) 封装 ─► recordings/YYYYMMDD/rec_HHMMSS.mp4
+        └► rec_task 每 20ms 快照 ─► NV12 转换 → H.264 硬件编码（rkvenc）─► MP4(avc1) 封装 ─► recordings/YYYYMMDD/rec_HHMMSS.mp4
 ```
 
 - 采集：`video_task` 通过 V4L2 打开摄像头，优先 MJPEG 格式，失败回退 YUYV；分辨率取自配置 `video_width` / `video_height`
 - 推流：每个 `/video/mjpeg*` 连接一个独立线程，multipart/x-mixed-replace 持续推送 JPEG 帧，慢客户端不阻塞其他连接
-- 录像：`rec_task` 默认自动开启，AI 画框帧优先，无 AI 帧回退原始帧（MJPEG 直用 / YUYV→RGB→JPEG），按天分目录落盘
+- 录像：`rec_task` 默认自动开启，AI 画框帧优先，无 AI 帧回退原始帧（JPEG 解码或 YUYV 直转 NV12），按天分目录落盘；帧率开录前实测（不写死），H.264 码率按 `宽×高×2` 动态计算
 
 视频数据提取接口：
 
@@ -94,7 +94,7 @@ CAN 数据注入接口（写数据到总线）：
 | `POST /api/can/send` | 注入一帧 CAN/CAN FD 报文（body：`ifname=can0&id=0x123&data=01 02 03`，支持 0x 前缀、空格/逗号/连字符分隔） |
 | `POST /api/can/toggle` | 控制接口 up / down（body：`ifname=can0&action=up`） |
 | `POST /api/can/dbc` | 上传 DBC 数据库（`?ifname=can0`，body 为 DBC 文本，校验通过后热加载并落盘） |
-| `POST /api/config` | 写入配置（CAN 接口 / 波特率 / FD 模式等，重启生效或热更新） |
+| `POST /api/config` | 写入配置（body 带 `target` 指定模块：`can` / `net` / `video`，只应用该模块参数并重启对应模块；缺省为全量） |
 
 CAN 数据提取接口（从总线读数据）：
 
@@ -162,7 +162,8 @@ rk3588-canfd-and-tcp-ip/
 │   ├── video/
 │   │   ├── video_stream.h            # V4L2 视频流接口
 │   │   ├── video_rec.h               # 网络录像模块接口
-│   │   └── rec_mp4.h                 # MP4(MJPEG) 封装器接口（纯封装，可独立测试）
+│   │   ├── h264_encoder.h            # RK3588 硬件 H.264 编码器封装接口（V4L2 M2M rkvenc）
+│   │   └── rec_mp4.h                 # MP4(avc1) 封装器接口（纯封装，可独立测试）
 │   ├── ai/
 │   │   ├── rknn_yolo.h               # RKNN YOLO 框架入口
 │   │   ├── yolo_types.h              # 检测结果结构定义
@@ -198,8 +199,9 @@ rk3588-canfd-and-tcp-ip/
 │   │   └── http_reboot.c             # 重启 / 关机
 │   ├── video/
 │   │   ├── video_stream.c            # V4L2 视频流实现
-│   │   ├── video_rec.c               # 网络录像模块实现（录制线程 + 帧获取）
-│   │   └── rec_mp4.c                 # MP4(MJPEG) 封装器实现
+│   │   ├── video_rec.c               # 网络录像模块实现（录制线程 + 帧获取 + NV12 转换）
+│   │   ├── h264_encoder.c            # H.264 硬件编码器实现（V4L2 M2M MPLANE，NV12→H.264）
+│   │   └── rec_mp4.c                 # MP4(avc1) 封装器实现
 │   ├── ai/
 │   │   ├── rknn_yolo.c               # 模型加载 + 多线程推理池 + 帧快照
 │   │   ├── yolo_image.c              # 图像处理实现（libjpeg / 格式转换 / 缩放）
@@ -246,7 +248,8 @@ rk3588-canfd-and-tcp-ip/
 - libnl-3
 - libnl-route-3
 - librknnrt（板载 RKNN 运行时，模型由 rknn-toolkit2 在 PC 上转换）
-- libjpeg（JPEG 编解码，AI 画框与录像回退转码用）
+- libjpeg（JPEG 解码与 AI 画框用）
+- RK3588 硬件编码器 `/dev/video-enc0`（rkvenc，Linux V4L2 M2M 驱动，录像 H.264 编码用）
 - Linux SocketCAN 支持
 
 安装示例：
@@ -405,13 +408,14 @@ RKNN + YOLO26 三输出模式（YOLOv8 风格 P3/P4/P5 检测头），由 `rknn-
 
 ## 网络录像
 
-服务启动后默认自动录制，无硬件编码器依赖：
+服务启动后默认自动录制，依赖 RK3588 硬件 H.264 编码器（`/dev/video-enc0`，rkvenc）：
 
 - 触发方式：默认自动开启（无需 Web 操作）；也保留 `/api/rec/start` / `/api/rec/stop` 手动接口（手动停止后不再自动续录）
 - 按天分目录：录制文件存于 `recordings/YYYYMMDD/`，每天一个子目录，自动跨天切换；文件名规范化只保留时间（`rec_HHMMSS.mp4`，同秒冲突自动追加序号），日志文件同理为 `rk3588-canfd-and-tcp-ip_info.log` / `_error.log`
 - 分辨率：录制分辨率取摄像头配置 `video_width` / `video_height` 的选定值（任意分辨率），未配置时退回首帧探测
-- 帧来源：AI 画框帧优先（保留检测框），无 AI 帧时回退原始帧（MJPEG 直用 / YUYV 转 JPEG）
-- 封装格式：标准 ISO BMFF MP4（MJPEG track），`ftyp + mdat + moov`，moov 末尾回写记录每帧偏移与时长，VLC / ffplay / 浏览器均可播放
+- 帧率：开录前连续抓帧实测（不写死），钳制在 1~120 fps
+- 编码链路：帧 → 转 NV12（AI 画框帧 JPEG 解码 / 原始 YUYV 直转）→ `/dev/video-enc0` 硬件编码 H.264（CBR，码率 `宽×高×2`，钳制 300k~16M，GOP = fps×2）→ 封装
+- 封装格式：标准 ISO BMFF MP4（avc1 track，SPS/PPS 取自编码器，stss 记录 IDR 关键帧），`ftyp + mdat + moov`，moov 末尾回写记录每帧偏移与时长，Chrome / VLC / ffplay 均可播放
 - 下载管理：与日志下载界面合并为「文件下载」页（`/logs`），TAB 切换日志 / 录像列表，支持下载、删除、打包下载（日志 `/logs/pack`、录像 `/api/rec/pack`，录像打包上限 2GB；文件名白名单 + 两段式路径校验防穿越）
 - 上限保护：单次录制帧数与 mdat 体积上限（防止 32 位 size 溢出），达到上限自动收尾并续录下一段
 

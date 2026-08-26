@@ -8,7 +8,7 @@
 
 <form id="f">
 <div class="can-grid">
-<div class="card" id="card_can"><h3><select id="canSel" onchange="onCanSel()"></select> <span id="st"></span> <label class="toggle"><input type="checkbox" id="tg" onchange="toggleCan(this.checked)"><span class="slider"></span></label></h3>
+<div class="card" id="card_can"><h3><select id="canSel" onchange="onCanSel()"></select> <span id="st"></span> <label class="toggle"><input type="checkbox" id="tg" onchange="toggleCan(this.checked)"><span class="slider"></span></label><button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveCan()">💾 保存</button></h3>
 <div id="cfg">
 <div class="cfg-grid">
 <div class="row"><label>波特率</label><input name="br" id="br" type="number"><span class="unit">bps</span></div>
@@ -22,19 +22,18 @@
 <div class="row"><label>DBC 文件</label><input type="file" id="dbc" accept=".dbc" style="flex:1"><button type="button" class="add-btn" onclick="uploadDbc()">上传</button></div>
 </div><div class="hint" id="hint">接口已关闭，开启后可配置</div></div>
 
-<div class="card" id="card_net"><h3>网络</h3>
+<div class="card" id="card_net"><h3>网络 <button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveNet()">💾 保存</button></h3>
 <div class="row"><label>绑定网卡</label><select name="bind" id="bind"><option value="">-- 加载中 --</option></select></div>
 <div class="row"><label>TCP端口</label><input name="tp" id="tp" type="number"></div>
 <div class="row"><label>最大客户端数</label><input name="mc" id="mc" type="number"></div>
 </div>
 
-<div class="card" id="card_video"><h3>视频</h3>
+<div class="card" id="card_video"><h3>视频 <button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveVideo()">💾 保存</button></h3>
 <div class="row"><label>设备</label><select name="vd" id="vd" onchange="queryCaps()"><option value="">-- 扫描中 --</option></select></div>
 <div class="row"><label>格式 / 分辨率</label><select name="vr" id="vr" onchange="onResChange()"><option value="">-- 请选择设备 --</option></select></div>
 <input type="hidden" id="vw"><input type="hidden" id="vh">
 </div>
 </div>
-<button type="submit" class="btn btn-save">💾 保存</button>
 <button type="button" class="btn btn-back" onclick="loadCfg()">🔄 查询</button>
 <div id="msg"></div>
 </form>

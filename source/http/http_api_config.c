@@ -49,28 +49,12 @@ void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri
 /* 表单字段容量：8 接口 × 5 基础项 + 8×16 过滤器 × 2 + 6 全局项 = 302，留余量 */
 #define MAX_FORM_FIELDS 320
 
-void http_config_post(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body)
+/* -- 各模块配置应用（按 target 独立触发，只处理本模块字段） -- */
+
+/* CAN：解析并应用接口参数（含重新 configure/open），失败保持旧 socket 继续工作 */
+static void apply_can(app_ctx_t *app, const http_form_field_t *fields, int count)
 {
-    (void)method; (void)uri;
-    if (!body || !app || !app->cfg || !app->can || !app->tcp) {
-        http_err(fd, 400, "Bad Request", NULL);
-        return;
-    }
-
-    /* 整个配置应用过程加锁：串行化并发 POST，并与 CAN 重连互斥 */
-    pthread_mutex_lock(&app->can_mutex);
-
-    /* 解析 URL 编码表单（公共实现，自动跳过 HTTP 头） */
-    http_form_field_t fields[MAX_FORM_FIELDS];
-    int count = http_form_parse(body, fields, MAX_FORM_FIELDS);
-    if (count == MAX_FORM_FIELDS)
-        LOG_ERROR("config POST: fields exceed %d, tail ignored", MAX_FORM_FIELDS);
-
-    struct app_config_t *cfg = app->cfg;
     can_ctx_t *can = app->can;
-    tcp_ctx_t *tcp = app->tcp;
-
-    LOG_INFO("config POST: parsed %d fields", count);
 
     for (int i = 0; i < CAN_MAX_IFACES; i++) {
         char kn[32];
@@ -186,8 +170,13 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
                  iface->fd_mode ? "on" : "off",
                  iface->up ? "on" : "off");
     }
+}
 
-    /* -- 应用 TCP 监听配置（端口 / 绑定网卡） -- */
+/* 网络：TCP 监听端口 / 绑定网卡（变化才重建监听）；max_clients 直接生效 */
+static void apply_net(app_ctx_t *app, const http_form_field_t *fields, int count)
+{
+    tcp_ctx_t *tcp = app->tcp;
+
     const char *pv = http_form_find(fields, count, "tcp_port");
     const char *bv = http_form_find(fields, count, "tcp_bind");
 
@@ -230,29 +219,71 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         if (mc > TCP_MAX_CLIENTS) mc = TCP_MAX_CLIENTS;   /* clamp，防越界 */
         tcp->max_clients = mc;
     }
+}
 
-    int vid_changed = 0;
-    v = http_form_find(fields, count, "video_device");
+/* 视频：更新设备/分辨率，返回 1 表示需要重启视频流 */
+static int apply_video(app_ctx_t *app, const http_form_field_t *fields, int count)
+{
+    struct app_config_t *cfg = app->cfg;
+    int changed = 0;
+
+    const char *v = http_form_find(fields, count, "video_device");
     if (v && strcmp(v, cfg->video_device) != 0) {
-        vid_changed = 1;
+        changed = 1;
         safe_strncpy(cfg->video_device, sizeof(cfg->video_device), v);
     }
     v = http_form_find(fields, count, "video_width");
     if (v) {
         int nw = parse_int_clamped(v, 1, 4096, cfg->video_width > 0 ? cfg->video_width : 640);
-        if (nw != cfg->video_width) { vid_changed = 1; cfg->video_width = nw; }
+        if (nw != cfg->video_width) { changed = 1; cfg->video_width = nw; }
     }
     v = http_form_find(fields, count, "video_height");
     if (v) {
         int nh = parse_int_clamped(v, 1, 4096, cfg->video_height > 0 ? cfg->video_height : 480);
-        if (nh != cfg->video_height) { vid_changed = 1; cfg->video_height = nh; }
+        if (nh != cfg->video_height) { changed = 1; cfg->video_height = nh; }
+    }
+    return changed;
+}
+
+void http_config_post(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body)
+{
+    (void)method; (void)uri;
+    if (!body || !app || !app->cfg || !app->can || !app->tcp) {
+        http_err(fd, 400, "Bad Request", NULL);
+        return;
+    }
+
+    /* 整个配置应用过程加锁：串行化并发 POST，并与 CAN 重连互斥 */
+    pthread_mutex_lock(&app->can_mutex);
+
+    /* 解析 URL 编码表单（公共实现，自动跳过 HTTP 头） */
+    http_form_field_t fields[MAX_FORM_FIELDS];
+    int count = http_form_parse(body, fields, MAX_FORM_FIELDS);
+    if (count == MAX_FORM_FIELDS)
+        LOG_ERROR("config POST: fields exceed %d, tail ignored", MAX_FORM_FIELDS);
+
+    LOG_INFO("config POST: parsed %d fields", count);
+
+    /* target 指定只应用并重启哪个模块；缺省为全量（向后兼容） */
+    const char *target = http_form_find(fields, count, "target");
+
+    if (!target || strcmp(target, "all") == 0 || strcmp(target, "can") == 0)
+        apply_can(app, fields, count);
+    if (!target || strcmp(target, "all") == 0 || strcmp(target, "net") == 0)
+        apply_net(app, fields, count);
+
+    int vid_changed = 0;
+    if (!target || strcmp(target, "all") == 0 || strcmp(target, "video") == 0) {
+        vid_changed = apply_video(app, fields, count);
+        /* 单独保存视频模块：点击即期望立即生效，参数未变化也重启一次视频流 */
+        if (target && strcmp(target, "video") == 0) vid_changed = 1;
     }
 
     LOG_INFO("config: applied to runtime, saving to file");
     config_save(app);
     http_ok_text(fd, "saved");
 
-    /* 视频参数变更后重启视频流 */
+    /* 视频参数变更后重启视频流（target=video 时用户点击保存即按变更结果重启） */
     if (vid_changed) video_stream_restart();
 
     pthread_mutex_unlock(&app->can_mutex);

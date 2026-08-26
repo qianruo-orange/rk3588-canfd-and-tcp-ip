@@ -99,7 +99,8 @@ int http_form_parse(const char *req, http_form_field_t *fields, int max_fields)
 
         const char *vs = eq + 1;
         int vlen = amp ? (int)(amp - vs) : (int)strlen(vs);
-        fields[count].val[http_url_decode(vs, fields[count].val, HTTP_FORM_VAL_MAX)] = '\0';
+        int dlen = url_decode_n(vs, (size_t)vlen, fields[count].val, HTTP_FORM_VAL_MAX);
+        fields[count].val[dlen] = '\0';
         count++;
         p = amp ? amp + 1 : vs + vlen;
     }

@@ -656,6 +656,15 @@ int rknn_yolo_get_frame(unsigned char **data, size_t *len, unsigned long long *s
     return 0;
 }
 
+unsigned long long rknn_yolo_get_frame_seq(void)
+{
+    if (!g_ai.enabled) return 0;
+    pthread_mutex_lock(&g_ai.frame_mutex);
+    unsigned long long s = g_ai.frame ? g_ai.frame->seq : 0;
+    pthread_mutex_unlock(&g_ai.frame_mutex);
+    return s;
+}
+
 /* ---- AI 工作线程：取最新帧 → 解码 → 推理 → 画框快照 ---- */
 void *rknn_ai_task(void *arg)
 {

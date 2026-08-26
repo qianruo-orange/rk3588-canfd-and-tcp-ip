@@ -56,4 +56,7 @@ int rknn_yolo_get(yolo_result_t *out);
 /* 拷贝最新画框 JPEG 帧（调用方 free *data）；@return 0 成功，-1 无可用帧 */
 int rknn_yolo_get_frame(unsigned char **data, size_t *len, unsigned long long *seq);
 
+/* 轻量查询最新画框帧序号（无新帧拷贝开销）；@return 帧序号，0 表示尚无画框帧 */
+unsigned long long rknn_yolo_get_frame_seq(void);
+
 #endif /* RKNN_YOLO_H */

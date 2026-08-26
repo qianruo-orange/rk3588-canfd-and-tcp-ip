@@ -1,6 +1,6 @@
 # rk3588-canfd-and-tcp-ip
 
-基于 epoll 的 CAN / CAN FD 数据采集、DBC 信号解析与 TCP/IP 通信解决方案，内置 Web 管理界面、视频流与 systemd 看门狗，支持按系统信息自动识别可配置 CAN 通道。适用于 RK3588（如 Orange Pi 5 Max）/ Linux 运行环境，使用 C11 实现。
+基于 epoll 的 CAN / CAN FD 数据采集、DBC 信号解析与 TCP/IP 通信解决方案，内置 Web 管理界面、视频流、AI 目标检测（RKNN + YOLO26）、网络录像与 systemd 看门狗，支持按系统信息自动识别可配置 CAN 通道。适用于 RK3588（如 Orange Pi 5 Max）/ Linux 运行环境，使用 C11 实现。
 
 ## 功能特性
 
@@ -9,6 +9,8 @@
 - TCP/IP 通信：TCP 服务监听，端口与绑定网卡均可配置
 - Web 管理界面：数据监控、配置修改、日志查看与重启 / 关机控制
 - 视频流服务：通过 V4L2 接入摄像头并输出 MJPEG 视频流
+- AI 目标检测：RKNN + YOLO26 三输出模式，多线程推理池并行加速，检测结果实时画框推流
+- 网络录像：Web 一键录制（AI 画框帧优先），封装为 MP4(MJPEG) 文件，支持列表 / 下载 / 删除
 - systemd 看门狗：监控关键线程心跳，防止异常卡死
 - 热更新配置：Web 页面修改后立即生效
 - 运行维护：日志按日期与大小自动轮转、清理脚本、部署脚本
@@ -23,6 +25,8 @@
         ├─► tcp_task      ──► TCP 监听 / 收发
         ├─► http_task     ──► Web 管理 + REST API + MJPEG 推流
         ├─► video_task    ──► V4L2 采集
+        ├─► ai_task       ──► 采样帧 → 投递推理队列（多线程池并行推理）→ 画框帧快照
+        ├─► rec_task      ──► 网络录像（AI 画框帧优先，回退原始帧）→ MP4(MJPEG)
         └─► watchdog_task ──► 心跳监控 + sd_notify
 ```
 
@@ -41,9 +45,18 @@ CAN 数据流（队列中均为原始帧，DBC 解析结果单独供前端展示
 | `tcp` | TCP 监听、连接管理与数据收发 |
 | `http` | HTTP 管理服务主循环、REST API、MJPEG 推流 |
 | `video` | V4L2 MJPEG 采集与帧发布 |
+| `ai` | 帧采样、推理任务投递；模型加载与多线程推理池（每线程独立 rknn context） |
+| `rec` | 网络录像：AI 画框帧优先（回退原始帧）→ MP4(MJPEG) 封装落盘 |
 | `watchdog` | 线程心跳监控与 `sd_notify` |
 
 > 注：`signal` 模块仅注册信号处理（`init`），`task` 为空，不创建线程。
+
+AI 数据流（画框帧为 JPEG，直接供推流与录像复用）：
+
+```text
+video_task ─► ai_task 采样 ─► 推理队列 ─► [worker×N 并行推理] ─► 画框帧快照 ─► /video/mjpeg_ai
+                                                                        └─► rec_task（录像优先取画框帧）
+```
 
 ## 目录结构
 
@@ -68,7 +81,16 @@ rk3588-canfd-and-tcp-ip/
 │   │   ├── http.h                    # HTTP 服务接口
 │   │   └── http_internal.h           # HTTP 内部定义
 │   ├── video/
-│   │   └── video_stream.h            # V4L2 视频流接口
+│   │   ├── video_stream.h            # V4L2 视频流接口
+│   │   ├── video_rec.h               # 网络录像模块接口
+│   │   └── rec_mp4.h                 # MP4(MJPEG) 封装器接口（纯封装，可独立测试）
+│   ├── ai/
+│   │   ├── rknn_yolo.h               # RKNN YOLO 框架入口
+│   │   ├── yolo_types.h              # 检测结果结构定义
+│   │   ├── yolo_image.h              # 图像处理接口（JPEG / YUYV / 缩放）
+│   │   ├── yolo_postprocess.h        # 三输出后处理接口
+│   │   ├── yolo_draw.h               # 画框接口
+│   │   └── rknn_api.h                # RKNN 运行时头文件（rknn-toolkit2 提供）
 │   └── watchdog/
 │       └── watchdog.h                # 看门狗接口
 ├── source/                           # 源代码
@@ -90,10 +112,18 @@ rk3588-canfd-and-tcp-ip/
 │   │   ├── http_api_network.c        # 网络 API
 │   │   ├── http_api_system.c         # 系统 API
 │   │   ├── http_api_video.c          # 视频 API
+│   │   ├── http_api_rec.c            # 录像 API（start/stop/status/list/delete/下载）
 │   │   ├── http_logs.c               # 日志查看
 │   │   └── http_reboot.c             # 重启 / 关机
 │   ├── video/
-│   │   └── video_stream.c            # V4L2 视频流实现
+│   │   ├── video_stream.c            # V4L2 视频流实现
+│   │   ├── video_rec.c               # 网络录像模块实现（录制线程 + 帧获取）
+│   │   └── rec_mp4.c                 # MP4(MJPEG) 封装器实现
+│   ├── ai/
+│   │   ├── rknn_yolo.c               # 模型加载 + 多线程推理池 + 帧快照
+│   │   ├── yolo_image.c              # 图像处理实现（libjpeg / 格式转换 / 缩放）
+│   │   ├── yolo_postprocess.c        # YOLO26 三输出后处理（sigmoid + NMS）
+│   │   └── yolo_draw.c               # 画框实现
 │   └── watchdog/
 │       └── watchdog.c                # 看门狗实现
 ├── html/                             # Web 前端
@@ -122,6 +152,7 @@ rk3588-canfd-and-tcp-ip/
 ├── bin/                              # 可执行输出（构建生成）
 ├── build/                            # CMake 构建目录（构建生成）
 ├── logs/                             # 运行日志
+├── recordings/                       # 网络录像输出目录（MP4，运行生成）
 └── .gitignore
 ```
 
@@ -132,18 +163,20 @@ rk3588-canfd-and-tcp-ip/
 - libsystemd
 - libnl-3
 - libnl-route-3
+- librknnrt（板载 RKNN 运行时，模型由 rknn-toolkit2 在 PC 上转换）
+- libjpeg（JPEG 编解码，AI 画框与录像回退转码用）
 - Linux SocketCAN 支持
 
 安装示例：
 
 ```bash
-apt install gcc cmake libsystemd-dev libnl-3-dev libnl-route-3-dev
+apt install gcc cmake libsystemd-dev libnl-3-dev libnl-route-3-dev libjpeg-dev
 ```
 
 ## 构建
 
 ```bash
-cd /home/orangepi/project1
+cd /home/orangepi/rk3588-canfd-and-tcp-ip
 ./scripts/build.sh -R   # Release（默认）
 ./scripts/build.sh -D   # Debug
 ./scripts/build.sh -C   # 清理构建产物与 logs
@@ -156,7 +189,7 @@ cd /home/orangepi/project1
 ## 运行方式
 
 ```bash
-cd /home/orangepi/project1
+cd /home/orangepi/rk3588-canfd-and-tcp-ip
 ./bin/rk3588-canfd-and-tcp-ip
 ```
 
@@ -182,7 +215,7 @@ sudo ./scripts/deploy.sh -h     # 查看帮助
 | `html/` | `/opt/.../html/` |
 | systemd 服务单元 | `/etc/systemd/system/` |
 
-> 注：`config/config.txt` 与 `config/` 下的 DBC 模板文件**不会**被复制；首次部署使用程序内置默认值，后续通过 Web 配置页保存配置、上传 DBC 文件。
+> 注：`config/config.txt` 与 `config/` 下的 DBC 模板文件**不会**被复制；首次部署使用程序内置默认值，后续通过 Web 配置页保存配置、上传 DBC 文件。`logs/` 与 `recordings/` 目录由部署脚本创建。
 
 服务名称：`rk3588-canfd-and-tcp-ip`
 
@@ -199,7 +232,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 - `WatchdogSec=10`
 - `Restart=on-failure`（失败自动重启，间隔 5s）
 - `AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW`
-- `ProtectSystem=strict`（文件系统只读，仅 `config/`、`logs/` 可写，`html/` 只读）
+- `ProtectSystem=strict`（文件系统只读，仅 `config/`、`logs/`、`recordings/` 可写，`html/` 只读）
 
 ## 配置说明
 
@@ -218,6 +251,13 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | `video_device` | `<path>` | 视频设备，默认 `/dev/video0` |
 | `video_width` / `video_height` | `<n>` | 分辨率，默认 640×480 |
 | `can_dbc` | `<name> <path>` | 按 CAN 通道配置 DBC 数据库文件路径，留空则不启用该通道信号解码 |
+| `ai_enable` | `on\|off` | 启用 NPU 推理画框流，默认 `off` |
+| `ai_model` | `<path>` | YOLO26 三输出 `.rknn` 模型路径，默认 `config/yolo26.rknn` |
+| `ai_input_size` | `<n>` | 模型输入边长（32~2048），默认 640 |
+| `ai_conf` | `<n>` | 置信度阈值百分比（1~100），默认 25（0.25） |
+| `ai_nms` | `<n>` | NMS IoU 阈值百分比（1~100），默认 45（0.45） |
+| `ai_interval_ms` | `<n>` | 推理节流间隔（10~5000ms），默认 200 |
+| `ai_threads` | `<n>` | 推理工作线程数（1~4），默认 2；每线程独立 rknn context 并行推理 |
 
 未提供配置文件时，将从系统枚举实际存在的 CAN 接口（netlink 路由，`kind=="can"`）并套用默认参数；若系统无法枚举到接口，则回退到 `can0` / `can1`。
 
@@ -256,13 +296,39 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | GET | `/api/video/devices` | 无 | 摄像头设备列表 |
 | GET | `/api/video/caps` | 无 | 视频参数列表 |
 | GET | `/video/mjpeg` | 无 | MJPEG 视频流 |
+| GET | `/video/mjpeg_ai` | 无 | AI 画框 MJPEG 视频流（AI 未启用时回退原始帧） |
+| POST | `/api/rec/start` | root | 开始网络录像 |
+| POST | `/api/rec/stop` | root | 停止网络录像（自动写 moov 收尾） |
+| GET | `/api/rec/status` | 无 | 录制状态（录制中 / 文件名 / 帧数 / 字节数 / 帧率） |
+| GET | `/api/rec/list` | 无 | 录像文件列表（按时间倒序） |
+| POST | `/api/rec/delete` | root | 删除录像文件（body 为文件名） |
+| GET | `/recfile/<name>` | root | 下载录像文件 |
 | GET | `/api/logs`、`/logs`、`/logfile/*` | root | 日志列表 / 下载 / 删除 |
 
 > 监控页与 DBC 页需要普通用户认证；配置页与写操作接口要求 root 权限。
 
+## AI 目标检测
+
+RKNN + YOLO26 三输出模式（YOLOv8 风格 P3/P4/P5 检测头），由 `rknn-toolkit2` 将模型转换为 `.rknn` 后在板载 NPU 推理。
+
+- 模型加载：`ai_model` 指向 `.rknn` 文件，`init` 校验输出必须为 3 个检测头
+- 多线程推理池：`ai_threads`（1~4）个工作线程各自持有独立 rknn context，对队列中的不同帧并行推理；结果按 seq 单调更新快照，乱序完成不串帧
+- 画框推流：检测结果实时画框并编码为 JPEG，经 `/video/mjpeg_ai` 输出；前端视频卡默认展示画框流
+- 优雅降级：模型缺失 / NPU 驱动未加载 / 推理失败时 `enabled=0`，原视频流照常，画框流回退原始帧，不崩溃不阻断启动
+
+## 网络录像
+
+Web 一键录制，无硬件编码器依赖：
+
+- 触发方式：监控页「开始/停止录制」按钮（`/api/rec/start` / `/api/rec/stop`）
+- 帧来源：AI 画框帧优先（保留检测框），无 AI 帧时回退原始帧（MJPEG 直用 / YUYV 转 JPEG）
+- 封装格式：标准 ISO BMFF MP4（MJPEG track），`ftyp + mdat + moov`，moov 末尾回写记录每帧偏移与时长，VLC / ffplay / 浏览器均可播放
+- 文件管理：录制文件存于 `recordings/`，监控页支持列表、下载、删除（文件名白名单校验）
+- 上限保护：单次录制帧数与 mdat 体积上限（防止 32 位 size 溢出），达到上限自动停止并收尾
+
 ## 看门狗机制
 
-- 通过模块总表 `g_modules[]` 为 `can_recv`、`can_send`、`tcp`、`http`、`video`、`main` 注册心跳监控
+- 通过模块总表 `g_modules[]` 为 `can_recv`、`can_send`、`tcp`、`http`、`video`、`ai`、`rec`、`main` 注册心跳监控
 - 每个模块带 `timeout` / `max_miss` 参数；`watchdog` 线程自身 `timeout=0`，不监督自己
 - 线程以名字注册 / 喂狗 / 注销，超时日志可直接定位到具体线程名（如 `thread 'http'`）
 - 心跳超时将触发整体退出

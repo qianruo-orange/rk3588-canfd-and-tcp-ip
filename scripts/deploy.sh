@@ -75,6 +75,9 @@ do_install() {
     echo "[INSTALL] logs/"
     mkdir -p "$DEPLOY_DIR/logs"
 
+    echo "[INSTALL] recordings/"
+    mkdir -p "$DEPLOY_DIR/recordings"
+
     echo "[INSTALL] systemd service"
     cp "$SERVICE_SRC" /etc/systemd/system/"$SERVICE_NAME".service
     systemctl daemon-reload

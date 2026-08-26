@@ -29,6 +29,7 @@ Testing/
 
 # 运行日志 / 临时数据 / 备份
 logs/
+recordings/
 *.log
 *.tmp
 *.temp

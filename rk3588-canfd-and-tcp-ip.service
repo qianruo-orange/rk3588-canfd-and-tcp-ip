@@ -19,7 +19,7 @@ AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/opt/rk3588-canfd-and-tcp-ip/logs /opt/rk3588-canfd-and-tcp-ip/config
+ReadWritePaths=/opt/rk3588-canfd-and-tcp-ip/logs /opt/rk3588-canfd-and-tcp-ip/config /opt/rk3588-canfd-and-tcp-ip/recordings
 ReadOnlyPaths=/opt/rk3588-canfd-and-tcp-ip/html
 
 StandardOutput=journal

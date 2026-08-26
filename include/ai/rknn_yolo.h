@@ -3,52 +3,34 @@
 
 #include <stddef.h>
 
+#include "ai/yolo_types.h"
+
 /**
- * ai/rknn_yolo.h — RKNN + YOLO26 检测框架。
+ * ai/rknn_yolo.h — RKNN + YOLO26 检测框架（主模块：模型管理 + 多线程推理池）。
  *
- * 模块职责（无独立线程职责，由 rknn_ai_task 驱动）：
- *  - 加载 .rknn 模型（配置 ai_model），查询输入/输出张量属性；
- *  - 对 RGB24 帧做缩放 + NPU 推理 + YOLO26 后处理（无 NMS 端到端单头
- *    为主，兼容经典三头布局，经典布局带 NMS）；
- *  - 把检测框画回 RGB 帧并编码为 JPEG，保存最新"画框帧"快照供推流客户端使用；
- *  - 无模型 / NPU 不可用 / 推理失败：优雅降级（enabled=0，原视频流照常）。
+ * 模块组成（见 source/ai/ 下各文件）：
+ *  - yolo_image.c      图像处理（JPEG 编解码 / YUYV→RGB / 缩放）
+ *  - yolo_postprocess.c YOLO26 三输出模式后处理（sigmoid + stride + NMS）
+ *  - yolo_draw.c       画框 + JPEG 编码
+ *  - rknn_yolo.c       模型加载、推理线程池（每线程独立 rknn context，并行推理）、
+ *                      任务队列、结果/画框帧快照
  *
- * 生命周期：rknn_yolo_init（main 模块框架 init）→ rknn_ai_task（线程）
- * → rknn_yolo_destroy（main 模块框架 dtor）。
+ * 多线程推理：配置 ai_threads（1~4，默认 2）个推理工作线程，各自拥有独立的
+ * rknn context 对队列中的不同帧并行推理；快照只保留最新 seq 的结果（乱序完成时
+ * 按 seq 单调更新），供 /video/mjpeg_ai 推流客户端消费。
+ *
+ * 优雅降级：无模型 / NPU 驱动未加载 / 推理失败 → enabled=0，原视频流照常，
+ * 画框流客户端回退到原始帧。所有失败路径只记日志不崩溃。
  */
 
-#define YOLO_MAX_DETS 32
-
-/* 单条检测结果（坐标在原图坐标系，x1<y2 等） */
-typedef struct {
-    float x1, y1, x2, y2;
-    float conf;
-    int   cls;
-} yolo_det_t;
-
-/* 一帧的检测结果快照 */
-typedef struct {
-    int               count;
-    unsigned long long seq;   /* 对应的视频采集帧序号 */
-    int               w, h;   /* 检测原图尺寸（解码后） */
-    yolo_det_t        dets[YOLO_MAX_DETS];
-} yolo_result_t;
-
-/* 帧像素格式（对应 V4L2_PIX_FMT_*） */
-#define RKNN_FMT_MJPEG 0
-#define RKNN_FMT_YUYV  1
-
-/* 初始化：读配置加载模型；返回 0 成功（含"未启用"成功态），-1 系统错误。
+/* 初始化：读配置加载模型并创建推理线程池；返回 0 成功（含"未启用"成功态）。
    模型缺失/NPU 不可用只置 enabled=0 并记日志，不阻断程序启动 */
 int rknn_yolo_init(void *arg);
 void rknn_yolo_destroy(void *arg);
 int rknn_yolo_enabled(void);
 
-/* AI 工作线程（main 模块框架 task）；无模型时立即退出 */
+/* AI 工作线程（main 模块框架 task）：采集帧 → 解码 → 投递推理队列 */
 void *rknn_ai_task(void *arg);
-
-/* 对一帧 RGB24 做检测，结果存为最新快照；@return 0 成功（可能 0 个目标），-1 失败 */
-int rknn_yolo_detect(const unsigned char *rgb, int w, int h, unsigned long long seq);
 
 /* 拷贝最新检测结果；@return 检测数 */
 int rknn_yolo_get(yolo_result_t *out);

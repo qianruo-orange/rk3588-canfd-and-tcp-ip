@@ -7,7 +7,7 @@
 
 function updateThemeBtn() {
   var b = document.getElementById('themeBtn');
-  if (b) b.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '\u2600\ufe0f' : '\ud83c\udf19';
+  if (b) b.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? '\u2600\ufe0f 主题' : '\ud83c\udf19 主题';
 }
 
 function toggleTheme() {

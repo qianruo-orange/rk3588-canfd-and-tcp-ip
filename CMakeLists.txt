@@ -94,12 +94,13 @@ set(SOURCES
     source/http/http_api_video.c
     source/http/http_reboot.c
     source/video/video_stream.c
+    source/ai/rknn_yolo.c
     source/watchdog/watchdog.c
 )
 
 add_executable(rk3588-canfd-and-tcp-ip ${SOURCES})
 
-target_include_directories(rk3588-canfd-and-tcp-ip PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(rk3588-canfd-and-tcp-ip PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/third_party)
 
 # libnl3 headers are under /usr/include/libnl3
 target_include_directories(rk3588-canfd-and-tcp-ip PRIVATE /usr/include/libnl3)
@@ -108,7 +109,7 @@ set_target_properties(rk3588-canfd-and-tcp-ip PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin"
 )
 
-target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE pthread crypt)
+target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE pthread crypt m)
 
 find_library(LIBSYSTEMD systemd REQUIRED)
 target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBSYSTEMD})
@@ -118,3 +119,10 @@ target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBNL3})
 
 find_library(LIBNLROUTE3 nl-route-3 REQUIRED)
 target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBNLROUTE3})
+
+# RKNN NPU 运行时（librknnrt.so，板载 /usr/lib）与 libjpeg-turbo（帧编解码）
+find_library(LIBRKNNRT rknnrt REQUIRED)
+target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBRKNNRT})
+
+find_library(LIBJPEG jpeg REQUIRED)
+target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBJPEG})

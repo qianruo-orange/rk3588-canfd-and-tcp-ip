@@ -27,6 +27,7 @@
 #include "core/log.h"
 #include "core/common.h"
 #include "video/video_stream.h"
+#include "ai/rknn_yolo.h"
 
 /* 模块生命周期函数 */
 typedef struct {
@@ -130,6 +131,15 @@ static module_t g_modules[] = {
         .tid  = 0,
         .name = "video",
         .ops  = { .init = video_stream_init, .dtor = video_stream_shutdown, .task = video_stream_task },
+        .wd   = { .timeout = 5, .max_miss = 3 },
+        .thr  = { .stack_size = 0, .priority = 0, .cpu = -1 },
+    },
+    /* ai —— RKNN YOLO26 检测（可选）：无模型/NPU 不可用时自动降级，
+       task 线程仍保持存活并喂狗（休眠空转），避免 watchdog 注册竞态 */
+    {
+        .tid  = 0,
+        .name = "ai",
+        .ops  = { .init = rknn_yolo_init, .dtor = rknn_yolo_destroy, .task = rknn_ai_task },
         .wd   = { .timeout = 5, .max_miss = 3 },
         .thr  = { .stack_size = 0, .priority = 0, .cpu = -1 },
     },

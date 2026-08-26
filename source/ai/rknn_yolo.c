@@ -518,8 +518,9 @@ fail_ctx:
     return 0;
 }
 
-void rknn_yolo_destroy(void)
+void rknn_yolo_destroy(void *arg)
 {
+    (void)arg;
     g_ai.running = 0;
     if (g_ai.ctx) {
         rknn_destroy(g_ai.ctx);
@@ -669,7 +670,15 @@ unsigned long long rknn_yolo_get_frame_seq(void)
 void *rknn_ai_task(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;
-    if (!g_ai.enabled) return NULL;
+    if (!g_ai.enabled) {
+        /* 未启用/降级：线程保持存活并持续喂狗（模块一致管理，无 watchdog 注册竞态），
+           不占推理资源 */
+        while (app->running && g_ai.running) {
+            watchdog_feed_self("ai");
+            usleep(200000);
+        }
+        return NULL;
+    }
     LOG_INFO("ai: inference thread started (interval %d ms)", g_ai.interval_ms);
 
     while (app->running && g_ai.running) {

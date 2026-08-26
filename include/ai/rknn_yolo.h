@@ -41,7 +41,7 @@ typedef struct {
 /* 初始化：读配置加载模型；返回 0 成功（含"未启用"成功态），-1 系统错误。
    模型缺失/NPU 不可用只置 enabled=0 并记日志，不阻断程序启动 */
 int rknn_yolo_init(void *arg);
-void rknn_yolo_destroy(void);
+void rknn_yolo_destroy(void *arg);
 int rknn_yolo_enabled(void);
 
 /* AI 工作线程（main 模块框架 task）；无模型时立即退出 */

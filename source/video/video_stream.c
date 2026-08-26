@@ -358,6 +358,37 @@ static int video_stream_is_running(void)
     return g_ctx ? g_ctx->running : 0;
 }
 
+/* 拷贝当前最新采集帧（AI 推理线程消费用：取快照，不等待新帧） */
+int video_stream_get_frame(unsigned char **out, size_t *out_len, int *fmt,
+                           int *w, int *h, unsigned long long *seq)
+{
+    video_ctx_t *vs = g_ctx;
+    if (!vs || !out || !out_len || !fmt || !w || !h || !seq) return -1;
+    int s = __atomic_load_n(&vs->seq, __ATOMIC_SEQ_CST);
+    if (s <= 0) return -1;   /* 尚无采集帧 */
+    pthread_mutex_lock(&vs->frame_mutex);
+    frame_t *f = __atomic_load_n(&vs->frame_obj, __ATOMIC_SEQ_CST);
+    if (!f) {
+        pthread_mutex_unlock(&vs->frame_mutex);
+        return -1;
+    }
+    unsigned char *copy = malloc(f->len);
+    if (!copy) {
+        pthread_mutex_unlock(&vs->frame_mutex);
+        return -1;
+    }
+    memcpy(copy, f->data, f->len);
+    size_t len = f->len;
+    pthread_mutex_unlock(&vs->frame_mutex);
+    *out     = copy;
+    *out_len = len;
+    *fmt     = (vs->pixfmt == V4L2_PIX_FMT_MJPEG) ? VIDEO_FMT_MJPEG : VIDEO_FMT_YUYV;
+    *w       = vs->width;
+    *h       = vs->height;
+    *seq     = (unsigned long long)s;
+    return 0;
+}
+
 /* 运行时重启视频流（切换设备/分辨率，不重启进程） */
 void video_stream_restart(void)
 {
@@ -389,6 +420,7 @@ void video_stream_restart(void)
 
 typedef struct {
     int fd;
+    int ai_mode;   /* 1: 画框流（AI 可用时优先画框帧，否则回退原始帧） */
     video_stream_client_close_cb on_close;
 } video_client_ctx_t;
 
@@ -396,6 +428,7 @@ static void *video_stream_client_task(void *arg)
 {
     video_client_ctx_t *a = (video_client_ctx_t *)arg;
     int fd = a->fd;
+    int ai_mode = a->ai_mode;
     video_stream_client_close_cb on_close = a->on_close;
     free(a);
 
@@ -418,10 +451,20 @@ static void *video_stream_client_task(void *arg)
 
         /* 推流线程基于非阻塞写 + 轮询，不会长期阻塞，无需独立看门狗监督 */
         unsigned char *frame = NULL; size_t flen = 0;
-        int seq = video_stream_wait_next(last, &frame, &flen);
-        if (seq < 0) break;
-        if (seq == last) { usleep(20000); continue; }
-        last = seq;
+        if (ai_mode && rknn_yolo_enabled()) {
+            /* 画框帧优先；无新画框帧（推理未跟上 / 首帧未就绪）时回退原始帧，保持画面流动 */
+            if (rknn_yolo_get_frame_seq() != (unsigned long long)last) {
+                unsigned long long aseq = 0;
+                if (rknn_yolo_get_frame(&frame, &flen, &aseq) == 0)
+                    last = (int)aseq;
+            }
+        }
+        if (!frame) {
+            int seq = video_stream_wait_next(last, &frame, &flen);
+            if (seq < 0) break;
+            if (seq == last) { usleep(20000); continue; }
+            last = seq;
+        }
         if (!frame || flen == 0) { usleep(20000); continue; }   /* 分配失败等：跳过 */
         char mhdr[128];
         int hlen = snprintf(mhdr, sizeof(mhdr),
@@ -442,6 +485,23 @@ int video_stream_client_start(int fd, video_stream_client_close_cb on_close)
     video_client_ctx_t *a = malloc(sizeof(*a));
     if (!a) return -1;
     a->fd       = fd;
+    a->ai_mode  = 0;
+    a->on_close = on_close;
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, video_stream_client_task, a) != 0) {
+        free(a);
+        return -1;
+    }
+    pthread_detach(tid);
+    return 0;
+}
+
+int video_stream_client_start_ai(int fd, video_stream_client_close_cb on_close)
+{
+    video_client_ctx_t *a = malloc(sizeof(*a));
+    if (!a) return -1;
+    a->fd       = fd;
+    a->ai_mode  = 1;
     a->on_close = on_close;
     pthread_t tid;
     if (pthread_create(&tid, NULL, video_stream_client_task, a) != 0) {

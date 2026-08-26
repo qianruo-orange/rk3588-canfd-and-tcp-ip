@@ -541,9 +541,18 @@ int can_init(void *arg)
 
     for (int i = 0; i < args->can_count; i++) {
         can_iface_t *iface = &args->can_ifaces[i];
-        if (can_socket_configure(iface->ifname, iface->bitrate, iface->dbitrate, iface->fd_mode, iface->restart_ms, iface->up) < 0) return -1;
+        if (can_socket_configure(iface->ifname, iface->bitrate, iface->dbitrate,
+                                 iface->fd_mode, iface->restart_ms, iface->up) < 0) {
+            /* 无 CAN 硬件/驱动未加载时接口无法配置：跳过该接口，不阻塞整体启动，
+               之后可通过 Web /api/can/toggle 或重启服务再试 */
+            LOG_ERROR("CAN %s: configure failed, skip this interface", iface->ifname);
+            continue;
+        }
         int fd = can_socket_open(iface->ifname, iface->fd_mode);
-        if (fd < 0) return -1;
+        if (fd < 0) {
+            LOG_ERROR("CAN %s: open failed, skip this interface", iface->ifname);
+            continue;
+        }
         iface->sock_fd = fd;
         for (int k = 0; k < iface->filter_count; k++)
             can_socket_set_filter(fd, iface->filters[k].id, iface->filters[k].mask);

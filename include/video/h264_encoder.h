@@ -32,4 +32,9 @@ void h264_encoder_destroy(h264_encoder_t *e);
 int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
                         unsigned char **out, size_t *out_len, int *keyframe);
 
+/* 提取最近一次 SPS/PPS（供 MP4 avcC 写入）；存在返回 0 */
+int h264_encoder_sps_pps(h264_encoder_t *e,
+                         const unsigned char **sps, unsigned int *sps_len,
+                         const unsigned char **pps, unsigned int *pps_len);
+
 #endif /* H264_ENCODER_H */

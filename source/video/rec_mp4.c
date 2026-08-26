@@ -2,7 +2,7 @@
  * rec_mp4.c — 最小 MP4(MJPEG track) 封装器（ISO BMFF，moov 末尾回写）。
  *
  * 文件布局：
- *   ftyp(16) + mdat(8+N 帧 JPEG) + moov(574+8N 字节)
+ *   ftyp(28) + mdat(8+N 帧 JPEG) + moov(564+8N 字节)
  *   stbl 用 stco 记录每帧绝对偏移 / stsz 记录大小 / stts 平均帧间隔，
  *   无需硬件编码器，VLC / ffplay / 浏览器均按 MJPEG 解码。
  *
@@ -312,13 +312,13 @@ int rec_mp4_finalize(rec_mp4_t *s)
             be32(s->fp, 8u + s->data_len);
             fseek(s->fp, cur, SEEK_SET);
 
-            /* 平均帧间隔：timescale 90000 */
+            /* 平均帧间隔：timescale 90000，1ms = 90 ticks */
             uint32_t delta = 3000;   /* 兜底 30fps */
             if (s->n_samples > 1) {
                 uint64_t span = s->last_ts_ms - s->first_ts_ms;
                 uint64_t avg  = span / (s->n_samples - 1);
                 if (avg > 0) {
-                    delta = (uint32_t)((90u * avg + 50u) / 100u);
+                    delta = (uint32_t)(avg * 90u);   /* avg ms × 90 ticks/ms */
                     if (delta == 0) delta = 1;
                 }
             }

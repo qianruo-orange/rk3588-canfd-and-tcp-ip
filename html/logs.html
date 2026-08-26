@@ -4,9 +4,13 @@
 <script src="/js/theme.js"></script>
 </head><body>
 <button id="themeBtn" class="theme-btn" onclick="toggleTheme()" title="切换主题">🌙 主题</button>
-<a href="/" class="back-link">← 返回首页</a>
 <div class="top-bar">
   <h1>📁 文件下载</h1>
+  <div class="nav">
+    <a href="/">📊 仪表盘</a>
+    <a href="/dbc">📡 DBC解析</a>
+    <a href="/config">⚙ 配置</a>
+  </div>
   <div class="tab-bar">
     <button class="tab-btn tab-on" data-tab="logs" onclick="switchTab('logs')">📋 日志</button>
     <button class="tab-btn" data-tab="rec" onclick="switchTab('rec')">🎬 录像</button>

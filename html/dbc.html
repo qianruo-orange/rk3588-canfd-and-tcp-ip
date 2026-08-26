@@ -7,8 +7,9 @@
 <link rel="stylesheet" href="/css/common.css">
 <script src="/js/theme.js"></script>
 <style>
-.top-bar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
-.nav{margin:14px 0;display:flex;gap:14px}
+.top-bar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+.top-bar .nav{margin:0 0 0 auto;display:flex;gap:14px}
+.top-bar .theme-btn{position:static;margin-left:16px;flex:none}
 .nav a{padding:6px 12px;border:1px solid var(--card-border2);border-radius:10px;background:var(--card-bg)}
 .table-wrap{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -27,15 +28,14 @@ td{color:var(--text)}
 </style>
 </head>
 <body>
-<button id="themeBtn" class="theme-btn" onclick="toggleTheme()" title="切换主题">🌙 主题</button>
 <div class="top-bar">
   <h1>DBC 信号解析</h1>
-  <a href="/">← 返回仪表盘</a>
-</div>
-<div class="nav">
-  <a href="/">📊 仪表盘</a>
-  <a href="/config">⚙ 配置</a>
-  <a href="/logs">📋 日志</a>
+  <div class="nav">
+    <a href="/">📊 仪表盘</a>
+    <a href="/config">⚙ 配置</a>
+    <a href="/logs">📁 文件下载</a>
+  </div>
+  <button id="themeBtn" class="theme-btn" onclick="toggleTheme()" title="切换主题">🌙 主题</button>
 </div>
 <div class="card">
   <div class="card-head">

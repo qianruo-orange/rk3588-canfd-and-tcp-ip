@@ -1,8 +1,12 @@
 /* monitor.css — 仪表盘页面样式 毛玻璃水滴风（主题变量化） */
-.top-bar{display:flex;align-items:center;margin-bottom:4px}
+.top-bar{display:flex;align-items:center;margin-bottom:4px;flex-wrap:wrap}
 #datetime{color:var(--muted);font-size:16px;margin-left:16px}
 .top-bar .nav{margin:0 0 0 auto}
 .top-bar .nav a{padding:5px 12px;font-size:12px}
+.top-bar .theme-btn{position:static;margin-left:16px;flex:none}
+.pwr{padding:5px 12px;border-radius:10px;text-decoration:none;font-size:12px;margin-left:10px;border:1px solid rgba(255,255,255,.12)}
+.pwr-reboot{background:#c0394e;color:#fff}
+.pwr-shutdown{background:#8b4513;color:#fff}
 .sub{color:var(--muted);font-size:13px;margin-bottom:20px}
 .pair{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
 .pair .card{min-width:0;display:flex;flex-direction:column}

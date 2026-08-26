@@ -3,8 +3,7 @@
 <link rel="stylesheet" href="/css/config.css">
 <script src="/js/theme.js"></script>
 </head><body>
-<button id="themeBtn" class="theme-btn" onclick="toggleTheme()" title="切换主题">🌙 主题</button>
-<div class="top"><h1> 配置</h1><a href="/" class="btn btn-back">← 返回</a><button type="button" class="btn btn-back" onclick="loadCfg()">🔄 查询</button><a href="#" onclick="reboot()" class="btn btn-back" style="background:#c0394e;color:#fff"> 重启</a><a href="#" onclick="shutdown()" class="btn btn-back" style="background:#8b4513;color:#fff"> 关机</a></div>
+<div class="top"><h1> 配置</h1><div class="nav"><a href="/">📊 仪表盘</a><a href="/dbc">📡 DBC解析</a><a href="/logs">📁 文件下载</a></div><button type="button" class="btn btn-back" onclick="loadCfg()">🔄 查询</button><button id="themeBtn" class="theme-btn" onclick="toggleTheme()" title="切换主题">🌙 主题</button></div>
 
 <form id="f">
 <div class="can-grid">

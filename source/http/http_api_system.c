@@ -8,29 +8,6 @@
 #define MAX_CORES     16
 #define JSON_BUF_SIZE 8192
 
-/* 安全 snprintf：检查溢出，溢出时返回 500 */
-#define JADD(fmt, ...) do { \
-    int _n = snprintf(json + off, sizeof(json) - off, fmt, ##__VA_ARGS__); \
-    if (_n < 0 || _n >= (int)(sizeof(json) - off)) { \
-        http_send_response(fd, 500, "Error", "text/plain", "", 0); \
-        return; \
-    } \
-    off += _n; \
-} while(0)
-
-static long read_proc_long(const char *path, const char *key)
-{
-    FILE *fp = fopen(path, "r");
-    if (!fp) return -1;
-    char line[256]; long val = -1;
-    while (fgets(line, sizeof(line), fp)) {
-        if (strncmp(line, key, strlen(key)) == 0) {
-            sscanf(line + strlen(key), "%ld", &val); break;
-        }
-    }
-    fclose(fp); return val;
-}
-
 void http_system_api(app_ctx_t *app, int fd)
 {
     (void)app;
@@ -73,8 +50,8 @@ void http_system_api(app_ctx_t *app, int fd)
     }
 
     /* 内存 */
-    long mem_total = read_proc_long("/proc/meminfo", "MemTotal:");
-    long mem_avail = read_proc_long("/proc/meminfo", "MemAvailable:");
+    long mem_total = http_read_key_long("/proc/meminfo", "MemTotal:");
+    long mem_avail = http_read_key_long("/proc/meminfo", "MemAvailable:");
     int mem_pct = (mem_total > 0) ? (int)(100 - (mem_avail * 100 / mem_total)) : 0;
 
     /* 磁盘 */
@@ -110,22 +87,22 @@ void http_system_api(app_ctx_t *app, int fd)
     }
 
     /* 组装 JSON（使用边界检查宏） */
-    JADD("{"
+    JSON_ADD("{"
         "\"load\":[%.2f,%.2f,%.2f],"
         "\"cpu_user\":%ld,\"cpu_sys\":%ld,\"cpu_idle\":%ld,\"cpu_total\":%ld,",
         load1, load5, load15,
         cpu_user, cpu_sys, cpu_idle, cpu_total);
 
-    JADD("\"cpu_cores\":[");
+    JSON_ADD("\"cpu_cores\":[");
     for (int i = 0; i < num_cores; i++)
-        JADD("%s{\"u\":%ld,\"s\":%ld,\"i\":%ld}",
+        JSON_ADD("%s{\"u\":%ld,\"s\":%ld,\"i\":%ld}",
             i > 0 ? "," : "", core_user[i], core_sys[i], core_idle[i]);
-    JADD("],");
+    JSON_ADD("],");
 
-    JADD("\"npu_cores\":[%d,%d,%d],",
+    JSON_ADD("\"npu_cores\":[%d,%d,%d],",
         npu_cores[0], npu_cores[1], npu_cores[2]);
 
-    JADD(
+    JSON_ADD(
         "\"mem_pct\":%d,\"mem_total\":%ld,\"mem_avail\":%ld,"
         "\"disk_total\":%ld,\"disk_avail\":%ld,"
         "\"temp\":%d,"
@@ -136,5 +113,5 @@ void http_system_api(app_ctx_t *app, int fd)
         temp,
         gpu_load);
 
-    http_send_response(fd, 200, "OK", "application/json", json, off);
+    http_ok_json(fd, json, (size_t)off);
 }

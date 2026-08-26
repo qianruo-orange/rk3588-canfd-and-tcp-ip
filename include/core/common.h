@@ -2,6 +2,7 @@
 #define COMMON_H
 
 #include <linux/can.h>
+#include <linux/if.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -9,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/types.h>
 
 #include "can/dbc_parser.h"
@@ -56,6 +58,19 @@ static inline int parse_int_clamped(const char *s, int min_v, int max_v, int def
     if (v < min_v) return min_v;
     if (v > max_v) return max_v;
     return (int)v;
+}
+
+/* 校验网络接口名合法性：字母数字 / 下划线 / 连字符（防止非法名称进入系统命令） */
+static inline int ifname_valid(const char *name)
+{
+    if (!name || !*name) return 0;
+    size_t len = strlen(name);
+    if (len >= IFNAMSIZ) return 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        if (!isalnum((unsigned char)c) && c != '_' && c != '-') return 0;
+    }
+    return 1;
 }
 
 #endif /* COMMON_H */

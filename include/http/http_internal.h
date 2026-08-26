@@ -9,6 +9,7 @@
 #include "core/common.h"
 #include "core/log.h"
 #include "core/config.h"
+#include "http/http_util.h"
 
 #define HTTP_BUF_SIZE 262144  /* 请求缓冲：需容纳 header + DBC 文件上传 body */
 #define HTTP_ROOT     PATH_WEBROOT
@@ -19,7 +20,12 @@
 void http_send_response(int fd, int code, const char *status, const char *mime, const void *body, size_t len);
 void http_handle_404(int fd, const char *path);
 void http_serve_file(int fd, const char *uri);
-/* 完整写入非阻塞 socket（处理 EAGAIN/EWOULDBLOCK 与部分写入），失败返回 -1 */
+/* 流式发送数据源（文件）到客户端：静态文件/日志下载/日志打包共用。
+   服务器接管 src 所有权，发送完毕或连接关闭时负责 fclose；unlink_after
+   非空时发送完成后删除该文件（用于临时打包文件）。 */
+void http_serve_stream(int fd, const char *mime, const char *extra_hdr,
+                       FILE *src, size_t size, const char *unlink_after);
+/* 完整写入客户端 socket：连接上下文内追加到输出缓冲（非阻塞），否则阻塞写 */
 int http_write_all(int fd, const void *data, size_t len);
 
 void http_logs_handler(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf);

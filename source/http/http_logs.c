@@ -5,6 +5,7 @@
 #include <sys/epoll.h>
 #include <errno.h>
 #include <ctype.h>
+#include <stdint.h>
 /**
  * http_logs.c — 日志管理路由（列表 / 下载 / 删除 / 打包）。
  */
@@ -108,7 +109,7 @@ static void serve_log_list_json(int fd)
     http_send_response(fd, 200, "OK", "application/json; charset=utf-8", json, (size_t)off);
 }
 
-/* 下载单个日志文件 */
+/* 下载单个日志文件：复用 http_serve_stream 流式发送 */
 static void serve_log_download(int fd, const char *rel)
 {
     char subdir[64], name[256];
@@ -127,26 +128,10 @@ static void serve_log_download(int fd, const char *rel)
     size_t size = (size_t)ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    char header[512];
-    int off = snprintf(header, sizeof(header),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/octet-stream\r\n"
-        "Content-Disposition: attachment; filename=\"%s\"\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: close\r\n\r\n",
-        name, size);
-    if (http_write_all(fd, header, (size_t)off) < 0) { fclose(fp); return; }
-
-    char buf[4096];
-    size_t remain = size;
-    while (remain > 0) {
-        size_t n = (remain > sizeof(buf)) ? sizeof(buf) : remain;
-        size_t r = fread(buf, 1, n, fp);
-        if (r == 0) break;
-        if (http_write_all(fd, buf, r) < 0) break;
-        remain -= r;
-    }
-    fclose(fp);
+    char disp[320];
+    snprintf(disp, sizeof(disp),
+             "Content-Disposition: attachment; filename=\"%s\"\r\n", name);
+    http_serve_stream(fd, "application/octet-stream", disp, fp, size, NULL);
 }
 
 /* 删除日志文件 */
@@ -165,39 +150,68 @@ static void serve_log_delete(int fd, const char *rel)
         http_send_response(fd, 404, "Not Found", "text/plain", "", 0);
 }
 
-/* 打包下载所有日志 (tar.gz) */
+/* 统计日志目录总大小，用于打包前的体积限制 */
+static int64_t logs_total_size(void)
+{
+    int64_t total = 0;
+    DIR *dir = opendir(LOG_DIR);
+    if (!dir) return 0;
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        char subdir[512];
+        snprintf(subdir, sizeof(subdir), "%s/%s", LOG_DIR, de->d_name);
+        struct stat dst;
+        if (stat(subdir, &dst) < 0 || !S_ISDIR(dst.st_mode)) continue;
+        DIR *sd = opendir(subdir);
+        if (!sd) continue;
+        struct dirent *fde;
+        while ((fde = readdir(sd)) != NULL) {
+            if (fde->d_name[0] == '.') continue;
+            char path[512];
+            snprintf(path, sizeof(path), "%s/%s", subdir, fde->d_name);
+            struct stat st;
+            if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) total += (int64_t)st.st_size;
+        }
+        closedir(sd);
+    }
+    closedir(dir);
+    return total;
+}
+
+/* 打包下载所有日志 (tar.gz)：先打成临时文件，再复用 http_serve_stream 流式
+   发送（含发送后自动清理临时文件） */
 static void serve_log_pack(int fd)
 {
-    /* 直接在日志目录上执行 tar，避免 chdir 造成进程工作目录副作用 */
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "tar -czf - -C %s . 2>/dev/null", LOG_DIR);
-    FILE *tar = popen(cmd, "r");
-    if (!tar) {
-        LOG_ERROR("logs pack: popen tar failed");
+    if (logs_total_size() > (int64_t)LOG_PACK_MAX) {
+        LOG_INFO("logs pack: total size exceeds %lld bytes, rejected", (long long)LOG_PACK_MAX);
+        http_send_response(fd, 413, "Payload Too Large", "text/plain", "logs too large", 14);
+        return;
+    }
+
+    char tmppath[512];
+    snprintf(tmppath, sizeof(tmppath), "/tmp/rk3588_logs_pack_%d.tar.gz", (int)getpid());
+    char cmd[1400];
+    snprintf(cmd, sizeof(cmd), "tar -czf %s -C %s . 2>/dev/null", tmppath, LOG_DIR);
+    if (system(cmd) != 0 || access(tmppath, F_OK) != 0) {
+        unlink(tmppath);
         http_send_response(fd, 500, "Internal Error", "text/plain", "", 0);
         return;
     }
 
-    char header[256];
-    snprintf(header, sizeof(header),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/gzip\r\n"
-        "Content-Disposition: attachment; filename=\"logs_pack.tar.gz\"\r\n"
-        "Connection: close\r\n\r\n");
-    if (http_write_all(fd, header, strlen(header)) < 0) { pclose(tar); return; }
-
-    char buf[8192];
-    size_t n, total = 0;
-    while ((n = fread(buf, 1, sizeof(buf), tar)) > 0) {
-        if (http_write_all(fd, buf, n) < 0) break;
-        total += n;
-        if (total > LOG_PACK_MAX) {
-            LOG_INFO("logs pack: capped at %zu bytes", total);
-            break;   /* 限制打包体积，避免长时间阻塞 HTTP 服务器 */
-        }
-        watchdog_feed_self("http");            /* 打包耗时较长，持续喂狗防止看门狗误杀 */
+    FILE *fp = fopen(tmppath, "rb");
+    if (!fp) {
+        unlink(tmppath);
+        http_send_response(fd, 500, "Internal Error", "text/plain", "", 0);
+        return;
     }
-    pclose(tar);
+    fseek(fp, 0, SEEK_END);
+    size_t size = (size_t)ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    http_serve_stream(fd, "application/gzip",
+                      "Content-Disposition: attachment; filename=\"logs_pack.tar.gz\"\r\n",
+                      fp, size, tmppath);
 }
 
 /* 日志总入口 */

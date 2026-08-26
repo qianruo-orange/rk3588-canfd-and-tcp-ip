@@ -30,7 +30,7 @@ void http_can_ifaces(app_ctx_t *app, int fd)
                  i ? "," : "", names[i], can_fd_supported(names[i]));
     }
     JSON_ADD(json, off, "]");
-    http_send_response(fd, 200, "OK", "application/json", json, off);
+    http_ok_json(fd, json, (size_t)off);
 }
 
 void http_can_status(app_ctx_t *app, int fd)
@@ -38,13 +38,6 @@ void http_can_status(app_ctx_t *app, int fd)
     (void)app;
     char json[2048] = "[";
     int off = 1;
-    /* 带边界检查的 JSON 追加：缓冲区写满后安全截断，不越界 */
-#define JADD(fmt, ...) do { \
-        int _n = snprintf(json + off, sizeof(json) - off, fmt, ##__VA_ARGS__); \
-        if (_n < 0) { off = (int)sizeof(json); } \
-        else if (_n >= (int)(sizeof(json) - off)) { off = (int)sizeof(json); } \
-        else { off += _n; } \
-    } while (0)
 
     struct nl_sock *sk = nl_socket_alloc();
     if (!sk) goto done;
@@ -73,79 +66,46 @@ void http_can_status(app_ctx_t *app, int fd)
         FILE *sfp = fopen(sysfs, "r");
         if (sfp) { if (fscanf(sfp, "%u", &dbitrate) != 1) dbitrate = 0; fclose(sfp); }
 
-        JADD("%s{\"name\":\"%s\",\"up\":%d,\"bitrate\":%u,\"dbitrate\":%u,\"fd\":%d}",
+        JSON_ADD("%s{\"name\":\"%s\",\"up\":%d,\"bitrate\":%u,\"dbitrate\":%u,\"fd\":%d}",
              off > 1 ? "," : "", name, up, bitrate, dbitrate, fd_mode);
         rtnl_link_put(link);
     }
     nl_socket_free(sk);
 
 done:
-    JADD("]");
-#undef JADD
-    http_send_response(fd, 200, "OK", "application/json", json, off);
+    JSON_ADD("]");
+    http_ok_json(fd, json, (size_t)off);
 }
 
-/* 从 URL 编码 body 中提取 key 的值，并进行 %XX / '+' 解码 */
-static int url_get_param(const char *body, const char *key, char *out, int out_size)
-{
-    int klen = (int)strlen(key);
-    const char *p = strstr(body, key);
-    if (!p) return 0;
-    p += klen;
-    int o = 0;
-    while (*p && *p != '&' && o < out_size - 1) {
-        if (*p == '%' && p[1] && p[2]) {
-            unsigned int h = 0;
-            if (sscanf(p + 1, "%2x", &h) == 1) out[o++] = (char)h;
-            else out[o++] = *p;
-            p += 3;
-        } else if (*p == '+') { out[o++] = ' '; p++; }
-        else { out[o++] = *p; p++; }
-    }
-    out[o] = '\0';
-    return o;
-}
-
-/* 校验 CAN 接口名：字母数字 / 下划线 / 连字符 */
-static int ifname_valid(const char *name)
-{
-    if (!name || !*name) return 0;
-    size_t len = strlen(name);
-    if (len >= IFNAMSIZ) return 0;
-    for (size_t i = 0; i < len; i++) {
-        char c = name[i];
-        if (!isalnum((unsigned char)c) && c != '_' && c != '-') return 0;
-    }
-    return 1;
-}
+/* 校验 CAN 接口名：字母数字 / 下划线 / 连字符（公共实现见 core/common.h 的 ifname_valid） */
 
 void http_can_toggle(app_ctx_t *app, int fd, const char *body)
 {
     char ifname[32] = {0}, action[8] = {0};
-    if (!body) { http_send_response(fd, 400, "Bad Request", "text/plain", "", 0); return; }
+    if (!body) { http_err(fd, 400, "Bad Request", NULL); return; }
 
-    url_get_param(body, "ifname=", ifname, sizeof(ifname));
-    url_get_param(body, "action=", action, sizeof(action));
+    http_form_get_param(body, "ifname=", ifname, sizeof(ifname));
+    http_form_get_param(body, "action=", action, sizeof(action));
 
     if (!ifname_valid(ifname)) {
-        http_send_response(fd, 400, "Bad Request", "text/plain", "bad ifname", 10);
+        http_err(fd, 400, "Bad Request", "bad ifname");
         return;
     }
     if (strcmp(action, "up") != 0 && strcmp(action, "down") != 0) {
-        http_send_response(fd, 400, "Bad Request", "text/plain", "bad action", 10);
+        http_err(fd, 400, "Bad Request", "bad action");
         return;
     }
 
     struct nl_sock *sk = nl_socket_alloc();
-    if (!sk) { http_send_response(fd, 500, "Error", "text/plain", "", 0); return; }
+    if (!sk) { http_err(fd, 500, "Error", NULL); return; }
     if (nl_connect(sk, NETLINK_ROUTE) < 0) {
         nl_socket_free(sk);
-        http_send_response(fd, 500, "Error", "text/plain", "", 0);
+        http_err(fd, 500, "Error", NULL);
         return;
     }
 
     struct rtnl_link *ln = rtnl_link_alloc();
-    if (!ln) { nl_socket_free(sk); http_send_response(fd, 500, "Error", "text/plain", "", 0); return; }
+    if (!ln) { nl_socket_free(sk); http_err(fd, 500, "Error", NULL); return; }
     rtnl_link_set_name(ln, ifname);
 
     /* 串行化接口状态操作与 CAN 配置热更新 / CAN 重连 */

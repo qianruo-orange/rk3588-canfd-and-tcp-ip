@@ -1,5 +1,14 @@
 /**
- * http.c — HTTP 核心：主循环、路由分发、认证、静态文件服务、工具函数。
+ * http.c — HTTP 核心：epoll Reactor 主循环、路由分发、认证、静态文件服务、工具函数。
+ *
+ * 架构说明（Reactor 单线程，无"每客户端一线程"）：
+ *  - 单个 epoll 实例驱动监听 socket 与全部客户端 socket，所有 IO 均为非阻塞；
+ *  - 每个连接是一个状态机：读请求（累积缓冲 → 收齐 header+body）→ 处理分发
+ *    → 排空输出缓冲 → 关闭；慢客户端只会让自己连接的输出缓冲增长，不会阻塞
+ *    主循环，也不会阻塞其他连接；
+ *  - 输出缓冲有上限 HTTP_WBUF_MAX，超限直接断开，防止慢客户端耗尽内存；
+ *  - 响应输出统一走 http_send_response（小响应）与 http_serve_stream（流式
+ *    数据源：静态文件 / 日志下载 / 日志打包共用同一套逐块填充+排空逻辑）。
  */
 
 #define _GNU_SOURCE   /* 暴露 GNU/Linux 扩展 */
@@ -27,6 +36,8 @@
 
 /* ---- 全局变量 ---- */
 static int g_listen_fd = -1;
+static int g_epfd = -1;              /* 供连接关闭时摘除 epoll 条目（单线程主循环持有） */
+static app_ctx_t *g_http_app = NULL; /* http_server_task 持有的应用上下文 */
 /* 保护 g_listen_fd 的关闭操作：http_server_task 退出段与 http_server_stop
    （watchdog 强杀时可能并发）都需要安全关闭，避免 double-close */
 static pthread_mutex_t g_listen_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -35,65 +46,219 @@ static _Atomic int g_http_active = 0;   /* 活跃 HTTP 连接数 */
 
 typedef void (*api_fn)(app_ctx_t *, int, const char *, const char *, const char *);
 
-/**
- * http_system_api_wrap - 包装 /api/system 处理函数，忽略不需要的 HTTP 参数并转发到实际实现。
- */
+/* ---- API 包装函数：统一 api_fn 签名，转发到各具体实现 ---- */
 static void http_system_api_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_system_api(app, fd); }
-
-/**
- * http_can_status_wrap - 包装 CAN 状态查询接口，统一调用底层 API。
- */
 static void http_can_status_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_status(app, fd); }
-
-/**
- * http_can_ifaces_wrap - 包装 CAN 接口枚举接口（含 CAN FD 支持信息）。
- */
 static void http_can_ifaces_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_ifaces(app, fd); }
-
-/**
- * http_can_toggle_wrap - 包装 CAN 开关接口，保留请求体参数用于切换逻辑。
- */
 static void http_can_toggle_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; http_can_toggle(app, fd, req); }
-
-/**
- * http_can_decoded_wrap - 包装 DBC 解码结果查询接口。
- */
 static void http_can_decoded_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_decoded(app, fd); }
-
-/**
- * http_can_decoded_tx_wrap - 包装发送方向 DBC 解析结果查询接口。
- */
 static void http_can_decoded_tx_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_decoded_tx(app, fd); }
-
-/**
- * http_can_dbc_upload_wrap - 包装 DBC 文件上传接口，保留 method/uri/body 供上传处理。
- */
 static void http_can_dbc_upload_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { http_can_dbc_upload(app, fd, method, uri, req); }
-
-/**
- * http_can_send_wrap - 包装 CAN 报文发送接口，保留 body 供解析。
- */
 static void http_can_send_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { http_can_send(app, fd, method, uri, req); }
-
-/**
- * http_can_rx_wrap - 包装 CAN 原始报文查询接口。
- */
 static void http_can_rx_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_rx(app, fd); }
-
-/**
- * http_reboot_wrap - 包装重启接口，执行系统级重启动作。
- */
 static void http_reboot_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_reboot(app, fd); }
-
-/**
- * http_shutdown_wrap - 包装关机接口，执行系统级关机动作。
- */
 static void http_shutdown_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_shutdown(app, fd); }
-
-/**
- * http_network_api_wrap - 包装网络统计 API，统一走通用网络处理逻辑。
- */
 static void http_network_api_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_network_api(app, fd); }
+
+/* ---- 每连接状态机（Reactor 单线程） ---- */
+#define HTTP_WBUF_INIT 8192             /* 输出缓冲初始大小 */
+#define HTTP_WBUF_MAX  (16UL * 1024 * 1024)  /* 输出缓冲上限：慢客户端超限即断开 */
+#define HTTP_BODY_MAX  ((long)HTTP_BUF_SIZE - 4096)  /* 请求 body 上限（须能收进读缓冲） */
+#define HTTP_CONN_IDLE 30               /* 连接空闲超时（秒） */
+
+typedef struct http_conn {
+    int fd;
+    struct http_conn *next;
+
+    /* 读缓冲 */
+    char rbuf[HTTP_BUF_SIZE];
+    size_t rlen;
+
+    /* 请求解析结果 */
+    int hdr_done;          /* 已收到完整请求头 */
+    size_t hdr_len;        /* 请求头长度（含结尾分隔符） */
+    long body_cl;          /* Content-Length；-1 表示已被拒绝 */
+    char method[16];
+    char uri[HTTP_URI_MAX];
+
+    /* 输出缓冲 */
+    char *wbuf;
+    size_t wcap, wlen, woff;
+
+    /* 流式数据源（文件）：http_serve_stream 统一管理，发送完/关闭时 fclose，
+       若设置了 src_unlink 同时删除该临时文件 */
+    FILE *src;
+    size_t src_remain;
+    int src_eof;
+    char *src_unlink;
+
+    int done;              /* 请求已处理，不再接收更多数据 */
+    int closed;
+    time_t last_active;
+} http_conn_t;
+
+static http_conn_t *g_conns = NULL;    /* 活动连接链表（单线程主循环访问，无需锁） */
+static http_conn_t *g_dead = NULL;     /* 已关闭连接的残留结构体（延迟释放，防 use-after-free） */
+
+static http_conn_t *conn_find(int fd)
+{
+    for (http_conn_t *c = g_conns; c; c = c->next)
+        if (c->fd == fd) return c;
+    return NULL;
+}
+
+/* 释放已关闭连接的残留结构体：必须放在一轮事件处理全部结束之后调用，
+   因为调用方（conn_read/process_request/主循环）在 conn_close 后仍可能
+   读取 c->closed 等字段判断状态 */
+static void conn_reap(void)
+{
+    while (g_dead) {
+        http_conn_t *d = g_dead;
+        g_dead = d->next;
+        free(d);
+    }
+}
+
+/* 关闭连接：摘除 epoll、从链表移除、释放源/缓冲/关闭 fd 并归还连接计数；
+   结构体延迟释放（挂 g_dead），由主循环 conn_reap 统一 free */
+static void conn_close(http_conn_t *c)
+{
+    if (!c || c->closed) return;
+    c->closed = 1;
+    if (g_epfd >= 0)
+        epoll_ctl(g_epfd, EPOLL_CTL_DEL, c->fd, NULL);
+    http_conn_t **pp = &g_conns;
+    while (*pp && *pp != c) pp = &(*pp)->next;
+    if (*pp) *pp = c->next;
+    if (c->src) fclose(c->src);
+    if (c->src_unlink) { unlink(c->src_unlink); free(c->src_unlink); c->src_unlink = NULL; }
+    close(c->fd);
+    c->fd = -1;
+    free(c->wbuf);
+    c->wbuf = NULL;
+    c->next = g_dead;
+    g_dead = c;
+    __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+}
+
+/* 把 fd 移交给视频推流线程：从链表移除、释放缓冲，但不 close fd，
+   也不归还连接计数（计数由 video 线程退出回调 http_video_client_closed 归还）；
+   结构体同样延迟释放 */
+static void conn_detach(http_conn_t *c)
+{
+    if (g_epfd >= 0)
+        epoll_ctl(g_epfd, EPOLL_CTL_DEL, c->fd, NULL);
+    http_conn_t **pp = &g_conns;
+    while (*pp && *pp != c) pp = &(*pp)->next;
+    if (*pp) *pp = c->next;
+    c->closed = 1;
+    if (c->src) fclose(c->src);
+    if (c->src_unlink) { unlink(c->src_unlink); free(c->src_unlink); }
+    free(c->wbuf);
+    c->wbuf = NULL;
+    c->next = g_dead;
+    g_dead = c;
+}
+
+static http_conn_t *conn_new(int fd)
+{
+    http_conn_t *c = calloc(1, sizeof(*c));
+    if (!c) return NULL;
+    c->wbuf = malloc(HTTP_WBUF_INIT);
+    if (!c->wbuf) { free(c); return NULL; }
+    c->fd = fd;
+    c->wcap = HTTP_WBUF_INIT;
+    c->last_active = time(NULL);
+    c->next = g_conns;
+    g_conns = c;
+    return c;
+}
+
+/* 追加数据到输出缓冲；超限（慢客户端）直接断开连接 */
+static int conn_append(http_conn_t *c, const void *data, size_t len)
+{
+    if (c->closed || len == 0) return 0;
+    if (c->wlen + len > HTTP_WBUF_MAX) {
+        conn_close(c);
+        return -1;
+    }
+    if (c->wlen + len > c->wcap) {
+        size_t ncap = c->wcap * 2;
+        while (ncap < c->wlen + len) ncap *= 2;
+        char *nb = realloc(c->wbuf, ncap);
+        if (!nb) { conn_close(c); return -1; }
+        c->wbuf = nb;
+        c->wcap = ncap;
+    }
+    memcpy(c->wbuf + c->wlen, data, len);
+    c->wlen += len;
+    return 0;
+}
+
+/* 从流式数据源填充输出缓冲（每次填满 wcap），源读完后关闭并回收 */
+static void src_fill(http_conn_t *c)
+{
+    if (!c->src || c->src_eof) return;
+    while (c->wlen < c->wcap && c->src_remain > 0) {
+        size_t want = c->wcap - c->wlen;
+        if (want > c->src_remain) want = c->src_remain;
+        size_t r = fread(c->wbuf + c->wlen, 1, want, c->src);
+        if (r == 0) { conn_close(c); return; }   /* 读源失败：中止连接 */
+        c->wlen += r;
+        c->src_remain -= r;
+    }
+    if (c->src_remain == 0) {
+        fclose(c->src);
+        c->src = NULL;
+        c->src_eof = 1;
+        if (c->src_unlink) { unlink(c->src_unlink); free(c->src_unlink); c->src_unlink = NULL; }
+    }
+}
+
+/* 非阻塞排空输出缓冲；排空后若仍有流式源则续填，全部完成则关闭连接。
+   每个事件最多写 1MB，避免单个连接独占主循环 */
+static void conn_drain(http_conn_t *c)
+{
+    int wbytes = 0;
+    while (c->woff < c->wlen) {
+        ssize_t w = write(c->fd, c->wbuf + c->woff, c->wlen - c->woff);
+        if (w > 0) {
+            c->woff += (size_t)w;
+            wbytes += (int)w;
+            c->last_active = time(NULL);
+            if (wbytes >= 1024 * 1024) break;
+            continue;
+        }
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+        conn_close(c);
+        return;
+    }
+    if (c->closed) return;
+
+    if (c->woff >= c->wlen) {
+        /* 输出缓冲已排空 */
+        c->wlen = c->woff = 0;
+        if (c->src) {
+            src_fill(c);
+            if (c->closed) return;
+            if (c->wlen > 0) { conn_drain(c); return; }
+            if (!c->src) { conn_close(c); return; }   /* 源读完：连接结束 */
+            return;
+        }
+        conn_close(c);   /* 响应发送完成 */
+    }
+}
+
+/* 同步当前 epoll 关注事件：输出缓冲非空时监听 EPOLLOUT */
+static void conn_update_events(http_conn_t *c)
+{
+    if (c->closed || g_epfd < 0) return;
+    uint32_t e = EPOLLIN | EPOLLRDHUP | EPOLLHUP;
+    if (c->woff < c->wlen) e |= EPOLLOUT;
+    struct epoll_event ev = { .events = e, .data.fd = c->fd };
+    epoll_ctl(g_epfd, EPOLL_CTL_MOD, c->fd, &ev);
+}
 
 /* ---- 工具函数 ---- */
 
@@ -116,14 +281,9 @@ static const char *http_mime_type(const char *path)
     return "text/plain";
 }
 
-/**
- * http_write_all - 完整写入非阻塞 socket（处理 EAGAIN/EWOULDBLOCK 与部分写入）。
- * @fd: 客户端 socket。
- * @data: 数据指针。
- * @len: 数据长度。
- * @return: 成功返回 0；对端关闭或等待可写超时返回 -1。
- */
-int http_write_all(int fd, const void *data, size_t len)
+/* 阻塞版完整写入：仅用于非连接上下文（如视频推流线程等），连接处理一律走
+   http_send_response / http_serve_stream 的非阻塞输出缓冲 */
+static int http_write_all_blocking(int fd, const void *data, size_t len)
 {
     const char *p = (const char *)data;
     size_t off = 0;
@@ -134,24 +294,30 @@ int http_write_all(int fd, const void *data, size_t len)
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-                if (poll(&pfd, 1, 3000) <= 0) return -1;   /* 等待可写超时视为失败 */
+                if (poll(&pfd, 1, 3000) <= 0) return -1;
                 continue;
             }
             return -1;
         }
-        return -1;   /* write 返回 0，视为对端异常 */
+        return -1;
     }
     return 0;
 }
 
 /**
- * http_send_response - 向客户端发送标准 HTTP 响应头和响应体。
- * @fd: 客户端 socket。
- * @code: HTTP 状态码。
- * @status: 状态描述文本。
- * @mime: Content-Type。
- * @body: 响应体指针。
- * @len: 响应体长度。
+ * http_write_all - 完整写入客户端 socket。
+ * 连接上下文内：追加到输出缓冲（非阻塞，由主循环排空）；连接上下文外（如
+ * 视频线程）：退化为阻塞写。@return 成功 0，失败 -1。
+ */
+int http_write_all(int fd, const void *data, size_t len)
+{
+    http_conn_t *c = conn_find(fd);
+    if (c) return conn_append(c, data, len) == 0 ? 0 : -1;
+    return http_write_all_blocking(fd, data, len);
+}
+
+/**
+ * http_send_response - 向客户端发送标准 HTTP 响应头和响应体（追加到连接输出缓冲）。
  */
 void http_send_response(int fd, int code, const char *status,
                         const char *mime, const void *body, size_t len)
@@ -159,20 +325,54 @@ void http_send_response(int fd, int code, const char *status,
     char header[512];
     int off = snprintf(header, sizeof(header),
                        "HTTP/1.1 %d %s\r\n"
+                       "%s"
                        "Content-Type: %s\r\n"
                        "Content-Length: %zu\r\n"
                        "Connection: close\r\n\r\n",
-                       code, status, mime, len);
+                       code, status,
+                       code == 401 ? "WWW-Authenticate: Basic realm=\"data_transport\"\r\n" : "",
+                       mime, len);
     if (off < 0) return;
-    if (http_write_all(fd, header, (size_t)off) < 0) return;
-    if (body && len > 0)
-        http_write_all(fd, body, len);
+    http_conn_t *c = conn_find(fd);
+    if (!c) {   /* 非连接上下文：阻塞发送兜底 */
+        http_write_all_blocking(fd, header, (size_t)off);
+        if (body && len > 0) http_write_all_blocking(fd, body, len);
+        return;
+    }
+    conn_append(c, header, (size_t)off);
+    if (body && len > 0) conn_append(c, body, len);
+}
+
+/**
+ * http_serve_stream - 流式发送数据源到客户端（静态文件/日志下载/日志打包共用）。
+ * 服务器接管 src 所有权，发送完毕或连接关闭时负责 fclose；若 unlink_after
+ * 非空，发送完成后删除该文件（用于临时打包文件）。
+ */
+void http_serve_stream(int fd, const char *mime, const char *extra_hdr,
+                       FILE *src, size_t size, const char *unlink_after)
+{
+    http_conn_t *c = conn_find(fd);
+    if (!c) { fclose(src); return; }
+    char header[1024];
+    int off = snprintf(header, sizeof(header),
+                       "HTTP/1.1 200 OK\r\n"
+                       "Content-Type: %s\r\n"
+                       "%s"
+                       "Content-Length: %zu\r\n"
+                       "Connection: close\r\n\r\n",
+                       mime, extra_hdr ? extra_hdr : "", size);
+    if (off > 0) conn_append(c, header, (size_t)off);
+    c->src = src;
+    c->src_remain = size;
+    c->src_eof = 0;
+    if (unlink_after) {
+        free(c->src_unlink);
+        c->src_unlink = strdup(unlink_after);
+    }
 }
 
 /**
  * http_handle_404 - 处理未找到的静态资源请求，并返回 404 页面。
- * @fd: 客户端 socket。
- * @path: 请求路径。
  */
 void http_handle_404(int fd, const char *path)
 {
@@ -195,7 +395,6 @@ static pthread_mutex_t g_auth_mutex = PTHREAD_MUTEX_INITIALIZER;
 typedef struct { char ip[INET_ADDRSTRLEN]; int fail; time_t win; } auth_fail_t;
 static auth_fail_t g_auth_fail[AUTH_IP_TABLE];
 
-/* internal helper: check basic auth; if require_root==1 require uid==0 */
 /**
  * http_check_auth_common - 采用 Basic Auth 进行认证，支持普通用户和 root 用户要求。
  * @req: HTTP 请求头。
@@ -256,6 +455,7 @@ static int http_check_auth_common(const char *req, int fd, int require_root)
         else if (enc[i] >= '0' && enc[i] <= '9') decoded[di] = (char)(enc[i] - '0' + 52);
         else if (enc[i] == '+') decoded[di] = 62;
         else if (enc[i] == '/') decoded[di] = 63;
+        else if (enc[i] == '=') break;   /* Base64 填充符，其后不再有有效数据 */
         else goto deny;   /* 非法 Base64 字符：直接拒绝，不宽松跳过 */
         ++di;
     }
@@ -315,12 +515,7 @@ deny:
     pthread_mutex_lock(&g_auth_mutex);
     g_auth_fail[slot].fail++;
     pthread_mutex_unlock(&g_auth_mutex);
-    dprintf(fd,
-        "HTTP/1.1 401 Unauthorized\r\n"
-        "WWW-Authenticate: Basic realm=\"data_transport\"\r\n"
-        "Content-Type: text/html\r\n"
-        "Content-Length: 0\r\n"
-        "Connection: close\r\n\r\n");
+    http_send_response(fd, 401, "Unauthorized", "text/html", "", 0);
     return 0;
 }
 
@@ -339,9 +534,7 @@ static int http_check_auth_root(const char *req, int fd) { return http_check_aut
 static void http_video_client_closed(int fd);
 
 /**
- * http_serve_file - 根据 URI 提供静态文件服务，支持 HTML/CSS/JS 等前端资源。
- * @fd: 客户端 socket。
- * @uri: 请求路径。
+ * http_serve_file - 根据 URI 提供静态文件服务（复用 http_serve_stream 流式发送）。
  */
 void http_serve_file(int fd, const char *uri)
 {
@@ -359,161 +552,55 @@ void http_serve_file(int fd, const char *uri)
     fseek(fp, 0, SEEK_END);
     size_t size = (size_t)ftell(fp);
     fseek(fp, 0, SEEK_SET);
-    if (size > 20 * 1024 * 1024) {   /* 静态文件上限 20MB，防止大文件长时间阻塞 HTTP */
+    if (size > 20 * 1024 * 1024) {   /* 静态文件上限 20MB，防止大文件长时间占用连接 */
         fclose(fp);
         http_send_response(fd, 413, "Payload Too Large", "text/plain", "file too large", 15);
         return;
     }
 
-    char header[256];
-    int off = snprintf(header, sizeof(header),
-                       "HTTP/1.1 200 OK\r\n"
-                       "Content-Type: %s\r\n"
-                       "Content-Length: %zu\r\n"
-                       "Connection: close\r\n\r\n",
-                       http_mime_type(path), size);
-    if (http_write_all(fd, header, (size_t)off) < 0) { fclose(fp); return; }
-
-    char buf[8192];
-    size_t remain = size;
-    while (remain > 0) {
-        size_t n = (remain > sizeof(buf)) ? sizeof(buf) : remain;
-        size_t r = fread(buf, 1, n, fp);
-        if (r == 0) break;
-        if (http_write_all(fd, buf, r) < 0) break;
-        remain -= r;
-    }
-    fclose(fp);
+    http_serve_stream(fd, http_mime_type(path), NULL, fp, size, NULL);
 }
 
-/* ---- 每连接处理线程 ---- */
-
-/* 每连接线程上下文：pthread 只能传一个参数，把 app 与 fd 打包传递 */
-typedef struct {
-    app_ctx_t *app;
-    int fd;
-} http_client_ctx_t;
-
-/**
- * http_wait_fd - 用 epoll 实现单 fd 带超时的事件等待（可读/可写），替代 poll。
- * @fd: 目标描述符。
- * @events: 关注的事件（EPOLLIN / EPOLLOUT）。
- * @timeout_ms: 超时毫秒数。
- * @return: 就绪事件数（1 表示就绪，0 表示超时，-1 表示错误）。
- */
-static int http_wait_fd(int fd, uint32_t events, int timeout_ms)
+/* 视频推流线程退出回调：关闭 fd 并归还连接计数 */
+static void http_video_client_closed(int fd)
 {
-    int epfd = epoll_create1(0);
-    if (epfd < 0) return -1;
-    struct epoll_event ev = { .events = events, .data.fd = fd };
-    if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) { close(epfd); return -1; }
-    struct epoll_event out;
-    int r = epoll_wait(epfd, &out, 1, timeout_ms);
-    close(epfd);
-    return r;
+    close(fd);
+    __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
 }
 
-/**
- * client_handler - 处理单个 HTTP 客户端连接，解析请求并分发到对应 API 或静态文件逻辑。
- * 以独立线程方式运行（由 http_server_task 创建，detached）：慢客户端只阻塞自己的
- * 线程，不影响其他请求，也不会阻塞 HTTP 主循环喂狗。
- * @arg: http_client_ctx_t 指针（内含 app_ctx_t * 与客户端 fd），用后由本函数 free。
- * @return: 线程退出时返回 NULL。
- */
-static void *client_handler(void *arg)
+/* ---- 请求处理（连接状态机的一部分） ---- */
+
+/* 视频 MJPEG 走独立推流线程（video 模块创建），其余全部在 Reactor 主循环内处理 */
+static void http_process_request(http_conn_t *c)
 {
-    http_client_ctx_t *ctx = (http_client_ctx_t *)arg;
-    app_ctx_t *app = ctx->app;
-    int fd = ctx->fd;
-    free(ctx);   /* 上下文用完即释放，后续仅使用局部拷贝 */
-    char buf[HTTP_BUF_SIZE];
-    const long max_body_bytes = 1024L * 1024L; /* 1MB */
+    app_ctx_t *app = g_http_app;
+    int fd = c->fd;
+    const char *req = c->rbuf;
 
-    ssize_t n;
-    /* 等待首个请求包到达（最多 5 秒）：fd 是非阻塞的，若数据未到立即 read
-       会返回 EAGAIN 而被当作连接异常关闭，慢客户端/网络拥塞时易误断 */
-    if (http_wait_fd(fd, EPOLLIN, 5000) <= 0) {
-        close(fd);
-        __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
-        return NULL;
-    }
-    n = read(fd, buf, sizeof(buf) - 1);
-    if (n <= 0) {
-        close(fd);
-        __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
-        return NULL;
-    }
-    buf[n] = '\0';
+    /* 认证/命令类处理可能耗时（crypt 等），先喂狗 */
+    watchdog_feed_self("http");
 
-    /* 持续读取直到收到完整请求（\r\n\r\n 或超时） */
-    int tries = 0;
-    while (!strstr(buf, "\r\n\r\n") && !strstr(buf, "\n\n") && tries < 5) {
-        if (http_wait_fd(fd, EPOLLIN, 100) <= 0) break;
-        ssize_t r = read(fd, buf + n, sizeof(buf) - 1 - n);
-        if (r <= 0) break;
-        n += r; if (n >= (ssize_t)sizeof(buf)-1) n = (ssize_t)sizeof(buf)-1; buf[n] = '\0'; tries++;
-    }
-
-    /* 读取 POST body —— 最多等 1 秒 */
-    const char *cl_hdr = strstr(buf, "Content-Length:");
-    if (!cl_hdr) cl_hdr = strstr(buf, "content-length:");
-    long cl = 0;
-    if (cl_hdr) {
-        char *end = NULL;
-        cl = strtol(cl_hdr + 15, &end, 10);
-        if (end == cl_hdr + 15 || cl < 0) cl = 0;
-    }
-    if (cl > max_body_bytes) {
-        http_send_response(fd, 413, "Payload Too Large", "text/plain", "body too large", 15);
-        close(fd);
-        __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
-        return NULL;
-    }
-    const char *sep = strstr(buf, "\r\n\r\n");
-    if (!sep) sep = strstr(buf, "\n\n");
-    int hdr_len = sep ? (int)(sep - buf) + (sep[0] == '\r' ? 4 : 2) : 0;
-    int body_read = (n > hdr_len && hdr_len > 0) ? (int)(n - hdr_len) : 0;
-    for (int t = 0; body_read < cl && t < 10; t++) {
-        if (http_wait_fd(fd, EPOLLIN, 100) <= 0) break;
-        size_t avail = sizeof(buf) - 1 - (size_t)n;
-        if (avail == 0) break;
-        ssize_t r = read(fd, buf + n, avail);
-        if (r <= 0) break;
-        n += r; body_read += (int)r; if (n >= (ssize_t)sizeof(buf)-1) n = (ssize_t)sizeof(buf)-1; buf[n] = '\0';
-    }
-    /* body 未读完（超出缓冲区）——拒绝处理，避免配置被静默截断 */
-    if (cl > 0 && body_read < cl) {
-        http_send_response(fd, 413, "Payload Too Large", "text/plain", "body too large", 15);
-        goto close;
-    }
-
-    char method[16] = "GET", uri[HTTP_URI_MAX] = "/";
-    sscanf(buf, "%15s %255s", method, uri);
-
-    /* ---- 路由分发 ---- */
-
-    /* 视频 MJPEG：特殊处理（推流线程由 video 模块创建，每连接一个） */
-    if (strcmp(uri, "/video/mjpeg") == 0) {
+    if (strcmp(c->uri, "/video/mjpeg") == 0) {
         if (video_stream_client_start(fd, http_video_client_closed) != 0) {
             http_send_response(fd, 500, "Error", "text/plain", "", 0);
-            goto close;
+        } else {
+            conn_detach(c);   /* fd 移交给视频推流线程 */
+            return;
         }
-        return NULL;
+        goto finish;
     }
 
-    /* 认证页面（文件服务 + auth）—— 认证涉及 crypt()，可能阻塞，先喂狗 */
-    watchdog_feed_self("http");
-    if (strcmp(uri, "/") == 0 || strcmp(uri, "/index.html") == 0) {
-        if (!http_check_auth_user(buf, fd)) goto close;
-        http_serve_file(fd, "/index.html"); goto close;
+    if (strcmp(c->uri, "/") == 0 || strcmp(c->uri, "/index.html") == 0) {
+        if (!http_check_auth_user(req, fd)) goto finish;
+        http_serve_file(fd, "/index.html"); goto finish;
     }
-    if (strcmp(uri, "/config") == 0 || strncmp(uri, "/config.html", 11) == 0) {
-        if (!http_check_auth_root(buf, fd)) goto close;
-        http_serve_file(fd, "/config.html"); goto close;
+    if (strcmp(c->uri, "/config") == 0 || strncmp(c->uri, "/config.html", 11) == 0) {
+        if (!http_check_auth_root(req, fd)) goto finish;
+        http_serve_file(fd, "/config.html"); goto finish;
     }
-    if (strcmp(uri, "/dbc") == 0 || strncmp(uri, "/dbc.html", 9) == 0) {
-        if (!http_check_auth_user(buf, fd)) goto close;
-        http_serve_file(fd, "/dbc.html"); goto close;
+    if (strcmp(c->uri, "/dbc") == 0 || strncmp(c->uri, "/dbc.html", 9) == 0) {
+        if (!http_check_auth_user(req, fd)) goto finish;
+        http_serve_file(fd, "/dbc.html"); goto finish;
     }
 
     static const struct { const char *uri; int pre; const char *method; api_fn fn; int (*auth)(const char*,int); }
@@ -541,29 +628,92 @@ static void *client_handler(void *arg)
     };
 
     for (int i = 0; i < (int)(sizeof(rt)/sizeof(rt[0])); i++) {
-        int m = rt[i].pre ? !strncmp(uri, rt[i].uri, strlen(rt[i].uri))
-                          : !strcmp(uri, rt[i].uri);
+        int m = rt[i].pre ? !strncmp(c->uri, rt[i].uri, strlen(rt[i].uri))
+                          : !strcmp(c->uri, rt[i].uri);
         if (!m) continue;
-        if (rt[i].method && strcmp(method, rt[i].method) != 0) continue;
-        if (rt[i].auth && !rt[i].auth(buf, fd)) goto close;
-        rt[i].fn(app, fd, method, uri, buf);
-        goto close;
+        if (rt[i].method && strcmp(c->method, rt[i].method) != 0) continue;
+        if (rt[i].auth && !rt[i].auth(req, fd)) goto finish;
+        rt[i].fn(app, fd, c->method, c->uri, req);
+        goto finish;
     }
 
     /* 兜底：静态文件（公开） */
-    http_serve_file(fd, uri);
+    http_serve_file(fd, c->uri);
 
-close:
-    close(fd);
-    __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
-    return NULL;
+finish:
+    /* 尝试立即排空输出（多数响应一次写完）；未写完则等 EPOLLOUT */
+    if (!c->closed) {
+        conn_drain(c);
+        if (!c->closed) conn_update_events(c);
+    }
 }
 
-/* 视频推流线程退出回调：关闭 fd 并归还连接计数 */
-static void http_video_client_closed(int fd)
+/* 读事件：累积请求缓冲，收齐 header+body 后触发处理 */
+static void conn_read(http_conn_t *c)
 {
-    close(fd);
-    __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+    if (c->done) return;
+    if (c->body_cl < 0) return;   /* 请求已被拒绝（413），不再接收数据 */
+    if (c->rlen >= sizeof(c->rbuf) - 1) {   /* 读缓冲满仍未收齐：拒绝 */
+        if (c->hdr_done)
+            http_send_response(c->fd, 413, "Payload Too Large", "text/plain", "request too large", 17);
+        c->done = 1;
+        conn_drain(c);
+        if (!c->closed) conn_update_events(c);
+        return;
+    }
+
+    ssize_t r = read(c->fd, c->rbuf + c->rlen, sizeof(c->rbuf) - 1 - c->rlen);
+    if (r <= 0) {
+        if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return;
+        conn_close(c);
+        return;
+    }
+    c->rlen += (size_t)r;
+    c->rbuf[c->rlen] = '\0';
+    c->last_active = time(NULL);
+
+    if (!c->hdr_done) {
+        const char *sep = strstr(c->rbuf, "\r\n\r\n");
+        if (!sep) sep = strstr(c->rbuf, "\n\n");
+        if (sep) {
+            c->hdr_done = 1;
+            c->hdr_len = (size_t)(sep - c->rbuf) + (sep[0] == '\r' ? 4 : 2);
+            const char *cl = strcasestr(c->rbuf, "Content-Length:");
+            if (cl) {
+                char *end = NULL;
+                long v = strtol(cl + 15, &end, 10);
+                if (end != cl + 15 && v > 0) c->body_cl = v;
+            }
+            if (c->body_cl > HTTP_BODY_MAX) {   /* body 过大：拒绝，避免读缓冲溢出 */
+                http_send_response(c->fd, 413, "Payload Too Large", "text/plain", "body too large", 15);
+                c->body_cl = -1;
+                c->done = 1;
+                conn_drain(c);
+                if (!c->closed) conn_update_events(c);
+                return;
+            }
+            sscanf(c->rbuf, "%15s %255s", c->method, c->uri);
+        }
+    }
+
+    if (c->hdr_done) {
+        size_t body_got = (c->rlen > c->hdr_len) ? c->rlen - c->hdr_len : 0;
+        if (body_got >= (size_t)c->body_cl) {
+            c->done = 1;
+            http_process_request(c);
+        }
+    }
+}
+
+/* 空闲超时清理：长时间无 IO 进展的连接直接断开 */
+static void conn_sweep(time_t now)
+{
+    http_conn_t *c = g_conns;
+    while (c) {
+        http_conn_t *nxt = c->next;
+        if (now - c->last_active > HTTP_CONN_IDLE) conn_close(c);
+        c = nxt;
+    }
 }
 
 /* ---- HTTP 主循环 ---- */
@@ -578,6 +728,7 @@ static int set_socket_nonblocking(int fd)
 void *http_server_task(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;
+    g_http_app = app;
 
     g_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (g_listen_fd < 0) { LOG_ERROR("http socket"); return NULL; }
@@ -628,6 +779,7 @@ void *http_server_task(void *arg)
         pthread_mutex_unlock(&g_listen_mutex);
         return NULL;
     }
+    g_epfd = epfd;
 
     struct epoll_event ev;
     ev.events = EPOLLIN;
@@ -635,6 +787,7 @@ void *http_server_task(void *arg)
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, g_listen_fd, &ev) < 0) {
         LOG_ERROR("http epoll_ctl add listen");
         close(epfd);
+        g_epfd = -1;
         pthread_mutex_lock(&g_listen_mutex);
         close(g_listen_fd);
         g_listen_fd = -1;
@@ -653,6 +806,7 @@ void *http_server_task(void *arg)
         }
 
         watchdog_feed_self("http");
+        time_t now = time(NULL);
 
         for (int i = 0; i < n; i++) {
             int fd = events[i].data.fd;
@@ -674,56 +828,52 @@ void *http_server_task(void *arg)
                         close(client_fd);
                         continue;
                     }
-                    /* 置非阻塞，避免慢客户端阻塞服务端 write */
-                    set_socket_nonblocking(client_fd);
+                    set_socket_nonblocking(client_fd);   /* 客户端 socket 全部非阻塞 */
+                    http_conn_t *c = conn_new(client_fd);
+                    if (!c) {
+                        close(client_fd);
+                        __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+                        continue;
+                    }
                     struct epoll_event cev;
                     cev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP;
                     cev.data.fd = client_fd;
                     if (epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev) < 0) {
                         LOG_ERROR("http epoll_ctl add client");
-                        close(client_fd);
-                        __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+                        conn_close(c);
                     }
                 }
                 continue;
             }
 
-            if (events[i].events & (EPOLLHUP | EPOLLRDHUP | EPOLLERR)) {
-                epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-                close(fd);
-                __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
-                continue;
-            }
+            http_conn_t *c = conn_find(fd);
+            if (!c) continue;
 
-            epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-            /* 每连接一个独立线程处理：慢客户端只阻塞自己的线程，不影响
-               其他请求，也不阻塞 HTTP 主循环喂狗（避免被看门狗误杀） */
-            http_client_ctx_t *ctx = (http_client_ctx_t *)malloc(sizeof(*ctx));
-            if (!ctx) {
-                close(fd);
-                __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+            uint32_t evm = events[i].events;
+            if (evm & (EPOLLHUP | EPOLLRDHUP | EPOLLERR)) {
+                conn_close(c);
                 continue;
             }
-            ctx->app = app;
-            ctx->fd  = fd;
-            pthread_t ctid;
-            pthread_attr_t cattr;
-            pthread_attr_init(&cattr);
-            pthread_attr_setdetachstate(&cattr, PTHREAD_CREATE_DETACHED);
-            if (pthread_create(&ctid, &cattr, client_handler, ctx) != 0) {
-                pthread_attr_destroy(&cattr);
-                free(ctx);
-                close(fd);
-                __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
-            } else {
-                pthread_attr_destroy(&cattr);
-            }
+            if (evm & EPOLLIN) conn_read(c);
+            if (c->closed) continue;
+            if (evm & EPOLLOUT) conn_drain(c);
+            if (c->closed) continue;
+            conn_update_events(c);
         }
+
+        /* 空闲超时清理 */
+        conn_sweep(now);
+        /* 释放已关闭连接的残留结构体（必须在本轮事件处理全部结束后） */
+        conn_reap();
     }
 
+    /* 关闭所有残留连接 */
+    while (g_conns) conn_close(g_conns);
+    conn_reap();
+    close(epfd);
+    g_epfd = -1;
     /* 所有 g_listen_fd 关闭点都加锁：http_server_stop（watchdog 强杀路径）
        与主线程退出路径可能并发，互斥避免 double-close */
-    close(epfd);
     pthread_mutex_lock(&g_listen_mutex);
     close(g_listen_fd);
     g_listen_fd = -1;

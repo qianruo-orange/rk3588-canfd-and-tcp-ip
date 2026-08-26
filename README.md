@@ -10,10 +10,11 @@
 - Web 管理界面：数据监控、配置修改、日志查看与重启 / 关机控制
 - 视频流服务：通过 V4L2 接入摄像头并输出 MJPEG 视频流
 - AI 目标检测：RKNN + YOLO26 三输出模式，多线程推理池并行加速，检测结果实时画框推流
-- 网络录像：默认自动录制（按天分目录 `recordings/YYYYMMDD/`，AI 画框帧优先），封装为 MP4(MJPEG) 文件，下载界面与日志合并（/logs 双 TAB）
+- 网络录像：默认自动开启录屏（按天分目录 `recordings/YYYYMMDD/`，AI 画框帧优先），封装为 MP4(MJPEG) 文件，分辨率取自摄像头配置；下载界面与日志合并为「文件下载」页（/logs 双 TAB），支持下载、删除、打包下载
 - systemd 看门狗：监控关键线程心跳，防止异常卡死
 - 热更新配置：Web 页面修改后立即生效
-- 运行维护：日志按日期与大小自动轮转、清理脚本、部署脚本
+- 运行维护：日志按日期与大小自动轮转（按天分目录、文件名不含重复日期）、清理脚本、部署脚本
+- 数据注入 / 提取：REST API 提供 CAN 报文注入（/api/can/send）、DBC 上传热加载、配置写入，以及视频流 / CAN 原始帧与 DBC 解码信号 / 录像 / 日志等数据提取
 
 ## 系统架构
 
@@ -51,12 +52,91 @@ CAN 数据流（队列中均为原始帧，DBC 解析结果单独供前端展示
 
 > 注：`signal` 模块仅注册信号处理（`init`），`task` 为空，不创建线程。
 
-AI 数据流（画框帧为 JPEG，直接供推流与录像复用）：
+## 数据流向与接口
+
+### 视频流向
 
 ```text
-video_task ─► ai_task 采样 ─► 推理队列 ─► [worker×N 并行推理] ─► 画框帧快照 ─► /video/mjpeg_ai
-                                                                        └─► rec_task（录像优先取画框帧）
+V4L2 摄像头（MJPEG / YUYV）
+  └► video_task 采集 ─► 帧快照（video_stream_get_frame，按配置分辨率输出）
+        ├► http 线程逐连接推流 ─► /video/mjpeg（原始帧，多部分 MJPEG）
+        ├► ai_task 采样 ─► 推理队列 ─► worker×N 并行推理（RKNN）─► 画框帧快照（JPEG）
+        │       └► http 线程逐连接推流 ─► /video/mjpeg_ai（AI 不可用回退原始帧）
+        └► rec_task 每 20ms 快照 ─► MP4(MJPEG) 封装 ─► recordings/YYYYMMDD/rec_HHMMSS.mp4
 ```
+
+- 采集：`video_task` 通过 V4L2 打开摄像头，优先 MJPEG 格式，失败回退 YUYV；分辨率取自配置 `video_width` / `video_height`
+- 推流：每个 `/video/mjpeg*` 连接一个独立线程，multipart/x-mixed-replace 持续推送 JPEG 帧，慢客户端不阻塞其他连接
+- 录像：`rec_task` 默认自动开启，AI 画框帧优先，无 AI 帧回退原始帧（MJPEG 直用 / YUYV→RGB→JPEG），按天分目录落盘
+
+视频数据提取接口：
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /video/mjpeg` | 原始 MJPEG 视频流（浏览器 `<img src>` 或 ffplay 播放） |
+| `GET /video/mjpeg_ai` | AI 画框视频流（检测结果实时叠加） |
+| `GET /api/video/caps` | 摄像头能力（分辨率 / 格式） |
+| `GET /api/video/devices` | 可用视频设备列表 |
+
+### CAN 数据流向
+
+```text
+接收：SocketCAN 帧 ─► can_recv_task（epoll 非阻塞读）
+        ├► 原始帧入 rxq（供业务 pop 消费）
+        ├► http_can_record_rx ─► /api/can/frames（最近 32 帧）
+        └► 接收方向 DBC 解码 ─► /api/can/decoded（最近信号值）
+
+发送：can_tx_frame() 压入 txq ─► eventfd 唤醒 can_send_task ─► 排空写 socket
+        ├► 发送方向 DBC 解码 ─► /api/can/decoded/tx
+        └► 写失败（EAGAIN）回队尾，队列满记录丢帧
+```
+
+- 队列：每接口独立 rxq / txq（原始 `canfd_frame`），DBC 解码与原始帧缓存相互独立
+- 故障恢复：读错误自动重建 socket 并重新绑定过滤器；接口断开不阻塞整体启动
+
+CAN 数据注入接口（写数据到总线）：
+
+| 接口 | 说明 |
+| --- | --- |
+| `POST /api/can/send` | 注入一帧 CAN/CAN FD 报文（body：`ifname=can0&id=0x123&data=01 02 03`，支持 0x 前缀、空格/逗号/连字符分隔） |
+| `POST /api/can/toggle` | 控制接口 up / down（body：`ifname=can0&action=up`） |
+| `POST /api/can/dbc` | 上传 DBC 数据库（`?ifname=can0`，body 为 DBC 文本，校验通过后热加载并落盘） |
+| `POST /api/config` | 写入配置（CAN 接口 / 波特率 / FD 模式等，重启生效或热更新） |
+
+CAN 数据提取接口（从总线读数据）：
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/can` | CAN 接口状态（up / 波特率 / FD） |
+| `GET /api/can/ifaces` | 系统 CAN 接口枚举（含 FD 能力） |
+| `GET /api/can/frames` | 最近原始接收帧（id / len / data / 标志） |
+| `GET /api/can/decoded` | 接收方向 DBC 解码信号记录 |
+| `GET /api/can/decoded/tx` | 发送方向 DBC 解码信号记录 |
+
+### TCP 数据流向
+
+```text
+监听：tcp_task 监听配置端口（tcp_port，可选绑定网卡 tcp_bind）
+        ├► accept 新连接 ─► 注册 epoll（每客户端独立读写状态）
+接收：客户端数据 recv 读取（当前版本读取后丢弃，不注入 CAN 总线）
+发送：业务线程压入 txq（tcp_tx_packet） ─► eventfd 唤醒 tcp_task ─► 写客户端 socket
+        └► 支持定向发送（client_idx）与广播（client_idx < 0）；慢客户端由每客户端 wbuf 暂存
+```
+
+- TCP 服务面向外部客户端：连接数上限 `max_clients`（默认 32），非阻塞 + epoll 管理，部分写由 wbuf 续发
+- 发送链路（TX 队列 + eventfd + 广播/定向分发）已就绪，供后续业务注入（如 CAN 帧转发到 TCP 客户端）；当前版本 TCP 接收方向不转发数据
+
+### 其他数据接口
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /video/mjpeg_ai` | 见上文视频流向 |
+| `GET /api/rec/list` / `GET /recfile/<日期/文件名>` / `GET /api/rec/pack` | 录像数据提取（列表 / 单文件下载 / 打包下载） |
+| `GET /api/logs` / `GET /logfile/<日期/文件名>` / `GET /logs/pack` | 日志数据提取 |
+| `GET /api/system` | 系统状态（CPU / 内存 / 磁盘 / 温度 / 网络速度） |
+| `GET /api/network` / `GET /api/network/ifaces` | 网络状态与接口信息 |
+| `POST /api/reboot` / `POST /api/shutdown` | 设备控制（root） |
+| `POST /api/rec/start` / `POST /api/rec/stop` | 录像控制（root，默认已自动开启） |
 
 ## 目录结构
 

@@ -15,6 +15,7 @@
 #include "http/http_api_dbc.h"
 #include "http/http_internal.h"   /* http_send_response */
 #include "core/common.h"          /* safe_strncpy */
+#include "core/ring.h"            /* ring_t / ring_record / ring_total / ring_latest_pos */
 #include "can/dbc_parser.h"       /* DBC_MAX_NAME_LEN */
 
 #define DECODE_RING_MAX 32
@@ -28,8 +29,11 @@ typedef struct {
     char    text[DECODE_TEXT_MAX];
 } decode_entry_t;
 
-static decode_entry_t  g_decode_ring[DBC_DIR_COUNT][DECODE_RING_MAX];
-static _Atomic int     g_decode_count[DBC_DIR_COUNT];
+static decode_entry_t  g_decode_buf[DBC_DIR_COUNT][DECODE_RING_MAX];
+static ring_t          g_decode_ring[DBC_DIR_COUNT] = {
+    { .buf = g_decode_buf[0], .entry_size = sizeof(decode_entry_t), .max = DECODE_RING_MAX },
+    { .buf = g_decode_buf[1], .entry_size = sizeof(decode_entry_t), .max = DECODE_RING_MAX },
+};
 static pthread_mutex_t g_decode_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int dbc_dir_index(dbc_dir_t dir)
@@ -41,31 +45,27 @@ void http_dbc_record(dbc_dir_t dir, const char *ifname, canid_t can_id,
                      const char *name, const char *text)
 {
     if (!ifname || !name || !text) return;
-    int d = dbc_dir_index(dir);
-    pthread_mutex_lock(&g_decode_mutex);
-    int pos = (int)(__atomic_fetch_add(&g_decode_count[d], 1, __ATOMIC_RELAXED) % DECODE_RING_MAX);
-    decode_entry_t *e = &g_decode_ring[d][pos];
-    safe_strncpy(e->ifname, sizeof(e->ifname), ifname);
-    e->can_id = can_id;
-    safe_strncpy(e->name, sizeof(e->name), name);
-    safe_strncpy(e->text, sizeof(e->text), text);
-    pthread_mutex_unlock(&g_decode_mutex);
+    decode_entry_t e;
+    safe_strncpy(e.ifname, sizeof(e.ifname), ifname);
+    e.can_id = can_id;
+    safe_strncpy(e.name, sizeof(e.name), name);
+    safe_strncpy(e.text, sizeof(e.text), text);
+    ring_record(&g_decode_ring[dbc_dir_index(dir)], &g_decode_mutex, &e);
 }
 
 static int http_dbc_recent_json(dbc_dir_t dir, char *out, size_t out_size)
 {
     if (!out || out_size == 0) return -1;
 
-    int d = dbc_dir_index(dir);
-    int total = __atomic_load_n(&g_decode_count[d], __ATOMIC_RELAXED);
-    int count = total > DECODE_RING_MAX ? DECODE_RING_MAX : total;
+    ring_t *r = &g_decode_ring[dbc_dir_index(dir)];
+    int total = ring_total(r);
 
     int off = snprintf(out, out_size, "[");
 
     pthread_mutex_lock(&g_decode_mutex);
-    for (int i = 0; i < count; i++) {
-        int pos = (total - 1 - i) % DECODE_RING_MAX;   /* 最新在前 */
-        decode_entry_t *e = &g_decode_ring[d][pos];
+    for (int i = 0; i < total; i++) {
+        int pos = ring_latest_pos(r, i, total);   /* 最新在前 */
+        decode_entry_t *e = &g_decode_buf[dbc_dir_index(dir)][pos];
         int n = http_json_append(out, out_size, off,
                          "%s{\"ifname\":\"%s\",\"id\":\"0x%X\",\"name\":\"%s\",\"text\":\"%s\"}",
                          i > 0 ? "," : "", e->ifname, e->can_id, e->name, e->text);

@@ -34,6 +34,16 @@ typedef struct {
     can_queue_t   rxq; /* 该接口接收队列 */
 } can_iface_t;
 
+/* 按接口名查找下标（-1 = 不存在）；config.c 解析 6 处、http_api_can.c 2 处、
+   can_socket.c 1 处共用的同一段线性查找收口 */
+static inline int can_iface_index(const can_iface_t *ifaces, int count, const char *name)
+{
+    if (!ifaces || !name) return -1;
+    for (int i = 0; i < count; i++)
+        if (strcmp(ifaces[i].ifname, name) == 0) return i;
+    return -1;
+}
+
 /* ---- 应用启动参数 ---- */
 typedef struct {
     can_iface_t can_ifaces[CAN_MAX_IFACES];

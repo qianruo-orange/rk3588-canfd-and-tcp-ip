@@ -14,6 +14,7 @@
 
 #include "http/http_internal.h"
 #include "http/http_api_can.h"
+#include "core/ring.h"
 #include "can/can_socket.h"
 
 void http_can_ifaces(app_ctx_t *app, int fd)
@@ -148,23 +149,14 @@ void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char 
     }
 
     can_ctx_t *can = app->can;
-    int idx = -1;
-    for (int i = 0; i < can->count; i++)
-        if (strcmp(can->ifaces[i].ifname, ifname) == 0) { idx = i; break; }
+    int idx = can_iface_index(can->ifaces, can->count, ifname);
     if (idx < 0) {
         http_err(fd, 404, "Not Found", "iface not found");
         return;
     }
 
     /* 定位 body 与长度 */
-    long cl = 0;
-    const char *cl_hdr = strstr(body, "Content-Length:");
-    if (!cl_hdr) cl_hdr = strstr(body, "content-length:");
-    if (cl_hdr) {
-        char *end = NULL;
-        cl = strtol(cl_hdr + 15, &end, 10);
-        if (end == cl_hdr + 15 || cl < 0) cl = 0;
-    }
+    long cl = http_content_length(body);
     const char *content = http_body_start(body);
     /* 实际接收到的 body 长度（HTTP 层已把读取到的数据 NUL 结尾）。
        不盲信 Content-Length：即使客户端头声称值大于实际数据，也以实际长度为上限，
@@ -233,19 +225,19 @@ typedef struct {
     struct canfd_frame frame;
 } can_rx_entry_t;
 
-static can_rx_entry_t  g_can_rx_ring[CAN_RX_RING_MAX];
-static _Atomic int     g_can_rx_count = 0;
+static can_rx_entry_t  g_can_rx_buf[CAN_RX_RING_MAX];
+static ring_t          g_can_rx = {
+    .buf = g_can_rx_buf, .entry_size = sizeof(can_rx_entry_t), .max = CAN_RX_RING_MAX,
+};
 static pthread_mutex_t g_can_rx_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void http_can_record_rx(const char *ifname, const struct canfd_frame *frame)
 {
     if (!ifname || !frame) return;
-    pthread_mutex_lock(&g_can_rx_mutex);
-    int pos = (int)(__atomic_fetch_add(&g_can_rx_count, 1, __ATOMIC_RELAXED) % CAN_RX_RING_MAX);
-    can_rx_entry_t *e = &g_can_rx_ring[pos];
-    safe_strncpy(e->ifname, sizeof(e->ifname), ifname);
-    e->frame = *frame;
-    pthread_mutex_unlock(&g_can_rx_mutex);
+    can_rx_entry_t e;
+    safe_strncpy(e.ifname, sizeof(e.ifname), ifname);
+    e.frame = *frame;
+    ring_record(&g_can_rx, &g_can_rx_mutex, &e);
 }
 
 /* 单帧序列化为 JSON 对象；返回写入字节数（溢出返回 -1，复用 http_json_append） */
@@ -273,15 +265,14 @@ void http_can_rx(app_ctx_t *app, int fd)
 {
     (void)app;
     char json[16384];
-    int total = __atomic_load_n(&g_can_rx_count, __ATOMIC_RELAXED);
-    int count = total > CAN_RX_RING_MAX ? CAN_RX_RING_MAX : total;
+    int total = ring_total(&g_can_rx);
     int off = snprintf(json, sizeof(json), "[");
 
     pthread_mutex_lock(&g_can_rx_mutex);
-    for (int i = 0; i < count; i++) {
-        int pos = (total - 1 - i) % CAN_RX_RING_MAX;   /* 最新在前 */
+    for (int i = 0; i < total; i++) {
+        int pos = ring_latest_pos(&g_can_rx, i, total);   /* 最新在前 */
         if (i > 0 && (size_t)off < sizeof(json) - 1) json[off++] = ',';
-        int n = can_rx_frame_json(&g_can_rx_ring[pos], json + off, sizeof(json) - (size_t)off);
+        int n = can_rx_frame_json(&g_can_rx_buf[pos], json + off, sizeof(json) - (size_t)off);
         if (n < 0 || (size_t)n >= (int)(sizeof(json) - (size_t)off)) { off = (int)sizeof(json) - 1; break; }
         off += n;
     }
@@ -342,11 +333,8 @@ void http_can_send(app_ctx_t *app, int fd, const char *method, const char *uri, 
 
     /* 校验目标接口存在及其模式：经典 CAN 单帧最多 8 字节，
        否则 send 必然失败且前端无提示 */
-    int iface_idx = -1;
-    if (app && app->can) {
-        for (int i = 0; i < app->can->count; i++)
-            if (strcmp(app->can->ifaces[i].ifname, ifname) == 0) { iface_idx = i; break; }
-    }
+    int iface_idx = can_iface_index(app && app->can ? app->can->ifaces : NULL,
+                                    app && app->can ? app->can->count : 0, ifname);
     if (iface_idx < 0) {
         http_err(fd, 404, "Not Found", "iface not found");
         return;

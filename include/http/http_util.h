@@ -47,6 +47,20 @@ int http_form_get_param(const char *req, const char *key, char *out, size_t out_
 /* 读取 proc/sysfs 文本文件中以 key 前缀开头的行的整数值；文件不可读或未匹配返回 -1。 */
 long http_read_key_long(const char *path, const char *key);
 
+/* 解析 HTTP 头的 Content-Length 值（大小写不敏感）；缺省或非法返回 -1。 */
+long http_content_length(const char *req);
+
+/* 取文件大小（字节）并把文件指针复位到开头；失败返回 0。
+   静态文件 / 日志下载 / 日志打包三处"先量大小再流式发送"共用。 */
+static inline size_t http_file_size(FILE *fp)
+{
+    if (!fp || fseek(fp, 0, SEEK_END) != 0) return 0;
+    long sz = ftell(fp);
+    if (sz < 0) { fseek(fp, 0, SEEK_SET); return 0; }
+    if (fseek(fp, 0, SEEK_SET) != 0) return 0;
+    return (size_t)sz;
+}
+
 /* 便捷响应封装（内部走 http_send_response，自动计算长度） */
 void http_ok_json(int fd, const char *json, size_t len);
 void http_ok_text(int fd, const char *msg);

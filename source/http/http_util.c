@@ -146,6 +146,18 @@ long http_read_key_long(const char *path, const char *key)
     return val;
 }
 
+long http_content_length(const char *req)
+{
+    if (!req) return -1;
+    const char *cl = strstr(req, "Content-Length:");
+    if (!cl) cl = strstr(req, "content-length:");
+    if (!cl) return -1;
+    char *end = NULL;
+    long v = strtol(cl + 15, &end, 10);
+    if (end == cl + 15 || v < 0) return -1;
+    return v;
+}
+
 /* ---- 便捷响应封装 ---- */
 
 void http_ok_json(int fd, const char *json, size_t len)

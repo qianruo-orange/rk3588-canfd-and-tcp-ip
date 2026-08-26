@@ -22,10 +22,11 @@ typedef struct rec_mp4_s rec_mp4_t;
 rec_mp4_t *rec_mp4_create(const char *dir, const char *prefix, int w, int h,
                           char *name_out, size_t name_size);
 
-/* 追加一帧 JPEG（原样写入 mdat）；成功返回 0。
+/* 追加一帧 H.264（Annex-B，由封装器转为 length-prefixed 写入 mdat）。
+   @keyframe 1 表示 IDR（写入 stss）。成功返回 0。
    达上限（帧数 / mdat 体积，防 32 位溢出）返回 -1（自动触发停止录制）。 */
-int rec_mp4_write_frame(rec_mp4_t *s, const unsigned char *jpeg, size_t len,
-                        uint64_t ts_ms);
+int rec_mp4_write_frame(rec_mp4_t *s, const unsigned char *h264, size_t len,
+                        int keyframe, uint64_t ts_ms);
 
 /* 结束会话：回填 mdat size + 写 moov + 关文件。
    @return 0 成功；-1 失败（空录制无帧时删除残缺文件） */

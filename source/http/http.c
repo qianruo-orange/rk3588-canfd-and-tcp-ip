@@ -630,6 +630,7 @@ static void http_process_request(http_conn_t *c)
         { "/api/rec/delete",0,"POST", http_rec_handler,  http_check_auth_root },
         { "/api/rec/status",0, NULL,  http_rec_handler,  NULL },
         { "/api/rec/list",  0, NULL,  http_rec_handler,  NULL },
+        { "/api/rec/pack",  0, NULL,  http_rec_handler,  http_check_auth_root },
         { "/recfile/",      1, NULL,  http_rec_handler,  http_check_auth_root },
     };
 

@@ -247,10 +247,17 @@ rec_mp4_t *rec_mp4_create(const char *dir, const char *prefix, int w, int h,
     time_t t = time(NULL);
     struct tm tm;
     localtime_r(&t, &tm);
-    snprintf(s->name, sizeof(s->name), "%s_%04d%02d%02d_%02d%02d%02d.mp4",
-             prefix, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-             tm.tm_hour, tm.tm_min, tm.tm_sec);
-    snprintf(s->path, sizeof(s->path), "%s/%s", dir, s->name);
+    /* 规范化命名：日期已体现在按天目录（dir = .../YYYYMMDD），文件名只保留时间 */
+    int idx = 0;
+    do {
+        if (idx == 0)
+            snprintf(s->name, sizeof(s->name), "%s_%02d%02d%02d.mp4",
+                     prefix, tm.tm_hour, tm.tm_min, tm.tm_sec);
+        else
+            snprintf(s->name, sizeof(s->name), "%s_%02d%02d%02d_%d.mp4",
+                     prefix, tm.tm_hour, tm.tm_min, tm.tm_sec, idx);
+        snprintf(s->path, sizeof(s->path), "%s/%s", dir, s->name);
+    } while (access(s->path, F_OK) == 0 && ++idx < 1000);  /* 同秒会话冲突追加序号 */
 
     s->fp = fopen(s->path, "wb");
     if (!s->fp) { free(s); return NULL; }

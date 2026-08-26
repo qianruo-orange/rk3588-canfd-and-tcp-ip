@@ -1,13 +1,13 @@
-<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>rk3588-canfd-and-tcp-ip</title>
+<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CAN/TCP 数据网关</title>
 <link rel="stylesheet" href="/css/common.css">
 <link rel="stylesheet" href="/css/monitor.css">
 <script src="/js/theme.js"></script>
 </head><body>
 <button id="themeBtn" class="theme-btn" onclick="toggleTheme()" title="切换主题">🌙</button>
-<div class="top-bar"><h1>rk3588-canfd-and-tcp-ip</h1><span id="datetime"></span></div>
-<div class="sub">CAN / TCP 数据网关 · 运行中</div>
+<div class="top-bar"><h1>CAN/TCP 数据网关</h1><span id="datetime"></span></div>
+<div class="sub">运行中</div>
 <div class="nav">
-  <a href="/dbc">📡 DBC解析</a><a href="/config">⚙ 配置</a><a href="/logs">📋 日志</a>
+  <a href="/dbc">📡 DBC解析</a><a href="/config">⚙ 配置</a><a href="/logs">📁 文件下载</a>
 </div>
 
 <div class="grid">
@@ -18,9 +18,6 @@
         <div class="video-wrapper">
           <video id="stream_video" autoplay muted playsinline controls></video>
           <img id="stream_img" style="display:none" alt="stream">
-        </div>
-        <div class="rec-bar">
-          <span id="rec_status" class="rec-status"></span>
         </div>
       </div>
     </div>

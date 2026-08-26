@@ -10,7 +10,7 @@
 - Web 管理界面：数据监控、配置修改、日志查看与重启 / 关机控制
 - 视频流服务：通过 V4L2 接入摄像头并输出 MJPEG 视频流
 - AI 目标检测：RKNN + YOLO26 三输出模式，多线程推理池并行加速，检测结果实时画框推流
-- 网络录像：Web 一键录制（AI 画框帧优先），封装为 MP4(MJPEG) 文件，支持列表 / 下载 / 删除
+- 网络录像：默认自动录制（按天分目录 `recordings/YYYYMMDD/`，AI 画框帧优先），封装为 MP4(MJPEG) 文件，下载界面与日志合并（/logs 双 TAB）
 - systemd 看门狗：监控关键线程心跳，防止异常卡死
 - 热更新配置：Web 页面修改后立即生效
 - 运行维护：日志按日期与大小自动轮转、清理脚本、部署脚本
@@ -297,12 +297,13 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | GET | `/api/video/caps` | 无 | 视频参数列表 |
 | GET | `/video/mjpeg` | 无 | MJPEG 视频流 |
 | GET | `/video/mjpeg_ai` | 无 | AI 画框 MJPEG 视频流（AI 未启用时回退原始帧） |
-| POST | `/api/rec/start` | root | 开始网络录像 |
-| POST | `/api/rec/stop` | root | 停止网络录像（自动写 moov 收尾） |
+| POST | `/api/rec/start` | root | 手动开始网络录像（默认已自动开启，一般无需调用） |
+| POST | `/api/rec/stop` | root | 手动停止网络录像（自动写 moov 收尾；停止后不再自动续录） |
 | GET | `/api/rec/status` | 无 | 录制状态（录制中 / 文件名 / 帧数 / 字节数 / 帧率） |
-| GET | `/api/rec/list` | 无 | 录像文件列表（按时间倒序） |
-| POST | `/api/rec/delete` | root | 删除录像文件（body 为文件名） |
-| GET | `/recfile/<name>` | root | 下载录像文件 |
+| GET | `/api/rec/list` | 无 | 录像文件列表（按时间倒序；`日期/文件名` 两段式，按天分目录） |
+| POST | `/api/rec/delete` | root | 删除录像文件（body 为 `日期/文件名`） |
+| GET | `/recfile/<日期/文件名>` | root | 下载录像文件 |
+| GET | `/api/rec/pack` | root | 打包下载全部录像（tar.gz，上限 2GB） |
 | GET | `/api/logs`、`/logs`、`/logfile/*` | root | 日志列表 / 下载 / 删除 |
 
 > 监控页与 DBC 页需要普通用户认证；配置页与写操作接口要求 root 权限。
@@ -318,13 +319,15 @@ RKNN + YOLO26 三输出模式（YOLOv8 风格 P3/P4/P5 检测头），由 `rknn-
 
 ## 网络录像
 
-Web 一键录制，无硬件编码器依赖：
+服务启动后默认自动录制，无硬件编码器依赖：
 
-- 触发方式：监控页「开始/停止录制」按钮（`/api/rec/start` / `/api/rec/stop`）
+- 触发方式：默认自动开启（无需 Web 操作）；也保留 `/api/rec/start` / `/api/rec/stop` 手动接口（手动停止后不再自动续录）
+- 按天分目录：录制文件存于 `recordings/YYYYMMDD/`，每天一个子目录，自动跨天切换；文件名规范化只保留时间（`rec_HHMMSS.mp4`，同秒冲突自动追加序号），日志文件同理为 `rk3588-canfd-and-tcp-ip_info.log` / `_error.log`
+- 分辨率：录制分辨率取摄像头配置 `video_width` / `video_height` 的选定值（任意分辨率），未配置时退回首帧探测
 - 帧来源：AI 画框帧优先（保留检测框），无 AI 帧时回退原始帧（MJPEG 直用 / YUYV 转 JPEG）
 - 封装格式：标准 ISO BMFF MP4（MJPEG track），`ftyp + mdat + moov`，moov 末尾回写记录每帧偏移与时长，VLC / ffplay / 浏览器均可播放
-- 文件管理：录制文件存于 `recordings/`，监控页支持列表、下载、删除（文件名白名单校验）
-- 上限保护：单次录制帧数与 mdat 体积上限（防止 32 位 size 溢出），达到上限自动停止并收尾
+- 下载管理：与日志下载界面合并为「文件下载」页（`/logs`），TAB 切换日志 / 录像列表，支持下载、删除、打包下载（日志 `/logs/pack`、录像 `/api/rec/pack`，录像打包上限 2GB；文件名白名单 + 两段式路径校验防穿越）
+- 上限保护：单次录制帧数与 mdat 体积上限（防止 32 位 size 溢出），达到上限自动收尾并续录下一段
 
 ## 看门狗机制
 

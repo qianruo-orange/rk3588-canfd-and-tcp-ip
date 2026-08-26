@@ -4,6 +4,7 @@
  *   POST /api/rec/stop    停止录制并 finalize
  *   GET  /api/rec/status  录制状态
  *   GET  /api/rec/list    录制文件列表
+ *   GET  /api/rec/pack    打包下载全部录像 (tar.gz)
  *   POST /api/rec/delete  删除录制文件（body = 文件名）
  *   GET  /recfile/<name>  下载录制文件
  */
@@ -17,6 +18,7 @@
 #include "video/video_rec.h"
 
 #define REC_DIR PATH_RECORDINGS
+#define REC_PACK_MAX (2UL * 1024 * 1024 * 1024)  /* 录像打包体积上限 2GB，防止长时间阻塞 HTTP / 占满磁盘 */
 
 /* 单文件名合法性：rec_*.mp4 */
 static int rec_file_valid(const char *name)
@@ -168,6 +170,70 @@ static void serve_rec_delete(int fd, const char *body)
         http_err(fd, 404, "Not Found", NULL);
 }
 
+/* 统计录像目录总大小（含按天子目录），用于打包前的体积限制 */
+static int64_t rec_total_size(void)
+{
+    int64_t total = 0;
+    DIR *dir = opendir(REC_DIR);
+    if (!dir) return 0;
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        char subdir[512];
+        snprintf(subdir, sizeof(subdir), "%s/%s", REC_DIR, de->d_name);
+        struct stat dst;
+        if (stat(subdir, &dst) < 0 || !S_ISDIR(dst.st_mode)) continue;
+        DIR *sd = opendir(subdir);
+        if (!sd) continue;
+        struct dirent *fde;
+        while ((fde = readdir(sd)) != NULL) {
+            if (fde->d_name[0] == '.') continue;
+            char path[512];
+            snprintf(path, sizeof(path), "%s/%s", subdir, fde->d_name);
+            struct stat st;
+            if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) total += (int64_t)st.st_size;
+        }
+        closedir(sd);
+    }
+    closedir(dir);
+    return total;
+}
+
+/* 打包下载所有录像 (tar.gz)：临时文件放 recordings/ 内（保证 systemd ProtectSystem
+   下可写），打包时用 --exclude 排除自身；完成后流式发送并自动清理 */
+static void serve_rec_pack(int fd)
+{
+    if (rec_total_size() > (int64_t)REC_PACK_MAX) {
+        LOG_INFO("rec pack: total size exceeds %lld bytes, rejected", (long long)REC_PACK_MAX);
+        http_err(fd, 413, "Payload Too Large", "recordings too large");
+        return;
+    }
+
+    char tmppath[512];
+    snprintf(tmppath, sizeof(tmppath), "%s/.recs_pack_%d.tar.gz", REC_DIR, (int)getpid());
+    char cmd[1400];
+    snprintf(cmd, sizeof(cmd),
+             "tar -czf '%s' -C '%s' --exclude='.recs_pack_*' . 2>/dev/null",
+             tmppath, REC_DIR);
+    if (system(cmd) != 0 || access(tmppath, F_OK) != 0) {
+        unlink(tmppath);
+        http_err(fd, 500, "Internal Error", NULL);
+        return;
+    }
+
+    FILE *fp = fopen(tmppath, "rb");
+    if (!fp) {
+        unlink(tmppath);
+        http_err(fd, 500, "Internal Error", NULL);
+        return;
+    }
+    size_t size = http_file_size(fp);
+
+    http_serve_stream(fd, "application/gzip",
+                      "Content-Disposition: attachment; filename=\"recordings_pack.tar.gz\"\r\n",
+                      fp, size, tmppath);
+}
+
 /* 总入口 */
 void http_rec_handler(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf)
 {
@@ -188,6 +254,8 @@ void http_rec_handler(app_ctx_t *app, int fd, const char *method, const char *ur
             http_err(fd, 409, "Conflict", "not recording");
         else
             http_ok_text(fd, "stopped");
+    } else if (strcmp(uri, "/api/rec/pack") == 0) {
+        serve_rec_pack(fd);
     } else if (strcmp(uri, "/api/rec/delete") == 0) {
         if (strcmp(method, "POST") != 0) { http_err(fd, 405, "Method Not Allowed", NULL); return; }
         serve_rec_delete(fd, req_buf);

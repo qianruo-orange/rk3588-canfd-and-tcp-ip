@@ -4,47 +4,6 @@
   var lastCores = [];
   var npuInited = false;
 
-  /* ---- 网络录像（默认自动开启，仅显示状态） ---- */
-  var rec = { recording:false, startTs:0, frames:0, bytes:0, fps:0 };
-
-  function fmtBytes(n) {
-    if (n < 1024) return n + 'B';
-    if (n < 1024*1024) return (n/1024).toFixed(1) + 'KB';
-    return (n/1024/1024).toFixed(2) + 'MB';
-  }
-  function fmtDur(ms) {
-    var s = Math.floor(ms/1000);
-    var m = Math.floor(s/60), h = Math.floor(m/60);
-    return (h>0 ? h+':' : '') + ('0'+ (m%60)).slice(-2) + ':' + ('0'+(s%60)).slice(-2);
-  }
-
-  async function updateRec() {
-    try {
-      var r = await fetch('/api/rec/status');
-      if (!r.ok) return;
-      var d = await r.json();
-      rec.recording = !!d.recording;
-      rec.frames = d.frames || 0;
-      rec.bytes = d.bytes || 0;
-      rec.fps = d.fps || 0;
-      if (rec.recording && !rec.startTs) rec.startTs = Date.now();
-      if (!rec.recording) rec.startTs = 0;
-
-      var st = document.getElementById('rec_status');
-      if (!st) return;
-      if (rec.recording) {
-        st.textContent = '● REC ' + fmtDur(Date.now() - rec.startTs)
-          + ' · ' + fmtBytes(rec.bytes);
-        st.className = 'rec-status rec-live';
-      } else {
-        st.textContent = rec.frames > 0 ? '已停止' : '';
-        st.className = 'rec-status';
-      }
-    } catch(e) {}
-  }
-
-  /* 录像文件列表已合并到日志页（/logs），此处不再渲染 */
-
   /* 网络速度跟踪 */
   var lastNet = {eth0:{rx:0,tx:0,ts:0},wlan0:{rx:0,tx:0,ts:0}};
   var netInited = false;
@@ -232,7 +191,6 @@
       } catch(e) {}
     } catch(e) {}
     updateNet();
-    updateRec();
   }
 
   update();

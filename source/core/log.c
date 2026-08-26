@@ -46,8 +46,9 @@ static void rotate_check(int is_error)
 
     char subdir[PATH_MAX], path[PATH_MAX], bak[PATH_MAX];
     snprintf(subdir, sizeof(subdir), "%s/%s", g_log.dir, g_log.date);
-    snprintf(path, sizeof(path), "%s/%s_%s_%s.log",
-             subdir, APP_NAME, is_error ? "error" : "info", g_log.date);
+    /* 规范化命名：日期已体现在按天目录（logs/YYYYMMDD/） */
+    snprintf(path, sizeof(path), "%s/%s_%s.log",
+             subdir, APP_NAME, is_error ? "error" : "info");
     snprintf(bak, sizeof(bak), "%s.1", path);
     fclose(*fpp);
     rename(path, bak);
@@ -72,10 +73,11 @@ static void ensure_date(void)
     mkdir(subdir, 0755);
 
     char path[512];
-    snprintf(path, sizeof(path), "%s/%s_info_%s.log", subdir, APP_NAME, g_log.date);
+    /* 规范化命名：日期已体现在按天目录（logs/YYYYMMDD/） */
+    snprintf(path, sizeof(path), "%s/%s_info.log", subdir, APP_NAME);
     rotate_if_needed(path);
     g_log.fp_info = fopen(path, "a"); if (!g_log.fp_info) g_log.fp_info = stderr;
-    snprintf(path, sizeof(path), "%s/%s_error_%s.log", subdir, APP_NAME, g_log.date);
+    snprintf(path, sizeof(path), "%s/%s_error.log", subdir, APP_NAME);
     rotate_if_needed(path);
     g_log.fp_error = fopen(path, "a"); if (!g_log.fp_error) g_log.fp_error = stderr;
 }

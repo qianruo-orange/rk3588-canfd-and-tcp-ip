@@ -103,6 +103,7 @@
     document.getElementById('tbl_logs').style.display = isRec ? 'none' : '';
     document.getElementById('tbl_rec').style.display = isRec ? '' : 'none';
     document.getElementById('pack_btn').style.display = isRec ? 'none' : '';
+    document.getElementById('pack_rec_btn').style.display = isRec ? '' : 'none';
     var btns = document.querySelectorAll('.tab-btn');
     for (var i = 0; i < btns.length; i++)
       btns[i].classList.toggle('tab-on', btns[i].getAttribute('data-tab') === tab);

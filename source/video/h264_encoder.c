@@ -29,7 +29,7 @@
 #define ENC_BUFS  3      /* 每队列缓冲数 */
 
 #define V4L2_CID_MPEG_VIDEO_H264_SPS_PPS_BEFORE_IDR \
-    (V4L2_CID_MPEG_VIDEO_BASE + 24)  /* Rockchip 扩展 control */
+    0x00980919u  /* Rockchip 扩展 control（V4L2_CID_MPEG_VIDEO_BASE+24） */
 
 struct h264_encoder_s {
     int  fd;
@@ -100,7 +100,7 @@ static int enc_reqbufs(h264_encoder_t *e, uint32_t type, void **bufs)
             return -1;
         }
         bufs[i] = mmap(NULL, p.length, PROT_READ | PROT_WRITE, MAP_SHARED,
-                       e->fd, p.m.offset);
+                       e->fd, p.m.mem_offset);
         if (bufs[i] == MAP_FAILED) {
             LOG_ERROR("h264: mmap type=%u failed", type);
             bufs[i] = NULL;

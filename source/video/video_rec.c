@@ -253,6 +253,28 @@ void *video_rec_task(void *arg)
                 free(probe);
             }
 
+            /* 实测帧率（不写死）→ 按分辨率动态码率 → 创建 H.264 编码器 */
+            int fps = rec_measure_fps(app);
+            if (fps <= 0) {
+                pthread_mutex_lock(&g_rec.lock);
+                g_rec.start_fail = 1;   /* 无视频帧 */
+                pthread_mutex_unlock(&g_rec.lock);
+                usleep(100000);
+                continue;
+            }
+            int bitrate = (int)((uint64_t)pw * ph * 2u);   /* 每像素 ~2bps */
+            if (bitrate < 300000)  bitrate = 300000;
+            if (bitrate > 16000000) bitrate = 16000000;
+            h264_encoder_t *enc = h264_encoder_create(pw, ph, fps, bitrate);
+            if (!enc) {
+                pthread_mutex_lock(&g_rec.lock);
+                g_rec.start_fail = 2;   /* 编码器不可用 */
+                pthread_mutex_unlock(&g_rec.lock);
+                LOG_ERROR("rec: h264 encoder init failed (%dx%d)", pw, ph);
+                usleep(200000);
+                continue;
+            }
+
             /* 按天分目录：recordings/YYYYMMDD */
             time_t t = time(NULL);
             struct tm tm;
@@ -267,8 +289,9 @@ void *video_rec_task(void *arg)
             rec_mp4_t *s = rec_mp4_create(dir, "rec", pw, ph,
                                           fname, sizeof(fname));
             if (!s) {
+                h264_encoder_destroy(enc);
                 pthread_mutex_lock(&g_rec.lock);
-                g_rec.start_fail = 2;
+                g_rec.start_fail = 3;
                 pthread_mutex_unlock(&g_rec.lock);
                 LOG_ERROR("rec: create recording file failed");
                 usleep(100000);
@@ -276,7 +299,7 @@ void *video_rec_task(void *arg)
             }
             char rel[192];
             snprintf(rel, sizeof(rel), "%s/%s", day, fname);
-            LOG_INFO("rec: recording started -> %s (%dx%d)", rel, pw, ph);
+            LOG_INFO("rec: recording started -> %s (%dx%d @%dfps)", rel, pw, ph, fps);
             pthread_mutex_lock(&g_rec.lock);
             g_rec.recording = 1;
             g_rec.start_fail = 0;
@@ -296,22 +319,47 @@ void *video_rec_task(void *arg)
                 pthread_mutex_unlock(&g_rec.lock);
                 if (!still) break;
 
+                /* 取帧：AI 画框帧（JPEG）优先，回退原始帧（JPEG/YUYV） */
+                unsigned char *nv12 = NULL;
+                size_t nlen = 0;
                 unsigned char *jpeg = NULL; size_t jlen = 0;
-                int fw = 0, fh = 0;
+                int fw = 0, fh = 0, took = -1;
                 if (rec_take_ai_frame(&jpeg, &jlen) == 0) {
-                    /* 画框帧：宽高沿用会话尺寸 */
-                } else if (rec_take_raw_frame(&jpeg, &jlen, &fw, &fh) == 0) {
-                    if (jpeg && (fw != pw || fh != ph)) { free(jpeg); jpeg = NULL; }
+                    if (rec_to_nv12(jpeg, jlen, VIDEO_FMT_MJPEG, pw, ph,
+                                    &nv12, &nlen) == 0) took = 0;
+                    free(jpeg);
                 }
-                if (!jpeg) { usleep(20000); continue; }
+                if (took < 0) {
+                    int fmt = 0; unsigned long long seq = 0;
+                    unsigned char *raw = NULL; size_t raw_len = 0;
+                    if (video_stream_get_frame(&raw, &raw_len, &fmt, &fw, &fh, &seq) == 0 &&
+                        seq != g_raw_seq) {
+                        g_raw_seq = seq;
+                        if (fw == pw && fh == ph &&
+                            rec_to_nv12(raw, raw_len, fmt, fw, fh, &nv12, &nlen) == 0)
+                            took = 0;
+                    }
+                    if (raw) free(raw);
+                }
+                if (took < 0) { usleep(20000); continue; }
+
+                /* H.264 编码 */
+                unsigned char *h264 = NULL; size_t hlen = 0;
+                int keyframe = 0;
+                if (h264_encoder_encode(enc, nv12, &h264, &hlen, &keyframe) != 0) {
+                    free(nv12);
+                    done = 1;   /* 编码失败：结束本段（自动续录下一段） */
+                    break;
+                }
+                free(nv12);
 
                 uint64_t ts = now_ms();
-                if (rec_mp4_write_frame(s, jpeg, jlen, ts) != 0) {
-                    free(jpeg);
+                if (rec_mp4_write_frame(s, h264, hlen, keyframe, ts) != 0) {
+                    free(h264);
                     done = 1;   /* 达上限或写失败：结束本段（自动续录下一段） */
                     break;
                 }
-                free(jpeg);
+                free(h264);
 
                 pthread_mutex_lock(&g_rec.lock);
                 g_rec.frames = rec_mp4_frames(s);
@@ -324,6 +372,7 @@ void *video_rec_task(void *arg)
             uint32_t n_frames = rec_mp4_frames(s);
             uint32_t n_bytes  = rec_mp4_bytes(s);
             rec_mp4_finalize(s);
+            h264_encoder_destroy(enc);
             pthread_mutex_lock(&g_rec.lock);
             g_rec.recording = 0;
             g_rec.start_fail = 0;

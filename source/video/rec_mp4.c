@@ -96,31 +96,42 @@ static void write_matrix(FILE *fp)
 
 /* ---- Annex-B 扫描辅助 ---- */
 
-/* 返回第 idx 个 NAL 起始偏移（跳过 start code），-1 无 */
-static long nal_at(const unsigned char *d, size_t len, long from, size_t *nal_len)
+/* 从 from 起找下一个 start code：*sc_off 记录 start code 起点，
+   返回 NAL 数据起点（跳过 start code），无则 -1 */
+static long nal_find(const unsigned char *d, size_t len, size_t from, size_t *sc_off)
 {
-    size_t i = (from > 0) ? (size_t)from : 0;
-    for (; i + 3 <= len; i++) {
-        size_t start = (size_t)-1;
+    for (size_t i = from; i + 3 <= len; i++) {
         if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
-            start = i + 3;
-        } else if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 0 &&
-                   i + 3 < len && d[i + 3] == 1) {
-            start = i + 4;
+            if (sc_off) *sc_off = i;
+            return (long)(i + 3);
         }
-        if (start != (size_t)-1) {
-            /* 找下一个 start code 确定本 NAL 长度 */
-            size_t j = start;
-            for (; j + 3 <= len; j++) {
-                if (d[j] == 0 && d[j + 1] == 0 && d[j + 2] == 1) break;
-                if (d[j] == 0 && d[j + 1] == 0 && d[j + 2] == 0 &&
-                    j + 3 < len && d[j + 3] == 1) break;
-            }
-            if (nal_len) *nal_len = j - start;
-            return (long)start;
+        if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 0 &&
+            i + 3 < len && d[i + 3] == 1) {
+            if (sc_off) *sc_off = i;
+            return (long)(i + 4);
         }
     }
     return -1;
+}
+
+/* 遍历 Annex-B 码流，逐 NAL 回调：@start 数据起点，@nlen 数据长度 */
+typedef void (*nal_cb_t)(void *ud, const unsigned char *start, size_t nlen);
+static void nal_walk(const unsigned char *d, size_t len, nal_cb_t cb, void *ud)
+{
+    size_t from = 0;
+    while (from + 3 <= len) {
+        size_t sc = 0;
+        long pos = nal_find(d, len, from, &sc);
+        if (pos < 0) break;
+        /* 从当前 NAL 数据起点找下一个 start code：H.264 帧内经防竞争字节
+           保证不含 00 00 00/00 00 01，直接扫描数据区是安全的 */
+        size_t sc2 = 0;
+        long next = nal_find(d, len, (size_t)pos, &sc2);
+        size_t nlen = (next < 0) ? (len - (size_t)pos) : ((size_t)sc2 - (size_t)pos);
+        cb(ud, d + pos, nlen);
+        if (next < 0) break;
+        from = (size_t)pos;
+    }
 }
 
 /* ---- MP4 封装 ---- */
@@ -307,6 +318,18 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
     for (uint32_t i = 0; i < K; i++) be32(fp, s->keyframes[i]);
 }
 
+/* Annex-B → length-prefixed 写入回调：be32(nlen) + NAL 数据 */
+static void nal_write_cb(void *ud, const unsigned char *start, size_t nlen)
+{
+    struct { FILE *fp; uint32_t written; int ok; } *c = ud;
+    if (!c->ok) return;
+    be32(c->fp, (uint32_t)nlen);
+    if (fwrite(start, 1, nlen, c->fp) == nlen)
+        c->written += (uint32_t)nlen + 4u;
+    else
+        c->ok = 0;
+}
+
 /* ---- 对外 API ---- */
 
 rec_mp4_t *rec_mp4_create(const char *dir, const char *prefix, int w, int h,
@@ -354,25 +377,26 @@ rec_mp4_t *rec_mp4_create(const char *dir, const char *prefix, int w, int h,
     return s;
 }
 
+/* SPS/PPS 收集回调：type 7 → sps，type 8 → pps */
+static void sps_pps_cb(void *ud, const unsigned char *start, size_t nlen)
+{
+    rec_mp4_t *s = ud;
+    if (s->avcC_written) return;
+    unsigned char type = start[0] & 0x1F;
+    if (type == 7 && nlen <= sizeof(s->sps) && s->sps_len == 0) {
+        memcpy(s->sps, start, nlen);
+        s->sps_len = (unsigned int)nlen;
+    } else if (type == 8 && nlen <= sizeof(s->pps) && s->pps_len == 0) {
+        memcpy(s->pps, start, nlen);
+        s->pps_len = (unsigned int)nlen;
+    }
+    if (s->sps_len && s->pps_len) s->avcC_written = 1;
+}
+
 /* 首次遇到 SPS/PPS 时保存（供 avcC） */
 static void rec_save_sps_pps(rec_mp4_t *s, const unsigned char *d, size_t len)
 {
-    if (s->avcC_written) return;
-    long pos = nal_at(d, len, 0, NULL);
-    while (pos >= 0 && (size_t)pos < len) {
-        unsigned char type = d[pos] & 0x1F;
-        size_t nlen = 0;
-        long next = nal_at(d, len, pos + 1, &nlen);
-        if (type == 7 && nlen <= sizeof(s->sps)) {
-            memcpy(s->sps, d + pos, nlen);
-            s->sps_len = (unsigned int)nlen;
-        } else if (type == 8 && nlen <= sizeof(s->pps)) {
-            memcpy(s->pps, d + pos, nlen);
-            s->pps_len = (unsigned int)nlen;
-        }
-        if (s->sps_len && s->pps_len) { s->avcC_written = 1; return; }
-        pos = next;
-    }
+    nal_walk(d, len, sps_pps_cb, s);
 }
 
 int rec_mp4_write_frame(rec_mp4_t *s, const unsigned char *h264, size_t len,
@@ -406,17 +430,10 @@ int rec_mp4_write_frame(rec_mp4_t *s, const unsigned char *h264, size_t len,
     /* Annex-B → 4 字节长度前缀（avc1 规范），逐 NAL 写入并统计实际大小 */
     long off = ftell(s->fp);
     if (off < 0) return -1;
-    uint32_t written = 0;
-    long pos = nal_at(h264, len, 0, NULL);
-    while (pos >= 0 && (size_t)pos < len) {
-        size_t nlen = 0;
-        long next = nal_at(h264, len, pos + 1, &nlen);
-        be32(s->fp, (uint32_t)nlen);
-        if (fwrite(h264 + pos, 1, nlen, s->fp) != nlen) return -1;
-        written += (uint32_t)nlen + 4u;
-        pos = next;
-    }
-    if (written == 0) return -1;   /* 无有效 NAL，丢弃 */
+    struct { FILE *fp; uint32_t written; int ok; } w = { s->fp, 0, 1 };
+    nal_walk(h264, len, nal_write_cb, &w);
+    if (!w.ok || w.written == 0) return -1;   /* 写失败或无有效 NAL，丢弃 */
+    uint32_t written = w.written;
 
     s->samples[s->n_samples].offset = (uint32_t)off;
     s->samples[s->n_samples].size   = written;

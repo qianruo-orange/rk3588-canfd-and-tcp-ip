@@ -50,4 +50,7 @@ void can_cleanup(void *ctx);
 /* 枚举系统中实际存在的 CAN 接口（netlink 路由，kind=="can"），返回写入的数量 */
 int  can_enumerate_system(char names[][IFNAMSIZ], int max);
 
+/* 查询指定 CAN 接口是否支持 CAN FD，支持返回 1，不支持或查询失败返回 0 */
+int  can_fd_supported(const char *ifname);
+
 #endif /* CAN_SOCKET_H */

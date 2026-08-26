@@ -25,6 +25,7 @@ int http_write_all(int fd, const void *data, size_t len);
 void http_logs_handler(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf);
 void http_system_api(app_ctx_t *app, int fd);
 void http_can_status(app_ctx_t *app, int fd);
+void http_can_ifaces(app_ctx_t *app, int fd);
 void http_can_toggle(app_ctx_t *app, int fd, const char *body);
 void http_can_decoded(app_ctx_t *app, int fd);
 void http_can_decoded_tx(app_ctx_t *app, int fd);

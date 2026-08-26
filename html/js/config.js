@@ -4,6 +4,7 @@
   var curCan = 0;      /* 当前选中的 CAN 通道索引 */
   var canNames = [];   /* 通道名列表（由 /api/config 动态读取） */
   var cansCfg = {};    /* 各通道配置缓存 { can0:{...}, ... } */
+  var canFD = {};      /* 系统接口 CAN FD 支持映射 { can0: 1, ... } */
 
   function curName() { return canNames[curCan] || ('can' + curCan); }
 
@@ -112,6 +113,7 @@
   };
 
   var capsData = null;
+  var camDevs = [];   /* 系统枚举到的摄像头列表 [{path,card},...] */
 
   /* 页面加载时扫描可用摄像头 */
   async function loadDevices() {
@@ -119,11 +121,11 @@
     try {
       var r = await fetch('/api/video/devices');
       if (!r.ok) return;
-      var devs = await r.json();
+      camDevs = await r.json();
       sel.innerHTML = '';
-      for (var i = 0; i < devs.length; i++)
-        sel.innerHTML += '<option value="' + devs[i].path + '">' + devs[i].path + ' - ' + devs[i].card + '</option>';
-      if (devs.length === 0)
+      for (var i = 0; i < camDevs.length; i++)
+        sel.innerHTML += '<option value="' + camDevs[i].path + '">' + camDevs[i].path + ' - ' + camDevs[i].card + '</option>';
+      if (camDevs.length === 0)
         sel.innerHTML = '<option value="">无可用摄像头</option>';
     } catch(e) { sel.innerHTML = '<option value="">扫描失败</option>'; }
   }
@@ -195,6 +197,17 @@
     } catch(e) {}
   }
 
+  /* 枚举系统全部 CAN 接口及其 CAN FD 支持情况 */
+  async function loadCanIfaces() {
+    try {
+      var r = await fetch('/api/can/ifaces');
+      if (!r.ok) return;
+      var list = await r.json();
+      canFD = {};
+      for (var i = 0; i < list.length; i++) canFD[list[i].name] = list[i].fd;
+    } catch(e) {}
+  }
+
   async function loadCfg() {
     try {
       var cfg = await (await fetch('/api/config')).json();
@@ -208,13 +221,35 @@
       document.getElementById('vh').value = cfg.video_height || 480;
 
       canNames = Object.keys(cfg.cans || {});
-      if (canNames.length === 0) canNames = ['can0', 'can1'];
 
-      /* 动态生成通道下拉框 */
+      /* 与系统实际枚举的接口合并：枚举接口优先展示，配置中已存在但未枚举到的保留。
+         系统无 CAN 接口且配置中也没有通道时，canNames 保持为空，下方显示"无可用"提示。 */
+      var sysNames = Object.keys(canFD);
+      if (sysNames.length > 0) {
+        var merged = sysNames.slice();
+        for (var ci = 0; ci < canNames.length; ci++)
+          if (merged.indexOf(canNames[ci]) < 0) merged.push(canNames[ci]);
+        canNames = merged;
+      }
+
+      /* 动态生成通道下拉框（标注 CAN FD 支持） */
       var sel = document.getElementById('canSel');
       sel.innerHTML = '';
-      for (var i = 0; i < canNames.length; i++)
-        sel.innerHTML += '<option value="' + i + '">' + canNames[i] + '</option>';
+      if (canNames.length === 0) {
+        sel.innerHTML = '<option value="0">无可用 CAN 接口</option>';
+        document.getElementById('cfg').style.display = 'none';
+        document.getElementById('hint').style.display = 'block';
+        document.getElementById('hint').textContent = '系统未检测到 CAN 设备';
+      } else {
+        for (var i = 0; i < canNames.length; i++) {
+          var nm = canNames[i];
+          var tag = '';
+          if (canFD[nm] === 1) tag = ' (CAN-FD)';
+          else if (canFD[nm] === 0) tag = ' (无 CAN-FD)';
+          sel.innerHTML += '<option value="' + i + '">' + nm + tag + '</option>';
+        }
+        document.getElementById('hint').textContent = '接口已关闭，开启后可配置';
+      }
       if (curCan >= canNames.length) curCan = 0;
       sel.value = String(curCan);
 
@@ -278,6 +313,6 @@
     try { await fetch('/api/shutdown'); } catch(e) {}
   };
 
-  /* 先扫描设备列表与网卡列表，再加载配置 */
-  loadDevices().then(loadIfaces).then(loadCfg);
+  /* 先扫描设备列表、CAN 接口与网卡列表，再加载配置 */
+  loadDevices().then(loadCanIfaces).then(loadIfaces).then(loadCfg);
 })();

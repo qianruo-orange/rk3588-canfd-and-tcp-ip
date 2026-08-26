@@ -41,6 +41,11 @@ static void http_system_api_wrap(app_ctx_t *app, int fd, const char *method, con
 static void http_can_status_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_status(app, fd); }
 
 /**
+ * http_can_ifaces_wrap - 包装 CAN 接口枚举接口（含 CAN FD 支持信息）。
+ */
+static void http_can_ifaces_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; (void)req; http_can_ifaces(app, fd); }
+
+/**
  * http_can_toggle_wrap - 包装 CAN 开关接口，保留请求体参数用于切换逻辑。
  */
 static void http_can_toggle_wrap(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req) { (void)method; (void)uri; http_can_toggle(app, fd, req); }
@@ -501,6 +506,7 @@ static void *client_handler(app_ctx_t *app, int fd)
         { "/logfile/",      1, NULL,   http_logs_handler, http_check_auth_root },
         { "/api/system",    0, NULL,   http_system_api_wrap,   NULL },
         { "/api/can",       0, NULL,   http_can_status_wrap,   NULL },
+        { "/api/can/ifaces",0, NULL,   http_can_ifaces_wrap,   NULL },
         { "/api/can/decoded",0,NULL,   http_can_decoded_wrap,  NULL },
         { "/api/can/decoded/tx",0,NULL,http_can_decoded_tx_wrap, NULL },
         { "/api/can/dbc",    0, "POST", http_can_dbc_upload_wrap, http_check_auth_root },

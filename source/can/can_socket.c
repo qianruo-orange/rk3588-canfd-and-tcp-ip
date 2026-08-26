@@ -506,6 +506,37 @@ int can_enumerate_system(char names[][IFNAMSIZ], int max)
     return count;
 }
 
+/* 内核 uapi struct can_ioctl_data（内核 >= 3.5）：布局稳定，自行声明避免依赖过旧系统头文件 */
+struct local_can_ioctl_data {
+    uint32_t index;
+    uint32_t flags;
+    union {
+        struct { uint32_t ctrlmode; uint32_t ctrlmode_supported; };
+        struct { uint32_t bitrate; uint32_t dbitrate; };
+    };
+};
+
+/* 查询指定 CAN 接口是否支持 CAN FD（读内核 can 控制模式支持位）。
+ * 通过 ioctl(SIOCGIFINFO_EXT) 获取 ctrlmode_supported，供配置页展示。 */
+int can_fd_supported(const char *ifname)
+{
+    int s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+    if (s < 0) return 0;
+
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    safe_strncpy(ifr.ifr_name, IFNAMSIZ, ifname);
+    if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) { close(s); return 0; }
+
+    struct local_can_ioctl_data data;
+    memset(&data, 0, sizeof(data));
+    data.index = ifr.ifr_ifindex;
+    if (ioctl(s, _IOR('j', 0x0D, struct local_can_ioctl_data), &data) < 0) { close(s); return 0; }
+
+    close(s);
+    return (data.ctrlmode_supported & CAN_CTRLMODE_FD) ? 1 : 0;
+}
+
 int can_init(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;

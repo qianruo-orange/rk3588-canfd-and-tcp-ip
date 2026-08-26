@@ -16,6 +16,23 @@
 #include "http/http_api_can.h"
 #include "can/can_socket.h"
 
+void http_can_ifaces(app_ctx_t *app, int fd)
+{
+    (void)app;
+    char names[CAN_MAX_IFACES][IFNAMSIZ];
+    int n = can_enumerate_system(names, CAN_MAX_IFACES);
+
+    char json[2048];
+    int off = 0;
+    JSON_ADD(json, off, "[");
+    for (int i = 0; i < n; i++) {
+        JSON_ADD(json, off, "%s{\"name\":\"%s\",\"fd\":%d}",
+                 i ? "," : "", names[i], can_fd_supported(names[i]));
+    }
+    JSON_ADD(json, off, "]");
+    http_send_response(fd, 200, "OK", "application/json", json, off);
+}
+
 void http_can_status(app_ctx_t *app, int fd)
 {
     (void)app;

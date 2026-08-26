@@ -1,13 +1,15 @@
 /**
- * video_rec.c — 网络录像模块：AI 画框帧优先（回退原始帧）+ MP4(MJPEG) 封装。
+ * video_rec.c — 网络录像模块：AI 画框帧优先（回退原始帧）+ H.264 硬件编码。
  *
- * 封装细节见 video/rec_mp4.c（ISO BMFF，moov 末尾回写，无需硬件编码器）。
+ * 编码链路：帧（JPEG/YUYV）→ NV12 → /dev/video-enc0（rkvenc）→ H.264
+ *   Annex-B → MP4(avc1) 封装（详见 video/rec_mp4.c）。
  *
  * 线程模型：main 模块表 "rec" 线程，空闲时 100ms 轮询喂狗；
  *   默认自动录制：任务启动即开始，按天分目录（recordings/YYYYMMDD），
  *   达到会话上限（帧数/体积）自动续录下一段；HTTP 线程可下发
  *   video_rec_start/stop 手动控制，手动停止后不再自动续录。
- * 录制分辨率取摄像头配置（cfg->video_width/height），未配置时退回首帧探测。
+ * 录制分辨率取摄像头配置（cfg->video_width/height），未配置时退回首帧探测；
+ * 帧率/码率不写死：会话开始前实测帧间隔，码率按分辨率动态计算。
  */
 
 #define _GNU_SOURCE
@@ -25,6 +27,7 @@
 
 #include "video/video_rec.h"
 #include "video/rec_mp4.h"
+#include "video/h264_encoder.h"
 #include "video/video_stream.h"
 #include "ai/rknn_yolo.h"
 #include "ai/yolo_image.h"

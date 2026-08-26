@@ -208,7 +208,11 @@ void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char 
     const char *sep = strstr(body, "\r\n\r\n");
     if (!sep) sep = strstr(body, "\n\n");
     const char *content = sep ? sep + (sep[0] == '\r' ? 4 : 2) : body;
-    long content_len = cl > 0 ? cl : (long)strlen(content);
+    /* 实际接收到的 body 长度（HTTP 层已把读取到的数据 NUL 结尾）。
+       不盲信 Content-Length：即使客户端头声称值大于实际数据，也以实际长度为上限，
+       避免 fwrite 读到未接收的缓冲区 */
+    size_t real_len = strlen(content);
+    long content_len = (cl > 0 && (unsigned long)cl <= real_len) ? cl : (long)real_len;
     if (content_len <= 0 || content_len > 256 * 1024) {
         http_send_response(fd, 413, "Payload Too Large", "text/plain", "empty or too large", 19);
         return;

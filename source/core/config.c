@@ -104,9 +104,13 @@ int config_load(struct app_config_t *cfg)
         }
     }
     fclose(fp);
-    if (a->can_count == 0) { config_defaults(cfg); return 0; }
+    /* 只有个别字段缺省时回退默认值；无 CAN 接口不代表配置无效
+       （用户可能只配了 TCP/视频），不能整体重置为默认值 */
     if (a->tcp_port <= 0) a->tcp_port = 6666;
-    LOG_INFO("config: loaded from %s", CONFIG_PATH);
+    if (a->max_clients <= 0) a->max_clients = 16;
+    if (cfg->video_width <= 0) cfg->video_width = 640;
+    if (cfg->video_height <= 0) cfg->video_height = 480;
+    LOG_INFO("config: loaded from %s (%d can iface(s))", CONFIG_PATH, a->can_count);
     return 0;
 }
 

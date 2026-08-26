@@ -9,6 +9,7 @@
 #include "watchdog/watchdog.h"
 #include <sys/epoll.h>
 #include <unistd.h>
+#include <ctype.h>
 
 void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req)
 {
@@ -60,11 +61,27 @@ static const char *form_find(char keys[][64], char vals[][256], int count, const
     return NULL;
 }
 
+/* 表单字段容量：8 接口 × 5 基础项 + 8×16 过滤器 × 2 + 6 全局项 = 302，留余量 */
+#define MAX_FORM_FIELDS 320
+
 static int find_iface(can_ctx_t *can, const char *name)
 {
     for (int i = 0; i < can->count; i++)
         if (strcmp(can->ifaces[i].ifname, name) == 0) return i;
     return -1;
+}
+
+/* 校验 CAN 接口名：字母数字 / 下划线 / 连字符，避免非法名称进入系统命令 */
+static int ifname_valid(const char *name)
+{
+    if (!name || !*name) return 0;
+    size_t len = strlen(name);
+    if (len >= IFNAMSIZ) return 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        if (!isalnum((unsigned char)c) && c != '_' && c != '-') return 0;
+    }
+    return 1;
 }
 
 void http_config_post(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body)
@@ -84,8 +101,8 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
     if (p) p += (p[0] == '\r') ? 4 : 2;
     else p = body;
 
-    char keys[64][64], vals[64][256]; int count = 0;
-    while (*p && count < 64) {
+    char keys[MAX_FORM_FIELDS][64], vals[MAX_FORM_FIELDS][256]; int count = 0;
+    while (*p && count < MAX_FORM_FIELDS) {
         const char *eq = strchr(p, '='), *amp = strchr(p, '&');
         if (!eq) break;
         int klen = (int)(eq - p); if (klen > 63) klen = 63;
@@ -105,6 +122,7 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         vals[count][vi]='\0'; count++;
         p = amp ? amp + 1 : vs + vlen;
     }
+    if (*p) LOG_ERROR("config POST: fields exceed %d, tail ignored", MAX_FORM_FIELDS);
 
     struct app_config_t *cfg = app->cfg;
     can_ctx_t *can = app->can;
@@ -117,8 +135,26 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         snprintf(kn, sizeof(kn), "ifname%d", i);
         const char *ifn = form_find(keys, vals, count, kn);
         if (!ifn) continue;
+        if (!ifname_valid(ifn)) { LOG_ERROR("config: invalid CAN ifname '%s'", ifn); continue; }
         int idx = find_iface(can, ifn);
-        if (idx < 0) continue;
+        if (idx < 0) {
+            /* 表单新增了运行态中没有的 CAN 接口：动态加入，并在下方统一重配置 */
+            if (can->count >= CAN_MAX_IFACES) {
+                LOG_ERROR("config: cannot add CAN '%s', max %d ifaces", ifn, CAN_MAX_IFACES);
+                continue;
+            }
+            idx = can->count++;
+            can_iface_t *ni = &can->ifaces[idx];
+            memset(ni, 0, sizeof(*ni));
+            ni->sock_fd = -1;
+            safe_strncpy(ni->ifname, sizeof(ni->ifname), ifn);
+            ni->bitrate = 500000; ni->dbitrate = 2000000;
+            ni->fd_mode = 1; ni->up = 1; ni->restart_ms = 0;
+            /* 新增接口的收发队列必须初始化，否则 can_send/can_recv 任务访问未初始化队列 */
+            can_queue_init(&ni->txq);
+            can_queue_init(&ni->rxq);
+            LOG_INFO("config: adding new CAN interface '%s' (runtime idx %d)", ifn, idx);
+        }
 
         snprintf(kn, sizeof(kn), "bitrate%d", i);
         const char *v = form_find(keys, vals, count, kn);

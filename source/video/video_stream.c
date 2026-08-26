@@ -20,6 +20,9 @@
 
 typedef struct { unsigned char *data; size_t len; } frame_t;
 
+/* 推流客户端空闲超时（秒）：客户端不读 / 网络黑洞时释放连接与线程 */
+#define VIDEO_CLIENT_IDLE_TIMEOUT 30
+
 typedef struct {
     _Atomic(frame_t *) frame_obj;
     _Atomic(int)       seq;
@@ -422,7 +425,18 @@ static void *video_stream_client_task(void *arg)
                       "Connection: close\r\n\r\n";
     video_write_all(fd, hdr, strlen(hdr));
     int last = 0;
+    time_t last_write = time(NULL);   /* 最近一次成功写帧的时间，用于空闲超时 */
     while (g_ctx && g_ctx->app->running) {
+        /* 空闲超时：长时间未成功写出任何帧（客户端不读/网络黑洞），释放连接，
+           避免推流线程与 fd 永久占用 */
+        if (time(NULL) - last_write >= VIDEO_CLIENT_IDLE_TIMEOUT) break;
+
+        /* 对端断开检测：非阻塞 MSG_PEEK，FIN 已到（返回 0）或连接异常即退出 */
+        char peek;
+        ssize_t pr = recv(fd, &peek, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (pr == 0) break;
+        if (pr < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) break;
+
         /* 推流线程基于非阻塞写 + 轮询，不会长期阻塞，无需独立看门狗监督 */
         unsigned char *frame = NULL; size_t flen = 0;
         int seq = video_stream_wait_next(last, &frame, &flen);
@@ -438,6 +452,7 @@ static void *video_stream_client_task(void *arg)
         if (video_write_all(fd, frame, flen) < 0) { free(frame); break; }
         if (video_write_all(fd, "\r\n", 2) < 0) { free(frame); break; }
         free(frame);
+        last_write = time(NULL);
     }
     if (on_close) on_close(fd);
     return NULL;

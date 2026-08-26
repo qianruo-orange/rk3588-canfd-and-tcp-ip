@@ -178,14 +178,25 @@ static void tcp_flush_tx(tcp_ctx_t *ctx)
         }
     }
 
-    /* 2) 再把 TX 队列里的包搬到客户端 wbuf 并发送 */
-    tcp_pkt_t p;
-    while (tcp_queue_peek(&ctx->txq, &p) == 0) {
+    /* 2) 再把 TX 队列里的包搬到客户端 wbuf 并发送。
+          队头包的目标客户端若暂时写不出去（wbuf 未排空），不阻塞其他客户端：
+          把该包转回队尾稍后再试，继续处理后续包；每个目标客户端的包保持 FIFO。 */
+    int remaining = ctx->txq.count;   /* 本次尝试处理的包数上限（旋转可能把包放回队尾） */
+    int examined = 0;
+    while (examined < remaining) {
+        tcp_pkt_t p;
+        if (tcp_queue_peek(&ctx->txq, &p) != 0) break;   /* 队列已空 */
+        examined++;
         int idx = p.client_idx;
-        if (idx < 0 || idx >= TCP_MAX_CLIENTS) { tcp_queue_pop(&ctx->txq, &p); continue; }
+        if (idx < 0 || idx >= TCP_MAX_CLIENTS || idx >= ctx->client_count) { tcp_queue_pop(&ctx->txq, &p); continue; }
         client_t *c = &ctx->clients[idx];
         if (c->fd < 0) { tcp_queue_pop(&ctx->txq, &p); continue; }   /* 客户端已断开，丢弃 */
-        if (c->wlen > 0) break;   /* 该客户端 wbuf 尚未排空，等下一次 EPOLLOUT/eventfd */
+        if (c->wlen > 0) {
+            /* 慢客户端：队头包转回队尾，避免队头阻塞拖垮整个广播 */
+            tcp_queue_pop(&ctx->txq, &p);
+            tcp_queue_push(&ctx->txq, p.client_idx, p.data, p.len);
+            continue;
+        }
         tcp_queue_pop(&ctx->txq, &p);
         memcpy(c->wbuf, p.data, p.len);
         c->wlen = (int)p.len;

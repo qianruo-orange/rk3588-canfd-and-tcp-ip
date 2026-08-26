@@ -107,7 +107,11 @@ static void log_msg(FILE *fp, const char *file, int line,
     char buf[4096];
     int off = snprintf(buf, sizeof(buf), "[%02d:%02d:%02d.%03ld] %-5s %s:%d ",
                        tm->tm_hour, tm->tm_min, tm->tm_sec, tv.tv_usec/1000, level, file, line);
-    off += vsnprintf(buf + off, sizeof(buf) - off, fmt, ap);
+    /* snprintf 出错（off<0）或前缀写满缓冲区时，钳制偏移，防止
+       sizeof(buf)-off 溢出导致 vsnprintf 越界写 */
+    if (off < 0) off = 0;
+    if ((size_t)off >= sizeof(buf)) off = (int)sizeof(buf) - 1;
+    vsnprintf(buf + off, sizeof(buf) - (size_t)off, fmt, ap);
     fprintf(fp, "%s\n", buf); fflush(fp);
 }
 

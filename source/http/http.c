@@ -9,6 +9,8 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <time.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -25,6 +27,9 @@
 
 /* ---- 全局变量 ---- */
 static int g_listen_fd = -1;
+/* 保护 g_listen_fd 的关闭操作：http_server_task 退出段与 http_server_stop
+   （watchdog 强杀时可能并发）都需要安全关闭，避免 double-close */
+static pthread_mutex_t g_listen_mutex = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_http_active = 0;   /* 活跃 HTTP 连接数 */
 #define HTTP_MAX_CONN 64
 
@@ -238,7 +243,8 @@ static int http_check_auth_common(const char *req, int fd, int require_root)
         goto deny;
     }
 
-    const char *auth = strstr(req, "Authorization: Basic ");
+    /* HTTP 头不区分大小写，用 strcasestr 定位认证头 */
+    const char *auth = strcasestr(req, "Authorization: Basic ");
     if (!auth) goto deny;
 
     char decoded[128] = {0};
@@ -250,9 +256,10 @@ static int http_check_auth_common(const char *req, int fd, int require_root)
         else if (enc[i] >= '0' && enc[i] <= '9') decoded[di] = (char)(enc[i] - '0' + 52);
         else if (enc[i] == '+') decoded[di] = 62;
         else if (enc[i] == '/') decoded[di] = 63;
-        else continue;
+        else goto deny;   /* 非法 Base64 字符：直接拒绝，不宽松跳过 */
         ++di;
     }
+    if (di == 0 || di % 4 == 1) goto deny;   /* 空凭据或非法 Base64 长度 */
 
     char user_pass[128];
     int up_len = 0;
@@ -381,6 +388,12 @@ void http_serve_file(int fd, const char *uri)
 
 /* ---- 每连接处理线程 ---- */
 
+/* 每连接线程上下文：pthread 只能传一个参数，把 app 与 fd 打包传递 */
+typedef struct {
+    app_ctx_t *app;
+    int fd;
+} http_client_ctx_t;
+
 /**
  * http_wait_fd - 用 epoll 实现单 fd 带超时的事件等待（可读/可写），替代 poll。
  * @fd: 目标描述符。
@@ -402,20 +415,24 @@ static int http_wait_fd(int fd, uint32_t events, int timeout_ms)
 
 /**
  * client_handler - 处理单个 HTTP 客户端连接，解析请求并分发到对应 API 或静态文件逻辑。
- * @app: 应用上下文。
- * @fd: 客户端连接描述符。
+ * 以独立线程方式运行（由 http_server_task 创建，detached）：慢客户端只阻塞自己的
+ * 线程，不影响其他请求，也不会阻塞 HTTP 主循环喂狗。
+ * @arg: http_client_ctx_t 指针（内含 app_ctx_t * 与客户端 fd），用后由本函数 free。
  * @return: 线程退出时返回 NULL。
  */
-static void *client_handler(app_ctx_t *app, int fd)
+static void *client_handler(void *arg)
 {
-    (void)app;
+    http_client_ctx_t *ctx = (http_client_ctx_t *)arg;
+    app_ctx_t *app = ctx->app;
+    int fd = ctx->fd;
+    free(ctx);   /* 上下文用完即释放，后续仅使用局部拷贝 */
     char buf[HTTP_BUF_SIZE];
     const long max_body_bytes = 1024L * 1024L; /* 1MB */
 
     ssize_t n;
-    /* 等待首个请求包到达（最多 30 秒）：fd 是非阻塞的，若数据未到立即 read
+    /* 等待首个请求包到达（最多 5 秒）：fd 是非阻塞的，若数据未到立即 read
        会返回 EAGAIN 而被当作连接异常关闭，慢客户端/网络拥塞时易误断 */
-    if (http_wait_fd(fd, EPOLLIN, 30000) <= 0) {
+    if (http_wait_fd(fd, EPOLLIN, 5000) <= 0) {
         close(fd);
         __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
         return NULL;
@@ -514,7 +531,7 @@ static void *client_handler(app_ctx_t *app, int fd)
         { "/api/can/frames", 0, NULL,   http_can_rx_wrap,     NULL },
         { "/api/can/toggle",0, "POST", http_can_toggle_wrap, http_check_auth_root },
         { "/api/config",    0, "POST", http_config_post,  http_check_auth_root },
-        { "/api/config",    0, NULL,   http_config_get,   http_check_auth_root },
+        { "/api/config",    0, NULL,   http_config_get,   NULL },
         { "/api/reboot",    0, NULL,   http_reboot_wrap,       http_check_auth_root },
         { "/api/shutdown",  0, NULL,   http_shutdown_wrap,     http_check_auth_root },
         { "/api/network",   0, NULL,   http_network_api_wrap,  NULL },
@@ -567,8 +584,10 @@ void *http_server_task(void *arg)
 
     if (set_socket_nonblocking(g_listen_fd) < 0) {
         LOG_ERROR("http set nonblocking");
+        pthread_mutex_lock(&g_listen_mutex);
         close(g_listen_fd);
         g_listen_fd = -1;
+        pthread_mutex_unlock(&g_listen_mutex);
         return NULL;
     }
 
@@ -593,16 +612,20 @@ void *http_server_task(void *arg)
         usleep(2 * 1000 * 1000);
     }
     if (!app->running) {
+        pthread_mutex_lock(&g_listen_mutex);
         close(g_listen_fd);
         g_listen_fd = -1;
+        pthread_mutex_unlock(&g_listen_mutex);
         return NULL;
     }
 
     int epfd = epoll_create1(0);
     if (epfd < 0) {
         LOG_ERROR("http epoll_create1");
+        pthread_mutex_lock(&g_listen_mutex);
         close(g_listen_fd);
         g_listen_fd = -1;
+        pthread_mutex_unlock(&g_listen_mutex);
         return NULL;
     }
 
@@ -612,8 +635,10 @@ void *http_server_task(void *arg)
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, g_listen_fd, &ev) < 0) {
         LOG_ERROR("http epoll_ctl add listen");
         close(epfd);
+        pthread_mutex_lock(&g_listen_mutex);
         close(g_listen_fd);
         g_listen_fd = -1;
+        pthread_mutex_unlock(&g_listen_mutex);
         return NULL;
     }
 
@@ -671,13 +696,38 @@ void *http_server_task(void *arg)
             }
 
             epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-            client_handler(app, fd);
+            /* 每连接一个独立线程处理：慢客户端只阻塞自己的线程，不影响
+               其他请求，也不阻塞 HTTP 主循环喂狗（避免被看门狗误杀） */
+            http_client_ctx_t *ctx = (http_client_ctx_t *)malloc(sizeof(*ctx));
+            if (!ctx) {
+                close(fd);
+                __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+                continue;
+            }
+            ctx->app = app;
+            ctx->fd  = fd;
+            pthread_t ctid;
+            pthread_attr_t cattr;
+            pthread_attr_init(&cattr);
+            pthread_attr_setdetachstate(&cattr, PTHREAD_CREATE_DETACHED);
+            if (pthread_create(&ctid, &cattr, client_handler, ctx) != 0) {
+                pthread_attr_destroy(&cattr);
+                free(ctx);
+                close(fd);
+                __atomic_fetch_sub(&g_http_active, 1, __ATOMIC_RELAXED);
+            } else {
+                pthread_attr_destroy(&cattr);
+            }
         }
     }
 
+    /* 所有 g_listen_fd 关闭点都加锁：http_server_stop（watchdog 强杀路径）
+       与主线程退出路径可能并发，互斥避免 double-close */
     close(epfd);
+    pthread_mutex_lock(&g_listen_mutex);
     close(g_listen_fd);
     g_listen_fd = -1;
+    pthread_mutex_unlock(&g_listen_mutex);
     LOG_INFO("HTTP server stopped");
     return NULL;
 }
@@ -695,9 +745,13 @@ int http_server_start(void *arg)
 void http_server_stop(void *arg)
 {
     (void)arg;
+    /* 加锁关闭：与 http_server_task 退出路径并发时避免 double-close；
+       shutdown() 用于唤醒阻塞中的 epoll_wait */
+    pthread_mutex_lock(&g_listen_mutex);
     if (g_listen_fd >= 0) {
         shutdown(g_listen_fd, SHUT_RDWR);
         close(g_listen_fd);
         g_listen_fd = -1;
     }
+    pthread_mutex_unlock(&g_listen_mutex);
 }

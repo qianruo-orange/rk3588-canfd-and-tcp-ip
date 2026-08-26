@@ -131,8 +131,8 @@ int watchdog_feed_thread(pthread_t tid, const char *name)
         pthread_mutex_unlock(&g_wd_mutex);
         return -1;
     }
-    if (name && *name && strcmp(g_wd_slots[slot].name, name) != 0)
-        safe_strncpy(g_wd_slots[slot].name, sizeof(g_wd_slots[slot].name), name);
+    /* 槽位名称在注册时确定，feed 只是喂心跳，不得改写名称：
+       名称用于日志与按名查找，若允许 feed 改写，误传名称会污染注册信息 */
     __atomic_add_fetch(&g_wd_slots[slot].beat, 1, __ATOMIC_RELAXED);
     pthread_mutex_unlock(&g_wd_mutex);
     return slot;

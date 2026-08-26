@@ -60,16 +60,8 @@ do_install() {
 
     echo "[INSTALL] config/"
     mkdir -p "$DEPLOY_DIR/config"
-    if [ -s "$DEPLOY_DIR/config/config.txt" ]; then
-        echo "  (keep existing config.txt — saved by web UI)"
-    else
-        if [ -f "$PROJECT_DIR/config/config.txt" ]; then
-            echo "[INSTALL] config/config.txt"
-            cp "$PROJECT_DIR/config/config.txt" "$DEPLOY_DIR/config/config.txt"
-        else
-            echo "  (no config.txt — using defaults, configure via web UI)"
-        fi
-    fi
+    rm -f "$DEPLOY_DIR/config/config.txt"
+    echo "  (using defaults — configure via web UI)"
 
     if [ -f "$PROJECT_DIR/config/example.dbc" ]; then
         echo "[INSTALL] config/example.dbc"

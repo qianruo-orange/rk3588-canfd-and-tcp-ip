@@ -186,21 +186,28 @@ static void wait_threads_exit(void)
 
 /**
  * shutdown_modules_safe - 安全关闭各模块并等待线程退出，避免在关闭时出现竞争或卡死。
+ * 顺序：先置停止标志（让工作线程自行退出）→ 等待线程全部退出 → 再按创建逆序
+ * 执行析构（依赖方先清理，且此时已无工作线程访问资源，不会与析构竞争）。
  */
 static void shutdown_modules_safe(void)
 {
     LOG_INFO("Shutting down modules...");
-    for (int i = 0; i < MOD_COUNT; i++) {
+
+    /* 1. 先通知所有工作线程退出（各 task 均以 500ms 周期检查 running） */
+    g_app.running = 0;
+
+    /* 2. 等待线程退出后再析构，避免析构释放资源时线程仍在访问 */
+    wait_threads_exit();
+
+    /* 3. 按创建逆序执行析构，且不重复调用（http_server_stop / video_stream_shutdown
+          分别是 http / video 模块的 dtor，这里统一调用一次） */
+    for (int i = MOD_COUNT - 1; i >= 0; i--) {
         if (g_modules[i].ops.dtor) {
             LOG_INFO("Shutting down module %s...", g_modules[i].name);
             g_modules[i].ops.dtor(&g_app);
         }
     }
     LOG_INFO("Modules shut down successfully.");
-    g_app.running = 0;
-    http_server_stop(&g_app);
-    video_stream_shutdown(&g_app);
-    wait_threads_exit();
 }
 
 /**
@@ -298,15 +305,10 @@ int main(void)
 
     /* 通知各模块停止，让工作线程尽快退出 */
     shutdown_modules_safe();
-
-    for (int i = MOD_COUNT-1; i >= 0; i--)
-        if (g_modules[i].ops.dtor) g_modules[i].ops.dtor(&g_app);
     log_close(); return 0;
 
 fail:
     watchdog_unregister_self("main");
     shutdown_modules_safe();
-    for (int i = MOD_COUNT-1; i >= 0; i--)
-        if (g_modules[i].ops.dtor) g_modules[i].ops.dtor(&g_app);
     log_close(); return 1;
 }

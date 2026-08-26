@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "tcp/tcp_server.h"
+#include "tcp/tcp_queue.h"
 #include "core/common.h"
 #include "core/log.h"
 #include "watchdog/watchdog.h"
@@ -87,33 +88,7 @@ static int tcp_accept(int listen_fd)
     return client_fd;
 }
 
-/* ---- RX / TX 双队列 + eventfd 跨线程唤醒 ---- */
-
-static void tcpq_reset(tcp_queue_t *q)
-{
-    q->head = q->tail = q->count = 0;
-}
-
-static int tcpq_push(tcp_queue_t *q, int client_idx, const void *data, size_t len)
-{
-    if (q->count >= TCP_QUEUE_DEPTH) return -1;
-    tcp_pkt_t *p = &q->items[q->tail];
-    p->client_idx = client_idx;
-    p->len = len;
-    memcpy(p->data, data, len);
-    q->tail = (q->tail + 1) % TCP_QUEUE_DEPTH;
-    q->count++;
-    return 0;
-}
-
-static int tcpq_pop(tcp_queue_t *q, tcp_pkt_t *out)
-{
-    if (q->count <= 0) return -1;
-    *out = q->items[q->head];
-    q->head = (q->head + 1) % TCP_QUEUE_DEPTH;
-    q->count--;
-    return 0;
-}
+/* ---- eventfd 跨线程唤醒：TX 队列有数据压入时通知 tcp_task ---- */
 
 static void eventfd_signal(int efd)
 {
@@ -150,11 +125,11 @@ static int tcp_tx_packet(tcp_ctx_t *ctx, int client_idx, const void *buf, size_t
 
         pthread_mutex_lock(&ctx->tx_mutex);
         for (int i = 0; i < n; i++)
-            if (tcpq_push(&ctx->txq, idxs[i], buf, len) == 0) pushed++;
+            if (tcp_queue_push(&ctx->txq, idxs[i], buf, len) == 0) pushed++;
         pthread_mutex_unlock(&ctx->tx_mutex);
     } else {
         pthread_mutex_lock(&ctx->tx_mutex);
-        if (tcpq_push(&ctx->txq, client_idx, buf, len) == 0) pushed++;
+        if (tcp_queue_push(&ctx->txq, client_idx, buf, len) == 0) pushed++;
         pthread_mutex_unlock(&ctx->tx_mutex);
     }
 
@@ -204,16 +179,16 @@ static void tcp_flush_tx(tcp_ctx_t *ctx)
     }
 
     /* 2) 再把 TX 队列里的包搬到客户端 wbuf 并发送 */
-    while (ctx->txq.count > 0) {
-        tcp_pkt_t p = ctx->txq.items[ctx->txq.head];
+    tcp_pkt_t p;
+    while (tcp_queue_peek(&ctx->txq, &p) == 0) {
         int idx = p.client_idx;
-        if (idx < 0 || idx >= TCP_MAX_CLIENTS) { tcpq_pop(&ctx->txq, &p); continue; }
+        if (idx < 0 || idx >= TCP_MAX_CLIENTS) { tcp_queue_pop(&ctx->txq, &p); continue; }
         client_t *c = &ctx->clients[idx];
-        if (c->fd < 0) { tcpq_pop(&ctx->txq, &p); continue; }   /* 客户端已断开，丢弃 */
+        if (c->fd < 0) { tcp_queue_pop(&ctx->txq, &p); continue; }   /* 客户端已断开，丢弃 */
         if (c->wlen > 0) break;   /* 该客户端 wbuf 尚未排空，等下一次 EPOLLOUT/eventfd */
+        tcp_queue_pop(&ctx->txq, &p);
         memcpy(c->wbuf, p.data, p.len);
         c->wlen = (int)p.len;
-        tcpq_pop(&ctx->txq, &p);
         ssize_t n = send(c->fd, c->wbuf, (size_t)c->wlen, MSG_NOSIGNAL);
         if (n > 0) {
             memmove(c->wbuf, c->wbuf + n, (size_t)(c->wlen - n));
@@ -236,6 +211,10 @@ static void tcp_flush_tx(tcp_ctx_t *ctx)
     pthread_mutex_unlock(&ctx->client_mutex);
     pthread_mutex_unlock(&ctx->tx_mutex);
 }
+
+/* tcp_client_add / tcp_client_del 定义在文件末尾，此处提前声明供 tcp_task 使用 */
+static void tcp_client_add(tcp_ctx_t *ctx, int fd);
+static void tcp_client_del(tcp_ctx_t *ctx, int idx);
 
 void *tcp_task(void *arg)
 {
@@ -319,7 +298,7 @@ int tcp_init(void *arg)
     ctx->tx_efd = eventfd(0, EFD_NONBLOCK);
     if (ctx->tx_efd < 0) { LOG_ERROR("tcp: eventfd failed"); return -1; }
     for (int i = 0; i < TCP_MAX_CLIENTS; i++) ctx->clients[i].fd = -1;
-    tcpq_reset(&ctx->txq);
+    tcp_queue_reset(&ctx->txq);
     return 0;
 }
 

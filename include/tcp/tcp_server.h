@@ -3,25 +3,9 @@
 
 #include <pthread.h>
 #include "core/config.h"
+#include "tcp/tcp_queue.h"
 
 #define TCP_MAX_CLIENTS   32
-#define WBUF_SIZE         4096
-#define TCP_QUEUE_DEPTH   256
-
-/* ---- TCP 数据包（RX / TX 队列共用条目） ----
- * client_idx：RX 表示来源客户端，TX 表示目标客户端。 */
-typedef struct {
-    int    client_idx;
-    size_t len;
-    char   data[WBUF_SIZE];
-} tcp_pkt_t;
-
-typedef struct {
-    tcp_pkt_t items[TCP_QUEUE_DEPTH];
-    int head;
-    int tail;
-    int count;
-} tcp_queue_t;
 
 /* ---- TCP 客户端状态 ---- */
 typedef struct {

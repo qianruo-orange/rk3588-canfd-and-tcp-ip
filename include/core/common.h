@@ -4,6 +4,7 @@
 #include <linux/can.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>

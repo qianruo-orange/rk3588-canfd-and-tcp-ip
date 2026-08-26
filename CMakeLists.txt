@@ -82,6 +82,7 @@ set(SOURCES
     source/can/can_socket.c
     source/can/dbc_parser.c
     source/tcp/tcp_server.c
+    source/tcp/tcp_queue.c
     source/http/http.c
     source/http/http_api_dbc.c
     source/http/http_logs.c

@@ -31,7 +31,7 @@
 /* 模块生命周期函数 */
 typedef struct {
     int  (*init)(void *arg);    // 初始化函数，返回 0 成功
-    int  (*dtor)(void *arg);    // 清理函数，返回 0 成功
+    void (*dtor)(void *arg);    // 清理函数（各模块实现均返回 void）
     void *(*task)(void *arg);   // 任务函数，返回 NULL 退出
 } module_ops_t;
 

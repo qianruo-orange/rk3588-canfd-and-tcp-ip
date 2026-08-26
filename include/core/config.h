@@ -68,6 +68,7 @@ struct app_config_t {
     float         ai_conf;          /* 置信度阈值 */
     float         ai_nms;           /* NMS IoU 阈值（经典 3 头布局用） */
     int           ai_interval_ms;   /* 推理节流间隔（ms），默认 200 */
+    int           ai_threads;       /* 推理工作线程数（1~4，默认 2），每线程独立 rknn context 并行推理 */
 };
 
 int  config_load(struct app_config_t *cfg);

@@ -34,6 +34,7 @@ static void config_defaults(struct app_config_t *cfg)
     cfg->ai_conf        = 0.25f;
     cfg->ai_nms         = 0.45f;
     cfg->ai_interval_ms = 200;
+    cfg->ai_threads     = 2;
 
     app_args_t *args = &cfg->args;
     args->tcp_port    = 6666;
@@ -64,7 +65,7 @@ int config_load(struct app_config_t *cfg)
     cfg->ai_enable = 0;
     safe_strncpy(cfg->ai_model, sizeof(cfg->ai_model), "config/yolo26.rknn");
     cfg->ai_input_size = 640; cfg->ai_conf = 0.25f; cfg->ai_nms = 0.45f;
-    cfg->ai_interval_ms = 200;
+    cfg->ai_interval_ms = 200; cfg->ai_threads = 2;
     app_args_t *a = &cfg->args;
 
     char line[256];
@@ -123,6 +124,7 @@ int config_load(struct app_config_t *cfg)
         else if (strcmp(key, "ai_conf") == 0) cfg->ai_conf = parse_int_clamped(val, 1, 100, 25) / 100.0f;
         else if (strcmp(key, "ai_nms") == 0) cfg->ai_nms = parse_int_clamped(val, 1, 100, 45) / 100.0f;
         else if (strcmp(key, "ai_interval_ms") == 0) cfg->ai_interval_ms = parse_int_clamped(val, 10, 5000, 200);
+        else if (strcmp(key, "ai_threads") == 0) cfg->ai_threads = parse_int_clamped(val, 1, 4, 2);
         else if (strcmp(key, "can_dbc") == 0) {
             char nm[64], path[256];
             if (sscanf(val, "%63s %255s", nm, path) == 2) {
@@ -190,6 +192,7 @@ void config_save(app_ctx_t *app)
     fprintf(fp, "ai_conf %d\n", (int)(cfg->ai_conf > 0 ? cfg->ai_conf * 100 : 25));
     fprintf(fp, "ai_nms %d\n", (int)(cfg->ai_nms > 0 ? cfg->ai_nms * 100 : 45));
     fprintf(fp, "ai_interval_ms %d\n", cfg->ai_interval_ms > 0 ? cfg->ai_interval_ms : 200);
+    fprintf(fp, "ai_threads %d\n", cfg->ai_threads > 0 ? cfg->ai_threads : 2);
     fprintf(fp, "\n# --- DBC ---\n");
     for (int i = 0; i < can->count; i++)
         if (can->ifaces[i].dbc_path[0])

@@ -95,6 +95,9 @@ set(SOURCES
     source/http/http_reboot.c
     source/video/video_stream.c
     source/ai/rknn_yolo.c
+    source/ai/yolo_image.c
+    source/ai/yolo_postprocess.c
+    source/ai/yolo_draw.c
     source/watchdog/watchdog.c
 )
 

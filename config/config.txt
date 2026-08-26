@@ -2,21 +2,14 @@
 # 说明：本文件可由 Web 配置页（/config）读写并热生效；也可手动编辑后重启服务。
 # 格式：<key> <value>，'#' 开头为注释。
 
-# CAN 接口（可多行声明）
-can_ifname can0
-can_ifname can1
-
-# --- can0 ---
-can_bitrate can0 500000
-can_fd can0 on
-can_dbitrate can0 2000000
-can_up can0 on
-
-# --- can1 ---
-can_bitrate can1 500000
-can_fd can1 on
-can_dbitrate can1 2000000
-can_up can1 on
+# CAN 接口（可多行声明，仅配置系统实际存在的接口，由 Web 配置页自动枚举并写入）
+# 模板：
+# can_ifname can0
+# can_bitrate can0 500000
+# can_fd can0 on
+# can_dbitrate can0 2000000
+# can_up can0 on
+# can_filter can0 123 7FF    (可选，多行；每行一个硬件接收过滤器：<ifname> <ID> <掩码>)
 
 # 下行 TCP 端口（预留）
 tcp_port 6666

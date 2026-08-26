@@ -32,15 +32,9 @@ static void config_defaults(struct app_config_t *cfg)
     args->tcp_port    = 6666;
     args->max_clients = 16;
 
-    /* 可配置 CAN 通道：优先从系统读取实际存在的 CAN 接口 */
+    /* 可配置 CAN 通道：只使用系统中实际存在的 CAN 接口；无硬件时保持 0 个 */
     char names[CAN_MAX_IFACES][IFNAMSIZ];
     int n = can_enumerate_system(names, CAN_MAX_IFACES);
-    if (n <= 0) {
-        /* 无法枚举系统接口时回退到 can0/can1，保证默认可用 */
-        snprintf(names[0], sizeof(names[0]), "%s", "can0");
-        snprintf(names[1], sizeof(names[1]), "%s", "can1");
-        n = 2;
-    }
 
     for (int i = 0; i < n && args->can_count < CAN_MAX_IFACES; i++) {
         can_iface_t *c = &args->can_ifaces[args->can_count++];
@@ -88,6 +82,15 @@ int config_load(struct app_config_t *cfg)
         } else if (strcmp(key, "can_up") == 0) {
             char nm[64], m[8]; if (sscanf(val, "%63s %7s", nm, m) == 2)
                 for (int i = 0; i < a->can_count; i++) if (!strcmp(a->can_ifaces[i].ifname, nm)) { a->can_ifaces[i].up = !strcmp(m, "on"); break; }
+        } else if (strcmp(key, "can_filter") == 0) {
+            char nm[64]; unsigned int id = 0, mask = 0;
+            if (sscanf(val, "%63s %x %x", nm, &id, &mask) == 3)
+                for (int i = 0; i < a->can_count; i++)
+                    if (!strcmp(a->can_ifaces[i].ifname, nm) &&
+                        a->can_ifaces[i].filter_count < CAN_MAX_FILTERS) {
+                        can_filter_t *flt = &a->can_ifaces[i].filters[a->can_ifaces[i].filter_count++];
+                        flt->id = (canid_t)id; flt->mask = (canid_t)mask; break;
+                    }
         } else if (strcmp(key, "tcp_port") == 0) a->tcp_port = parse_int_clamped(val, 1, 65535, 6666);
         else if (strcmp(key, "max_clients") == 0) a->max_clients = parse_int_clamped(val, 1, TCP_MAX_CLIENTS, 16);
         else if (strcmp(key, "tcp_bind") == 0) safe_strncpy(a->tcp_bind, sizeof(a->tcp_bind), val);
@@ -136,6 +139,9 @@ void config_save(app_ctx_t *app)
         fprintf(fp, "can_fd %s %s\n", iface->ifname, iface->fd_mode ? "on" : "off");
         fprintf(fp, "can_dbitrate %s %d\n", iface->ifname, iface->dbitrate);
         fprintf(fp, "can_up %s %s\n", iface->ifname, iface->up ? "on" : "off");
+        for (int k = 0; k < iface->filter_count; k++)
+            fprintf(fp, "can_filter %s %X %X\n", iface->ifname,
+                    (unsigned)iface->filters[k].id, (unsigned)iface->filters[k].mask);
     }
 
     fprintf(fp, "\ntcp_port %d\nmax_clients %d\n", tcp->port, tcp->max_clients);

@@ -31,13 +31,6 @@
         └─► watchdog_task ──► 心跳监控 + sd_notify
 ```
 
-CAN 数据流（队列中均为原始帧，DBC 解析结果单独供前端展示）：
-
-```text
-接收：CAN 帧 ─► can_recv_task ─► 入 rxq（原始帧）/ 接收方向 DBC 解码 ─► /api/can/decoded
-发送：业务线程压入 txq（原始帧） ─► can_send_task 写 socket ─► 发送方向 DBC 解码 ─► /api/can/decoded/tx
-```
-
 | 线程 | 职责 |
 | --- | --- |
 | `main` | 初始化、配置加载、DBC 加载、退出编排、喂狗 |
@@ -123,7 +116,7 @@ CAN 数据提取接口（从总线读数据）：
         └► 支持定向发送（client_idx）与广播（client_idx < 0）；慢客户端由每客户端 wbuf 暂存
 ```
 
-- TCP 服务面向外部客户端：连接数上限 `max_clients`（默认 32），非阻塞 + epoll 管理，部分写由 wbuf 续发
+- TCP 服务面向外部客户端：连接数上限 `max_clients`（默认 16），非阻塞 + epoll 管理，部分写由 wbuf 续发
 - 发送链路（TX 队列 + eventfd + 广播/定向分发）已就绪，供后续业务注入（如 CAN 帧转发到 TCP 客户端）；当前版本 TCP 接收方向不转发数据
 
 ### 其他数据接口

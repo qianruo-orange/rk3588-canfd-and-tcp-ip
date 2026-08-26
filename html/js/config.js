@@ -212,13 +212,23 @@
     try {
       var cfg = await (await fetch('/api/config')).json();
       document.getElementById('tp').value = cfg.tcp_port || '';
-      document.getElementById('mc').value = cfg.max_clients || '16';
+      document.getElementById('mc').value = cfg.max_clients || '';
       document.getElementById('bind').value = cfg.tcp_bind || '';
-      document.getElementById('vd').value = cfg.video_device || '/dev/video0';
-      /* 自动查询摄像头参数并同步下拉框 */
-      if (cfg.video_device) setTimeout(queryCaps, 500);
-      document.getElementById('vw').value = cfg.video_width || 640;
-      document.getElementById('vh').value = cfg.video_height || 480;
+
+      /* 视频设备：配置值必须在系统枚举列表中才使用，否则选择第一个真实设备；
+         没有摄像头时保持为空 */
+      var vd = document.getElementById('vd');
+      var cfgDev = cfg.video_device || '';
+      var devInList = false;
+      for (var di = 0; di < camDevs.length; di++)
+        if (camDevs[di].path === cfgDev) { devInList = true; break; }
+      vd.value = devInList ? cfgDev : (camDevs.length ? camDevs[0].path : '');
+      if (vd.value) setTimeout(queryCaps, 500);
+
+      /* 分辨率由设备实际能力（/api/video/caps）决定：
+         配置中有有效值则匹配选中，否则默认取第一个支持的分辨率 */
+      document.getElementById('vw').value = cfg.video_width > 0 ? cfg.video_width : '';
+      document.getElementById('vh').value = cfg.video_height > 0 ? cfg.video_height : '';
 
       canNames = Object.keys(cfg.cans || {});
 

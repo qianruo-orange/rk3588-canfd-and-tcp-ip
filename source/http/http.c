@@ -28,6 +28,7 @@
 #include <shadow.h>
 #include <crypt.h>
 #include <pwd.h>
+#include <grp.h>
 
 #include "http/http_internal.h"
 #include "video/video_stream.h"
@@ -435,7 +436,8 @@ static int http_check_auth_common(const char *req, int fd, int require_root)
 
     /* HTTP 头不区分大小写，用 strcasestr 定位认证头 */
     const char *auth = strcasestr(req, "Authorization: Basic ");
-    if (!auth) goto deny;
+    if (!auth) goto deny_nocount;   /* 未携带凭据只拒绝，不计失败数：
+        前端未登录时的请求会频繁 401，若计数会把本机 IP 自己锁进限速 */
 
     char decoded[128] = {0};
     const char *enc = auth + 21;
@@ -484,7 +486,20 @@ static int http_check_auth_common(const char *req, int fd, int require_root)
 
     char *result = crypt(password, hash);
     int ok = (result && strcmp(result, hash) == 0);
-    if (ok && require_root && pw->pw_uid != 0) ok = 0;
+    if (ok && require_root && pw->pw_uid != 0) {
+        /* 管理权限 = root 或 sudo 组成员（板卡默认锁定 root 密码，
+           实际管理员为 orangepi 等 sudo 用户；getgrouplist 返回 -1 时
+           已尽量填充缓冲区，按实际容量截断检查） */
+        gid_t groups[32];
+        int ngroups = (int)(sizeof(groups) / sizeof(groups[0]));
+        if (getgrouplist(username, pw->pw_gid, groups, &ngroups) < 0)
+            ngroups = (int)(sizeof(groups) / sizeof(groups[0]));
+        ok = 0;
+        for (int i = 0; i < ngroups; i++) {
+            struct group *gr = getgrgid(groups[i]);
+            if (gr && strcmp(gr->gr_name, "sudo") == 0) { ok = 1; break; }
+        }
+    }
     pthread_mutex_unlock(&g_auth_mutex);
 
     if (ok) {
@@ -506,6 +521,7 @@ deny:
     pthread_mutex_lock(&g_auth_mutex);
     g_auth_fail[slot].fail++;
     pthread_mutex_unlock(&g_auth_mutex);
+deny_nocount:
     http_send_response(fd, 401, "Unauthorized", "text/html", "", 0);
     return 0;
 }
@@ -606,6 +622,7 @@ static void http_process_request(http_conn_t *c)
     static const struct { const char *uri; int pre; const char *method; api_fn fn; int (*auth)(const char*,int); }
     rt[] = {
         { "/api/logs",      0, NULL,   http_logs_handler, http_check_auth_root },
+        { "/api/logs/clear",0, "POST", http_logs_handler, http_check_auth_root },
         { "/logs",          1, NULL,   http_logs_handler, http_check_auth_root },
         { "/logfile/",      1, NULL,   http_logs_handler, http_check_auth_root },
         { "/api/system",    0, NULL,   http_system_api_wrap,   NULL },
@@ -628,6 +645,7 @@ static void http_process_request(http_conn_t *c)
         { "/api/rec/start",0, "POST", http_rec_handler,  http_check_auth_root },
         { "/api/rec/stop", 0, "POST", http_rec_handler,  http_check_auth_root },
         { "/api/rec/delete",0,"POST", http_rec_handler,  http_check_auth_root },
+        { "/api/rec/clear", 0,"POST", http_rec_handler,  http_check_auth_root },
         { "/api/rec/status",0, NULL,  http_rec_handler,  NULL },
         { "/api/rec/list",  0, NULL,  http_rec_handler,  NULL },
         { "/api/rec/pack",  0, NULL,  http_rec_handler,  http_check_auth_root },

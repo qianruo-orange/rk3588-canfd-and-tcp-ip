@@ -179,6 +179,44 @@ static void serve_rec_delete(int fd, const char *req)
         http_err(fd, 404, "Not Found", NULL);
 }
 
+/* 一键清空录像：删除全部录像文件，保留正在录制的文件 */
+static void serve_rec_clear(int fd)
+{
+    video_rec_status_t st;
+    video_rec_status(&st);
+    const char *active = (st.recording && st.file[0]) ? st.file : NULL;
+
+    int del = 0;
+    DIR *dir = opendir(REC_DIR);
+    if (!dir) { http_err(fd, 500, "Error", NULL); return; }
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        char subdir[512];
+        snprintf(subdir, sizeof(subdir), "%s/%s", REC_DIR, de->d_name);
+        struct stat dst;
+        if (stat(subdir, &dst) < 0 || !S_ISDIR(dst.st_mode)) continue;
+        DIR *sd = opendir(subdir);
+        if (!sd) continue;
+        struct dirent *fde;
+        while ((fde = readdir(sd)) != NULL) {
+            if (fde->d_name[0] == '.') continue;
+            if (!rec_file_valid(fde->d_name)) continue;   /* 跳过打包临时文件等 */
+            char rel[160];
+            snprintf(rel, sizeof(rel), "%s/%s", de->d_name, fde->d_name);
+            if (active && strcmp(rel, active) == 0) continue;   /* 保留录制中的文件 */
+            char path[512];
+            snprintf(path, sizeof(path), "%s/%s/%s", REC_DIR, de->d_name, fde->d_name);
+            if (unlink(path) == 0) del++;
+        }
+        closedir(sd);
+    }
+    closedir(dir);
+    char json[64];
+    int off = snprintf(json, sizeof(json), "{\"deleted\":%d}", del);
+    http_ok_json(fd, json, (size_t)off);
+}
+
 /* 统计录像目录总大小（含按天子目录），用于打包前的体积限制 */
 static int64_t rec_total_size(void)
 {
@@ -268,6 +306,9 @@ void http_rec_handler(app_ctx_t *app, int fd, const char *method, const char *ur
     } else if (strcmp(uri, "/api/rec/delete") == 0) {
         if (strcmp(method, "POST") != 0) { http_err(fd, 405, "Method Not Allowed", NULL); return; }
         serve_rec_delete(fd, req_buf);
+    } else if (strcmp(uri, "/api/rec/clear") == 0) {
+        if (strcmp(method, "POST") != 0) { http_err(fd, 405, "Method Not Allowed", NULL); return; }
+        serve_rec_clear(fd);
     } else if (strncmp(uri, "/recfile/", 9) == 0) {
         char name[128];
         http_url_decode(uri + 9, name, sizeof(name));

@@ -395,7 +395,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | GET | `/api/logs`、`/logs`、`/logfile/*` | root | 日志列表 / 下载 / 删除 |
 | GET | `/logs/pack` | root | 打包下载全部日志（tar.gz） |
 
-> 认证说明：监控页（`/`）与 DBC 页（`/dbc`）需要普通用户认证；配置页（`/config`）、文件下载页（`/logs`）与所有写操作接口要求 root 权限。
+> 认证说明：监控页（`/`）与 DBC 页（`/dbc`）需要普通用户认证；配置页（`/config`）、文件下载页（`/logs`）与所有写操作接口要求管理员权限（root 或 sudo 组成员，如 orangepi）。
 
 ## AI 目标检测
 

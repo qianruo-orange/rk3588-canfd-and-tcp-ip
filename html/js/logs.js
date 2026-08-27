@@ -78,9 +78,13 @@
     tbody.innerHTML = '<tr><td colspan="5" class="loading">加载中…</td></tr>';
     var files;
     try {
-      files = (await (await fetch(apiUrl)).json()).files || [];
+      var r = await fetch(apiUrl);
+      if (r.status === 401) r = await authFetch(apiUrl);  /* 列表需要管理员认证，401 时统一登录重试 */
+      if (!r.ok) throw new Error('load ' + r.status);
+      var data = await r.json();
+      files = (data.files || data.logs) || [];   /* 录像接口返回 files，日志接口返回 logs */
     } catch (e) {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty">加载失败</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">加载失败（需管理员权限）</td></tr>';
       return;
     }
     if (files.length === 0) {
@@ -91,10 +95,12 @@
     files.forEach(function(f) {
       addRow(tbody, f, dlBase, del ? function() {
         if (!confirm('删除文件 ' + f.name + '？')) return;
-        authFetch(del.url, { method: del.method, body: f.name })
+        var opt = { method: del.method };
+        if (del.bodyName) opt.body = f.name;   /* 录像删除：文件名放请求体 */
+        authFetch(del.makeUrl(f.name), opt)    /* 日志删除：文件名放 URL 路径 */
           .then(function(r) {
             if (r.ok) { toast('已删除 ' + f.name, true); del.reload(); }
-            else if (r.status === 401) toast('需要管理员(root)权限', false);
+            else if (r.status === 401) toast('需要管理员权限（root 或 sudo 用户）', false);
             else if (r.status === 409) toast('该文件正在录制中，无法删除', false);
             else toast('删除失败 (' + r.status + ')', false);
           })
@@ -133,7 +139,8 @@
   /* ---- 日志列表 ---- */
   function loadLogs() {
     return loadFileList('/api/logs', 'rows_logs', '暂无日志文件', '/logfile/',
-      { url: '/logfile/', method: 'DELETE', reload: loadLogs });
+      { makeUrl: function(n) { return '/logfile/' + encodeURIComponent(n); },
+        method: 'DELETE', reload: loadLogs });
   }
 
   /* ---- 录像列表（按天分目录，自动录制持续生成，周期性刷新） ---- */
@@ -144,8 +151,27 @@
       if (st.recording) activeFile = st.file;   /* 格式与列表项 name 一致 */
     } catch (e) {}
     return loadFileList('/api/rec/list', 'rows_rec', '暂无录像文件', '/recfile/',
-      { url: '/api/rec/delete', method: 'POST', reload: loadRec }, activeFile);
+      { makeUrl: function() { return '/api/rec/delete'; },
+        method: 'POST', bodyName: true, reload: loadRec }, activeFile);
   }
+
+  /* ---- 一键清空（清空录像时保留正在录制的文件） ---- */
+  function bindClear(btn, url, label, reload) {
+    btn.addEventListener('click', function() {
+      if (!confirm('确定清空全部' + label + '？此操作不可恢复')) return;
+      authFetch(url, { method: 'POST' })
+        .then(function(r) {
+          if (r.ok) {
+            r.json().then(function(j) { toast('已清空 ' + (j.deleted || 0) + ' 个' + label + '文件', true); });
+            reload();
+          } else if (r.status === 401) toast('需要管理员权限（root 或 sudo 用户）', false);
+          else toast('清空失败 (' + r.status + ')', false);
+        })
+        .catch(function() {});
+    });
+  }
+  bindClear(document.getElementById('clear_btn'), '/api/logs/clear', '日志', loadLogs);
+  bindClear(document.getElementById('clear_rec_btn'), '/api/rec/clear', '录像', loadRec);
 
   /* ---- Tab 切换 ---- */
   function switchTab(tab) {
@@ -154,6 +180,8 @@
     document.getElementById('tbl_rec').style.display = isRec ? '' : 'none';
     document.getElementById('pack_btn').style.display = isRec ? 'none' : '';
     document.getElementById('pack_rec_btn').style.display = isRec ? '' : 'none';
+    document.getElementById('clear_btn').style.display = isRec ? 'none' : '';
+    document.getElementById('clear_rec_btn').style.display = isRec ? '' : 'none';
     var btns = document.querySelectorAll('.tab-btn');
     for (var i = 0; i < btns.length; i++)
       btns[i].classList.toggle('tab-on', btns[i].getAttribute('data-tab') === tab);

@@ -4,6 +4,7 @@
  */
 
 #include "http/http_internal.h"
+#include "core/version.h"
 
 #define MAX_CORES     16
 #define JSON_BUF_SIZE 8192
@@ -106,12 +107,14 @@ void http_system_api(app_ctx_t *app, int fd)
         "\"mem_pct\":%d,\"mem_total\":%ld,\"mem_avail\":%ld,"
         "\"disk_total\":%ld,\"disk_avail\":%ld,"
         "\"temp\":%d,"
-        "\"gpu\":%ld"
+        "\"gpu\":%ld,"
+        "\"app_version\":\"%s\",\"git_commit\":\"%s\",\"build_date\":\"%s\""
         "}",
         mem_pct, mem_total, mem_avail,
         disk_total, disk_avail,
         temp,
-        gpu_load);
+        gpu_load,
+        APP_VERSION, APP_GIT_COMMIT, APP_BUILD_DATE);
 
     http_ok_json(fd, json, (size_t)off);
 }

@@ -20,9 +20,9 @@
     try { sessionStorage.removeItem(KEY); } catch(e) {}
   }
 
-  /* 弹出登录框（root 账号），返回 Basic 凭据；取消返回 null */
+  /* 弹出登录框（管理员账号：root 或 sudo 组成员），返回 Basic 凭据；取消返回 null */
   function promptLogin() {
-    var u = prompt('需要管理员权限\n请输入用户名（默认 root）：');
+    var u = prompt('需要管理员权限（root 或 sudo 用户）\n请输入用户名（默认 root）：');
     if (!u) return null;
     var p = prompt('请输入 ' + u + ' 的密码：');
     if (p === null) return null;

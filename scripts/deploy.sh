@@ -60,8 +60,13 @@ do_install() {
 
     echo "[INSTALL] config/"
     mkdir -p "$DEPLOY_DIR/config"
-    rm -f "$DEPLOY_DIR/config/config.txt"
-    echo "  (using defaults — configure via web UI)"
+    # 保留用户已有的配置（Web 配置页写入的内容），仅在首次安装时放入模板
+    if [ ! -f "$DEPLOY_DIR/config/config.txt" ] && [ -f "$PROJECT_DIR/config/config.txt" ]; then
+        cp "$PROJECT_DIR/config/config.txt" "$DEPLOY_DIR/config/config.txt"
+        echo "  (config.txt template installed — configure via web UI)"
+    else
+        echo "  (keep existing config.txt)"
+    fi
 
     if [ -f "$PROJECT_DIR/config/example.dbc" ]; then
         echo "[INSTALL] config/example.dbc"

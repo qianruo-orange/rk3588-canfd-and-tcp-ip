@@ -255,8 +255,11 @@
       document.getElementById('ai_cf').value = Math.round((cfg.ai_conf || 0.25) * 100);
       document.getElementById('ai_nm').value = Math.round((cfg.ai_nms || 0.45) * 100);
       document.getElementById('ai_iv').value = cfg.ai_interval_ms || 10;
-      document.getElementById('ai_model_txt').textContent = cfg.ai_model || '-';
-      document.getElementById('ai_names_txt').textContent = cfg.ai_names || '-';
+      /* 元素缺失时跳过而不是中断整个加载流程（曾导致后面 chkIpMode 不执行） */
+      var t = document.getElementById('ai_model_txt');
+      if (t) t.textContent = cfg.ai_model || '-';
+      t = document.getElementById('ai_names_txt');
+      if (t) t.textContent = cfg.ai_names || '-';
 
       /* IP 设置：IP 即 TCP 绑定网卡的 IP；回填保存配置 + 当前运行时地址 */
       document.getElementById('ip_mode').value = cfg.ip_mode || '';
@@ -442,6 +445,78 @@
     } catch(e) { show('err', '上传失败'); }
     input.value = '';
     setTimeout(function() { document.getElementById('msg').className = ''; }, 4000);
+  };
+
+  /* 导出配置表：读取 /api/config，生成可读文本 + 原始 JSON 并触发浏览器下载 */
+  window.exportCfg = async function() {
+    var cfg = null;
+    try { cfg = await (await fetch('/api/config')).json(); }
+    catch(e) { show('err', '读取配置失败'); return; }
+    var L = [];
+    L.push('==== RK3588 配置表 ====');
+    L.push('导出时间: ' + new Date().toLocaleString());
+    L.push('');
+    L.push('[AI 检测]');
+    L.push('启用: ' + (cfg.ai_enable ? 'on' : 'off'));
+    L.push('模型文件: ' + (cfg.ai_model || '-'));
+    L.push('标签文件: ' + (cfg.ai_names || '-'));
+    L.push('输入尺寸: ' + (cfg.ai_input_size || '-'));
+    L.push('推理线程数: ' + (cfg.ai_threads || '-'));
+    L.push('置信度: ' + (typeof cfg.ai_conf === 'number' ? cfg.ai_conf : '-'));
+    L.push('NMS IoU: ' + (typeof cfg.ai_nms === 'number' ? cfg.ai_nms : '-'));
+    L.push('推理间隔: ' + (cfg.ai_interval_ms || 0) + ' ms');
+    L.push('');
+    L.push('[视频]');
+    L.push('设备: ' + (cfg.video_device || '-'));
+    L.push('分辨率: ' + (cfg.video_width > 0 ? (cfg.video_width + ' x ' + cfg.video_height) : '默认'));
+    L.push('帧率: ' + (cfg.video_fps > 0 ? (cfg.video_fps + ' fps') : '自动（驱动默认）'));
+    L.push('');
+    L.push('[网络]');
+    L.push('TCP 端口: ' + (cfg.tcp_port || '-'));
+    L.push('最大客户端数: ' + (cfg.max_clients || '-'));
+    L.push('绑定网卡: ' + (cfg.tcp_bind || '所有网卡'));
+    L.push('');
+    L.push('[IP 设置]');
+    L.push('模式: ' + (cfg.ip_mode === 'static' ? '静态' : (cfg.ip_mode === 'dhcp' ? 'DHCP' : '关闭（不管理）')));
+    L.push('接口: ' + (cfg.ip_ifname || '-'));
+    L.push('IP 地址: ' + (cfg.ip_addr || '-'));
+    L.push('子网掩码: ' + (cfg.ip_mask || '-'));
+    L.push('网关: ' + (cfg.ip_gw || '-'));
+    L.push('当前: ' + (cfg.ip_cur_if || '') + ' ' + (cfg.ip_cur_addr || '无 IP')
+      + (cfg.ip_cur_mask ? ' / ' + cfg.ip_cur_mask : '')
+      + (cfg.ip_cur_gw ? ' 网关 ' + cfg.ip_cur_gw : ''));
+    var names = Object.keys(cfg.cans || {});
+    if (names.length) {
+      L.push('');
+      L.push('[CAN 通道]');
+      for (var i = 0; i < names.length; i++) {
+        var f = cfg.cans[names[i]] || {};
+        L.push('[' + names[i] + ']');
+        L.push('波特率: ' + (f.bitrate || '-'));
+        L.push('CAN FD: ' + (f.fd || 'off'));
+        L.push('FD 波特率: ' + (f.dbitrate || '-'));
+        L.push('启用: ' + (f.up === 'on' ? 'on' : 'off'));
+        var fl = f.filters || [];
+        if (fl.length) {
+          for (var k = 0; k < fl.length; k++)
+            L.push('过滤器: ID 0x' + fl[k].id + '  Mask 0x' + fl[k].mask);
+        } else {
+          L.push('过滤器: 无');
+        }
+      }
+    }
+    L.push('');
+    L.push('==== 原始 JSON ====');
+    L.push(JSON.stringify(cfg, null, 2));
+    var blob = new Blob([L.join('\n')], {type: 'text/plain;charset=utf-8'});
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    var d = new Date(), z = function(n) { return n < 10 ? '0' + n : '' + n; };
+    a.download = 'config_' + d.getFullYear() + z(d.getMonth() + 1) + z(d.getDate())
+      + '_' + z(d.getHours()) + z(d.getMinutes()) + z(d.getSeconds()) + '.txt';
+    a.click();
+    setTimeout(function() { URL.revokeObjectURL(a.href); }, 1000);
+    show('ok', '✓ 配置表已导出');
   };
 
   window.reboot = async function() {

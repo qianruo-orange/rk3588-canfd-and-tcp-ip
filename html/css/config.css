@@ -30,6 +30,7 @@ h1{font-size:24px;margin-bottom:16px}
 .ai-basic{grid-template-columns:repeat(3,1fr)}
 .ai-basic .row input,.ai-basic .row select{max-width:150px}
 .ai-upload{grid-template-columns:1fr}
+.ai-cur{color:var(--muted);font-size:12px;word-break:break-all;flex:1}
 @media(max-width:1200px){.ai-split{grid-template-columns:1fr}}
 /* 网络/视频卡：每行两个参数；按钮与输入框留间距 */
 .net2,.vid2{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}

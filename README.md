@@ -340,6 +340,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | `tcp_bind` | `<ifname>` | TCP 监听绑定网卡名，留空表示绑定所有网卡（`INADDR_ANY`） |
 | `video_device` | `<path>` | 视频设备，默认 `/dev/video0` |
 | `video_width` / `video_height` | `<n>` | 分辨率，默认 640×480 |
+| `video_fps` | `<n>` | 期望帧率（1~120，V4L2 S_PARM 设置驱动帧间隔）；0 = 驱动默认 |
 | `can_dbc` | `<name> <path>` | 按 CAN 通道配置 DBC 数据库文件路径，留空则不启用该通道信号解码 |
 | `ai_enable` | `on\|off` | 启用 NPU 推理画框流，默认 `off` |
 | `ai_model` | `<path>` | YOLO26 官方单输出 `.rknn` 模型路径，默认 `config/yolo26.rknn` |
@@ -365,9 +366,14 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 
 服务默认监听 HTTP 端口 80，提供以下入口：
 
-- `/`：仪表盘
+- `/`：仪表盘（视频流下方实时显示客户端实测帧率徽标）
 - `/dbc`：DBC 信号解析
 - `/config`：运行配置
+  - 视频卡：设备 / 格式分辨率下拉框按相机真实能力枚举（`/api/video/caps`），并显示该格式与分辨率下驱动支持的 FPS 档位，可选择保存（`video_fps`）后立即生效
+  - AI 卡：推理参数与模型文件上传左右分栏（1:1），上传热生效，并显示当前加载的模型 / 标签文件名
+  - CAN 卡：波特率 / DBC 上传 / CAN FD / FD 波特率一行配置，通道下拉框标注 FD 能力
+  - 网络卡：IP 模式（关闭 / 静态 / DHCP），仅「静态」模式显示 IP / 掩码 / 网关输入框
+  - 顶部「导出配置表」：一键导出全部配置为可读文本（含原始 JSON），便于备份与移植
 - `/logs`：文件下载（日志 / 录像双 TAB）
 
 ### REST API

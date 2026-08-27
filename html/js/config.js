@@ -114,7 +114,8 @@
 
   var capsData = null;
   var camDevs = [];   /* 系统枚举到的摄像头列表 [{path,card},...] */
-  var cfgVideoFps = 0;   /* 配置中的帧率（0=自动），分辨率切换后用于回选 */
+  var cfgVideoFps = 0;   /* 配置中的帧率（0=自动），页面加载时用于回选合并下拉框 */
+  var selVidFps = 0;     /* 当前选中项（格式/分辨率/帧率合一）的帧率，保存时提交 */
 
   /* 页面加载时扫描可用摄像头 */
   async function loadDevices() {
@@ -142,22 +143,31 @@
       capsData = await r.json();
       sel.innerHTML = '';
 
+      /* 格式 / 分辨率 / 帧率合并为一个下拉框：每项 = fmt + 尺寸 + @fps */
       var curW = parseInt(document.getElementById('vw').value) || 0;
       var curH = parseInt(document.getElementById('vh').value) || 0;
-      var matchVal = '';
+      var matchVal = '';   /* 尺寸 + 帧率都匹配 */
+      var matchSize = '';  /* 仅尺寸匹配（配置帧率为 0 时用） */
 
       for (var i = 0; i < capsData.formats.length; i++) {
         var f = capsData.formats[i];
         for (var j = 0; j < f.sizes.length; j++) {
           var s = f.sizes[j];
-          var val = i + '_' + j;
-          var txt = f.fmt + '  ' + s.w + '×' + s.h + (s.label ? ' (' + s.label + ')' : '');
-          sel.innerHTML += '<option value="' + val + '">' + txt + '</option>';
-          if (s.w === curW && s.h === curH && !matchVal) matchVal = val;
+          var fps = s.fps && s.fps.length ? s.fps : [60,50,30,25,20,15,10,5];
+          for (var k = 0; k < fps.length; k++) {
+            var val = i + '_' + j + '_' + fps[k];
+            var txt = f.fmt + '  ' + s.w + '×' + s.h + (s.label ? ' (' + s.label + ')' : '') + ' @ ' + fps[k] + ' FPS';
+            sel.innerHTML += '<option value="' + val + '">' + txt + '</option>';
+            if (s.w === curW && s.h === curH) {
+              if (!matchSize) matchSize = val;
+              if (cfgVideoFps > 0 && fps[k] === cfgVideoFps) matchVal = val;
+            }
+          }
         }
       }
 
       if (matchVal) sel.value = matchVal;
+      else if (matchSize) sel.value = matchSize;
       else if (sel.options.length > 0) sel.selectedIndex = 0;
       onResChange();
     } catch(e) { sel.innerHTML = '<option value="">查询失败</option>'; }
@@ -172,21 +182,7 @@
     var s = capsData.formats[fi].sizes[ri];
     document.getElementById('vw').value = s.w;
     document.getElementById('vh').value = s.h;
-
-    /* 帧率下拉：按该格式/分辨率支持的 FPS 列表刷新（无数据时回退常见档位） */
-    var vf = document.getElementById('vf');
-    var fps = s.fps && s.fps.length ? s.fps : [60,50,30,25,20,15,10,5];
-    var cur = vf.value;
-    vf.innerHTML = '<option value="">自动（驱动默认）</option>';
-    for (var i = 0; i < fps.length; i++)
-      vf.innerHTML += '<option value="' + fps[i] + '">' + fps[i] + ' FPS</option>';
-    var kept = false;
-    for (var i = 0; i < vf.options.length; i++)
-      if (vf.options[i].value === cur) { vf.selectedIndex = i; kept = true; break; }
-    if (!kept && cfgVideoFps > 0) {   /* 切换分辨率后回选配置中的帧率 */
-      for (var i = 0; i < vf.options.length; i++)
-        if (parseInt(vf.options[i].value, 10) === cfgVideoFps) { vf.selectedIndex = i; break; }
-    }
+    selVidFps = parseInt(parts[2], 10) || 0;   /* 帧率随选项一起保存 */
   };
 
   window.addFilter = function() {
@@ -255,12 +251,6 @@
       document.getElementById('ai_cf').value = Math.round((cfg.ai_conf || 0.25) * 100);
       document.getElementById('ai_nm').value = Math.round((cfg.ai_nms || 0.45) * 100);
       document.getElementById('ai_iv').value = cfg.ai_interval_ms || 10;
-      /* 元素缺失时跳过而不是中断整个加载流程（曾导致后面 chkIpMode 不执行） */
-      var t = document.getElementById('ai_model_txt');
-      if (t) t.textContent = cfg.ai_model || '-';
-      t = document.getElementById('ai_names_txt');
-      if (t) t.textContent = cfg.ai_names || '-';
-
       /* IP 设置：IP 即 TCP 绑定网卡的 IP；回填保存配置 + 当前运行时地址 */
       document.getElementById('ip_mode').value = cfg.ip_mode || '';
       document.getElementById('ip_a').value = cfg.ip_addr || '';
@@ -402,7 +392,7 @@
       video_device: document.getElementById('vd').value,
       video_width: document.getElementById('vw').value,
       video_height: document.getElementById('vh').value,
-      video_fps: document.getElementById('vf').value
+      video_fps: selVidFps
     });
   };
 

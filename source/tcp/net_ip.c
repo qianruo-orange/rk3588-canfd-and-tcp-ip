@@ -31,35 +31,66 @@ static int mask_to_prefix(const char *mask)
     return p;
 }
 
+/* 校验网卡名：只允许字母/数字/./_/:-，防命令注入（名称会拼进 system() 命令） */
+static int valid_ifname(const char *ifname)
+{
+    if (!ifname || !ifname[0] || strlen(ifname) >= IFNAMSIZ) return 0;
+    for (const char *p = ifname; *p; p++) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '.' || *p == '_' ||
+              *p == ':' || *p == '-'))
+            return 0;
+    }
+    return 1;
+}
+
 int net_ip_apply(const char *ifname, const char *mode,
                  const char *addr, const char *mask, const char *gw)
 {
-    if (!ifname || !ifname[0]) return -1;
-    char cmd[512];
+    if (!valid_ifname(ifname)) {
+        LOG_ERROR("net_ip: invalid ifname rejected");
+        return -1;
+    }
+    int is_static = mode && strcmp(mode, "static") == 0;
+    int is_dhcp   = mode && strcmp(mode, "dhcp") == 0;
+    /* mode off/空：完全不碰接口（此前无条件 flush 会把管理口地址清掉导致断连） */
+    if (!is_static && !is_dhcp) {
+        LOG_INFO("net_ip: %s ip mode off, left unchanged", ifname);
+        return 0;
+    }
 
-    /* 先使接口 up 并清空旧地址（避免 add 冲突） */
+    /* 先校验静态参数，再动接口：地址非法时不再 flush 后裸奔（接口无地址） */
+    struct in_addr check;
+    int has_addr = addr && addr[0] && inet_pton(AF_INET, addr, &check) == 1;
+    int has_mask = mask && mask[0];
+    int has_gw   = gw && gw[0] && inet_pton(AF_INET, gw, &check) == 1;
+    if (is_static && (!has_addr || !has_mask)) {
+        LOG_INFO("net_ip: %s mode '%s' not applied (no valid address given)",
+                 ifname, mode ? mode : "");
+        return -1;
+    }
+    if (gw && gw[0] && !has_gw)   /* gw 会拼进 system() 命令，非法则忽略 */
+        LOG_ERROR("net_ip: invalid gateway '%s' ignored", gw);
+
+    char cmd[512];
+    /* 使接口 up 并清空旧地址（避免 add 冲突）——仅在确实要配置时执行 */
     snprintf(cmd, sizeof(cmd), "ip link set %s up 2>/dev/null; ip addr flush dev %s 2>/dev/null",
              ifname, ifname);
     system(cmd);
 
-    if (mode && strcmp(mode, "static") == 0 && addr && addr[0] && mask && mask[0]) {
-        struct in_addr check;
-        if (inet_pton(AF_INET, addr, &check) != 1) {
-            LOG_ERROR("net_ip: invalid static address '%s'", addr);
-            return -1;
-        }
+    if (is_static && has_addr) {
         int prefix = mask_to_prefix(mask);
         snprintf(cmd, sizeof(cmd), "ip addr add %s/%d dev %s 2>/dev/null", addr, prefix, ifname);
         int rc = system(cmd);
         LOG_INFO("net_ip: %s -> %s/%d (%s)", ifname, addr, prefix, rc == 0 ? "ok" : "failed");
-        if (gw && gw[0]) {
+        if (has_gw) {
             snprintf(cmd, sizeof(cmd), "ip route replace default via %s dev %s 2>/dev/null", gw, ifname);
             system(cmd);
         }
         return rc == 0 ? 0 : -1;
     }
 
-    if (mode && strcmp(mode, "dhcp") == 0) {
+    if (is_dhcp) {
         /* busybox udhcpc 优先，失败回退 dhclient */
         snprintf(cmd, sizeof(cmd), "udhcpc -i %s -b -q 2>/dev/null || dhclient %s 2>/dev/null",
                  ifname, ifname);
@@ -68,8 +99,8 @@ int net_ip_apply(const char *ifname, const char *mode,
         return rc == 0 ? 0 : -1;
     }
 
-    LOG_INFO("net_ip: %s ip mode off, left unchanged", ifname);
-    return 0;
+    LOG_INFO("net_ip: %s mode '%s' not applied (no address given)", ifname, mode ? mode : "");
+    return -1;
 }
 
 int net_ip_get_current(const char *ifname,
@@ -125,11 +156,17 @@ typedef struct {
     char gw[32];
 } net_ip_job_t;
 
+/* 串行化所有后台 IP 应用：连续保存会起多个 detached 线程，
+   不串行时各线程的 system() 命令交错执行（flush/add 竞态），接口状态不可预期 */
+static pthread_mutex_t g_apply_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static void *net_ip_worker(void *p)
 {
     net_ip_job_t *j = p;
     usleep(300000);   /* 等响应发出后再断网 */
+    pthread_mutex_lock(&g_apply_lock);
     net_ip_apply(j->ifname, j->mode, j->addr, j->mask, j->gw);
+    pthread_mutex_unlock(&g_apply_lock);
     free(j);
     return NULL;
 }
@@ -139,6 +176,11 @@ void net_ip_apply_async(const char *ifname, const char *mode,
 {
     net_ip_job_t *j = calloc(1, sizeof(*j));
     if (!j) return;
+    if (!valid_ifname(ifname)) {   /* 异步入口同样校验，不把恶意串放进线程 */
+        LOG_ERROR("net_ip: invalid ifname rejected (async)");
+        free(j);
+        return;
+    }
     safe_strncpy(j->ifname, sizeof(j->ifname), ifname);
     safe_strncpy(j->mode,   sizeof(j->mode),   mode);
     safe_strncpy(j->addr,   sizeof(j->addr),   addr);

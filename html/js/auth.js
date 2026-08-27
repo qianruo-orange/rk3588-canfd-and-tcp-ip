@@ -66,7 +66,9 @@
     opts.headers = h;
     var r = await fetch(url, opts);
     if (r.status === 401) {
-      clear();
+      /* 仅当存储里仍是本请求用过的那份凭据时才清除：
+         若并发请求已登录并写入新凭据，直接复用，避免连环弹窗 */
+      if (get() === cred) clear();
       cred = await getCred();   /* 并发 401 也合并为一次登录 */
       if (!cred) throw new Error('auth cancelled');
       h['Authorization'] = 'Basic ' + cred;

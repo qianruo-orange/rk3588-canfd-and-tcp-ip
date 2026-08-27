@@ -39,8 +39,9 @@ int yolo_jpeg_to_rgb(const unsigned char *jpeg, size_t jpeg_len,
         return -1;
     }
     while (cinfo.output_scanline < cinfo.output_height) {
+        unsigned int y = cinfo.output_scanline;   /* 读前保存：read_scanlines 返回后 output_scanline 已 +1 */
         if (jpeg_read_scanlines(&cinfo, &row, 1) != 1) break;
-        memcpy(rgb + (size_t)cinfo.output_scanline * w * 3, row, (size_t)w * 3);
+        memcpy(rgb + (size_t)y * w * 3, row, (size_t)w * 3);
     }
     free(row);
     jpeg_finish_decompress(&cinfo);

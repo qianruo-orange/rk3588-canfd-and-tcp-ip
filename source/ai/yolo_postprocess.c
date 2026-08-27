@@ -7,6 +7,7 @@
  */
 
 #include <math.h>
+#include <string.h>
 
 #include "ai/yolo_postprocess.h"
 
@@ -28,7 +29,9 @@ int yolo_postprocess(const float *const *out_buf, const rknn_tensor_attr *attrs,
     float sx = (float)frame_w / (float)in_w;
     float sy = (float)frame_h / (float)in_h;
     int ndet = 0;
+    /* 候选上限即数组容量：YOLO_MAX_DETS（勿用 sizeof(cand)/6，那是字节数） */
     float cand[YOLO_MAX_DETS * 6];   /* x1,y1,x2,y2,score,cls */
+    int cand_cap = YOLO_MAX_DETS;
     int ncand = 0;
 
     /* 类别数：所有检测头通道维一致，取 ch-4（布局由 dims 启发式推断，不依赖 fmt） */
@@ -46,7 +49,7 @@ int yolo_postprocess(const float *const *out_buf, const rknn_tensor_attr *attrs,
     if (nc_out) *nc_out = nc > 0 ? nc : 80;
     if (nc <= 0) nc = 80;
 
-    for (uint32_t o = 0; o < n_output && ncand < (int)sizeof(cand)/6; o++) {
+    for (uint32_t o = 0; o < n_output; o++) {
         const rknn_tensor_attr *a = &attrs[o];
         const float *buf = out_buf[o];
         uint32_t nd = a->n_dims;
@@ -61,7 +64,7 @@ int yolo_postprocess(const float *const *out_buf, const rknn_tensor_attr *attrs,
         if ((uint64_t)A * ch != a->n_elems) continue;
         int stride = (int)roundf((float)in_w / (float)W);
         if (stride <= 0) stride = 8;
-        for (uint32_t a_i = 0; a_i < A && ncand < (int)sizeof(cand)/6; a_i++) {
+        for (uint32_t a_i = 0; a_i < A; a_i++) {
             /* NHWC：row[a_i*ch+c]；NCHW：row[c*A+a_i] */
             const float *row;
             float tmp[5];
@@ -88,12 +91,36 @@ int yolo_postprocess(const float *const *out_buf, const rknn_tensor_attr *attrs,
             float y = (sigmoid(row[1]) * 2.0f - 0.5f + (float)cy0) * (float)stride;
             float bw = sigmoid(row[2]) * sigmoid(row[2]) * 4.0f * (float)stride;
             float bh = sigmoid(row[3]) * sigmoid(row[3]) * 4.0f * (float)stride;
-            cand[ncand * 6 + 0] = (x - bw * 0.5f) * sx; cand[ncand * 6 + 1] = (y - bh * 0.5f) * sy;
-            cand[ncand * 6 + 2] = (x + bw * 0.5f) * sx; cand[ncand * 6 + 3] = (y + bh * 0.5f) * sy;
-            cand[ncand * 6 + 4] = bests; cand[ncand * 6 + 5] = (float)best;
-            ncand++;
+            if (ncand < cand_cap) {
+                cand[ncand * 6 + 0] = (x - bw * 0.5f) * sx; cand[ncand * 6 + 1] = (y - bh * 0.5f) * sy;
+                cand[ncand * 6 + 2] = (x + bw * 0.5f) * sx; cand[ncand * 6 + 3] = (y + bh * 0.5f) * sy;
+                cand[ncand * 6 + 4] = bests; cand[ncand * 6 + 5] = (float)best;
+                ncand++;
+            } else {
+                /* 满员：新候选分高于当前最低分则替换（最终排序在 NMS 前统一做） */
+                int p = 0;
+                for (int k = 1; k < cand_cap; k++)
+                    if (cand[k * 6 + 4] < cand[p * 6 + 4]) p = k;
+                if (bests > cand[p * 6 + 4]) {
+                    cand[p * 6 + 0] = (x - bw * 0.5f) * sx; cand[p * 6 + 1] = (y - bh * 0.5f) * sy;
+                    cand[p * 6 + 2] = (x + bw * 0.5f) * sx; cand[p * 6 + 3] = (y + bh * 0.5f) * sy;
+                    cand[p * 6 + 4] = bests; cand[p * 6 + 5] = (float)best;
+                }
+            }
         }
     }
+    /* 按置信度降序排列（贪心 NMS 前提，避免低分框抑制高分框） */
+    for (int i = 1; i < ncand; i++) {
+        float t[6];
+        memcpy(t, &cand[i * 6], sizeof(t));
+        int j = i - 1;
+        while (j >= 0 && cand[j * 6 + 4] < t[4]) {
+            memcpy(&cand[(j + 1) * 6], &cand[j * 6], sizeof(t));
+            j--;
+        }
+        memcpy(&cand[(j + 1) * 6], t, sizeof(t));
+    }
+
     /* NMS（类别内抑制） */
     static char suppressed[YOLO_MAX_DETS];
     for (int i = 0; i < ncand; i++) suppressed[i] = 0;

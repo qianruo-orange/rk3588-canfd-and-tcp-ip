@@ -384,10 +384,11 @@ static void sps_pps_cb(void *ud, const unsigned char *start, size_t nlen)
     rec_mp4_t *s = ud;
     if (s->avcC_written) return;
     unsigned char type = start[0] & 0x1F;
-    if (type == 7 && nlen <= sizeof(s->sps) && s->sps_len == 0) {
+    /* nlen >= 4：合法 SPS/PPS 最短 4 字节，防 1 字节伪 NAL 污染 avcC */
+    if (type == 7 && nlen >= 4 && nlen <= sizeof(s->sps) && s->sps_len == 0) {
         memcpy(s->sps, start, nlen);
         s->sps_len = (unsigned int)nlen;
-    } else if (type == 8 && nlen <= sizeof(s->pps) && s->pps_len == 0) {
+    } else if (type == 8 && nlen >= 4 && nlen <= sizeof(s->pps) && s->pps_len == 0) {
         memcpy(s->pps, start, nlen);
         s->pps_len = (unsigned int)nlen;
     }

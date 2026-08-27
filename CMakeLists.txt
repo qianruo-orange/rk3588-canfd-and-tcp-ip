@@ -63,11 +63,7 @@ file(WRITE "${PROJECT_SOURCE_DIR}/include/core/version.h"
 set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG" CACHE STRING "Release flags")
 set(CMAKE_C_FLAGS_DEBUG   "-O0 -g"      CACHE STRING "Debug flags")
 
-if(CMAKE_BUILD_TYPE)
-    add_compile_definitions(APP_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
-else()
-    add_compile_definitions(APP_BUILD_TYPE="Release")
-endif()
+# APP_BUILD_TYPE 已写入生成的 version.h，勿重复 add_compile_definitions（会触发重定义告警）
 
 option(DEBUG "Enable debug output to terminal" OFF)
 if(DEBUG)
@@ -117,4 +113,6 @@ if(AVCODEC_FOUND)
     add_compile_definitions(HAVE_AVCODEC)
     target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE PkgConfig::AVCODEC)
     message(STATUS "FFmpeg found: h264_rkmpp backend enabled")
+else()
+    message(STATUS "FFmpeg not found: fallback to V4L2 rkvenc backend")
 endif()

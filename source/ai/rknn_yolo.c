@@ -87,6 +87,8 @@ static struct {
 
     unsigned long long last_seq;            /* 采集去重 */
 
+    int            n_created;               /* 实际创建成功的 worker 线程数（destroy 据此 join） */
+
     /* 快照：仅当新 seq 大于当前时更新（worker 乱序完成场景） */
     pthread_mutex_t result_mutex;
     yolo_result_t   result;
@@ -365,6 +367,8 @@ fail_workers:
         if (wk->in_buf) { free(wk->in_buf); wk->in_buf = NULL; }
         if (wk->ctx) { rknn_destroy(wk->ctx); wk->ctx = 0; }
     }
+    free(g_ai.model);
+    g_ai.model = NULL;
     LOG_ERROR("ai: init failed, AI disabled (stream continues raw)");
     return 0;
 }
@@ -377,7 +381,7 @@ void rknn_yolo_destroy(void *arg)
     pthread_cond_broadcast(&g_ai.q_not_empty);
     pthread_cond_broadcast(&g_ai.q_not_full);
 
-    for (int i = 0; i < g_ai.nthreads; i++)
+    for (int i = 0; i < g_ai.n_created; i++)
         pthread_join(g_ai.w_tid[i], NULL);   /* 在途任务完成或退出后返回 */
     for (int i = 0; i < g_ai.nthreads; i++) {
         yolo_worker_t *wk = &g_ai.workers[i];
@@ -464,12 +468,12 @@ void *rknn_ai_task(void *arg)
         if (pthread_create(&g_ai.w_tid[i], NULL, yolo_worker_task,
                            (void *)(intptr_t)i) != 0) {
             LOG_ERROR("ai: worker thread %d create failed", i);
-            g_ai.nthreads = i;
             break;
         }
+        g_ai.n_created = i + 1;
     }
     LOG_INFO("ai: inference pool started (%d threads, interval %d ms)",
-             g_ai.nthreads, g_ai.interval_ms);
+             g_ai.n_created, g_ai.interval_ms);
 
     while (app->running && g_ai.running) {
         watchdog_feed_self("ai");
@@ -492,7 +496,11 @@ void *rknn_ai_task(void *arg)
         unsigned char *rgb = NULL;
         int rw = 0, rh = 0;
         if (fmt == RKNN_FMT_MJPEG) {
-            if (yolo_jpeg_to_rgb(raw, raw_len, &rgb, &rw, &rh) != 0) { free(raw); continue; }
+            if (yolo_jpeg_to_rgb(raw, raw_len, &rgb, &rw, &rh) != 0) {
+                free(raw);
+                usleep(g_ai.interval_ms * 1000);   /* 坏帧退避，避免忙转 */
+                continue;
+            }
         } else {   /* YUYV */
             rgb = malloc((size_t)w * h * 3);
             if (rgb) { yolo_yuyv_to_rgb(raw, w, h, rgb); rw = w; rh = h; }

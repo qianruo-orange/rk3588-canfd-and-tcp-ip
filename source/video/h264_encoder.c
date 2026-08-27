@@ -30,6 +30,7 @@
 #ifdef HAVE_AVCODEC
 #include <libavcodec/avcodec.h>
 #include <libavutil/pixfmt.h>
+#include <libavutil/error.h>   /* av_err2str */
 #endif
 
 #include "video/h264_encoder.h"
@@ -113,6 +114,7 @@ struct h264_encoder_s {
 #ifdef HAVE_AVCODEC
     AVCodecContext *avctx;
     AVFrame *frame;
+    AVPacket *pkt;                  /* 复用同一 packet，避免每帧 alloc/free */
     int64_t pts;
 #endif
     /* V4L2 后端状态 */
@@ -171,11 +173,29 @@ static void parse_avcc(h264_encoder_t *e, const unsigned char *d, int size)
     }
 }
 
-/* FFmpeg packet（AVCC，4 字节大端长度前缀）→ Annex-B（00 00 00 01 + NAL）。
-   返回 malloc 缓冲，*out_len 为实际长度。 */
+/* FFmpeg packet → Annex-B（00 00 00 01 + NAL）。返回 malloc 缓冲，*out_len 为实际长度。
+   自动识别包内格式：
+   - 已含起始码（MPP 编码器原生输出，h264e_slice.c/h264e_sps.c 写 00 00 00 01）
+     → 原样拷贝；
+   - AVCC 4 字节大端长度前缀（个别后端）→ 逐 NAL 加起始码。 */
 static unsigned char *avcc_to_annexb(const unsigned char *d, int size, size_t *out_len)
 {
     *out_len = 0;
+    if (size <= 0) return NULL;
+
+    /* 仅当起始码后的 NAL 头合法（forbidden_zero_bit=0）才认 Annex-B：
+       否则 AVCC 首 NAL 长度前缀恰为 00 00 01 xx 时会被误判 */
+    int has_sc =
+        (size >= 5 && d[0] == 0 && d[1] == 0 && d[2] == 0 && d[3] == 1 && !(d[4] & 0x80)) ||
+        (size >= 4 && d[0] == 0 && d[1] == 0 && d[2] == 1 && !(d[3] & 0x80));
+    if (has_sc) {
+        unsigned char *out = malloc((size_t)size);
+        if (!out) return NULL;
+        memcpy(out, d, (size_t)size);
+        *out_len = (size_t)size;
+        return out;
+    }
+
     size_t total = 0, i = 0;
     while (i + 4 <= (size_t)size) {
         uint32_t len = ((uint32_t)d[i] << 24) | ((uint32_t)d[i + 1] << 16) |
@@ -232,7 +252,13 @@ static int ff_encoder_open(h264_encoder_t *e, int fps, int bitrate_bps)
         parse_avcc(e, ctx->extradata, ctx->extradata_size);
 
     e->frame = av_frame_alloc();
-    if (!e->frame) { avcodec_free_context(&ctx); return -1; }
+    e->pkt   = av_packet_alloc();
+    if (!e->frame || !e->pkt) {
+        if (e->frame) av_frame_free(&e->frame);
+        if (e->pkt)   av_packet_free(&e->pkt);
+        avcodec_free_context(&ctx);
+        return -1;
+    }
     e->frame->format     = AV_PIX_FMT_NV12;
     e->frame->width      = e->w;
     e->frame->height     = e->h;
@@ -428,6 +454,12 @@ void h264_encoder_destroy(h264_encoder_t *e)
 
 #ifdef HAVE_AVCODEC
     if (e->using_ff) {
+        /* 冲刷编码器：NULL 帧触发 flush，收走残余包（录制已结束，丢弃），
+           避免 MPP 硬件编码器留未输出帧 */
+        avcodec_send_frame(e->avctx, NULL);
+        while (avcodec_receive_packet(e->avctx, e->pkt) == 0)
+            av_packet_unref(e->pkt);
+        av_packet_free(&e->pkt);
         avcodec_free_context(&e->avctx);
         if (e->frame) av_frame_free(&e->frame);
         free(e);
@@ -474,10 +506,18 @@ static void h264_scan(h264_encoder_t *e, const unsigned char *d, size_t len,
         unsigned char type = d[pos] & 0x1F;
         long next = nal_find(d, len, pos + 1);
         size_t nlen = (next < 0) ? (len - (size_t)pos) : (size_t)(next - pos);
-        if (type == 7 && nlen <= sizeof(e->sps)) {       /* SPS */
+        /* next 指向下一 NAL 头，[pos, next) 内含其后置起始码字节（3-4 个 0x00…01），
+           必须裁掉，否则 avcC 里的 SPS/PPS 末尾带起始码 → MP4 无法解码。
+           仅当确实找到下一 NAL（next >= 0）才裁：末段 NAL 无后置起始码，
+           裁剪会误删其合法尾字节（如 rbsp 停止位恰好落在最低位的 0x01） */
+        if (next >= 0) {
+            while (nlen > 1 && d[pos + nlen - 1] == 0) nlen--;
+            if (nlen > 1 && d[pos + nlen - 1] == 1) nlen--;
+        }
+        if (type == 7 && nlen >= 4 && nlen <= sizeof(e->sps)) {       /* SPS */
             memcpy(e->sps, d + pos, nlen);
             e->sps_len = (unsigned int)nlen;
-        } else if (type == 8 && nlen <= sizeof(e->pps)) { /* PPS */
+        } else if (type == 8 && nlen >= 4 && nlen <= sizeof(e->pps)) { /* PPS */
             memcpy(e->pps, d + pos, nlen);
             e->pps_len = (unsigned int)nlen;
         } else if (type == 5) {
@@ -500,22 +540,28 @@ int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
         e->frame->data[0] = (unsigned char *)nv12;
         e->frame->data[1] = (unsigned char *)nv12 + (size_t)e->w * e->h;
         e->frame->pts = e->pts++;
-        if (avcodec_send_frame(e->avctx, e->frame) < 0) {
-            LOG_ERROR("h264: avcodec_send_frame failed");
+        int rc = avcodec_send_frame(e->avctx, e->frame);
+        if (rc == AVERROR(EAGAIN)) {
+            /* 编码器积压：先收走已产出的包，再重发一次 */
+            av_packet_unref(e->pkt);
+            avcodec_receive_packet(e->avctx, e->pkt);
+            rc = avcodec_send_frame(e->avctx, e->frame);
+        }
+        if (rc < 0) {
+            LOG_ERROR("h264: avcodec_send_frame failed: %s", av_err2str(rc));
             return -1;
         }
-        AVPacket *pkt = av_packet_alloc();
-        if (!pkt) return -1;
-        if (avcodec_receive_packet(e->avctx, pkt) < 0) {
-            av_packet_free(&pkt);
-            LOG_ERROR("h264: avcodec_receive_packet failed");
+        av_packet_unref(e->pkt);
+        rc = avcodec_receive_packet(e->avctx, e->pkt);
+        if (rc < 0) {
+            LOG_ERROR("h264: avcodec_receive_packet failed (%s)",
+                      rc == AVERROR(EAGAIN) ? "EAGAIN, no packet yet" : av_err2str(rc));
             return -1;
         }
-        /* rkmpp 输出 AVCC（4 字节长度前缀）→ 转 Annex-B */
+        /* rkmpp 原生输出 Annex-B（含起始码）；若是 AVCC 前缀则自动转换 */
         size_t alen = 0;
-        unsigned char *copy = avcc_to_annexb(pkt->data, pkt->size, &alen);
-        int kf = (pkt->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
-        av_packet_free(&pkt);
+        unsigned char *copy = avcc_to_annexb(e->pkt->data, e->pkt->size, &alen);
+        int kf = (e->pkt->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
         if (!copy) {
             LOG_ERROR("h264: rkmpp packet malformed");
             return -1;

@@ -269,6 +269,7 @@ static void apply_ip(app_ctx_t *app, const http_form_field_t *fields, int count)
     char ifn[IFNAMSIZ] = "";
     if (v && v[0]) safe_strncpy(ifn, sizeof(ifn), v);
     else if (a->ip_ifname[0]) safe_strncpy(ifn, sizeof(ifn), a->ip_ifname);
+    else if (a->tcp_bind[0])  safe_strncpy(ifn, sizeof(ifn), a->tcp_bind); /* IP 针对 TCP 绑定网卡 */
     if (!ifn[0]) return;
 
     char mode[8] = "", addr[32] = "", mask[32] = "", gw[32] = "";

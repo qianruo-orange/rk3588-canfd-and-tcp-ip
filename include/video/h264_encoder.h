@@ -5,11 +5,14 @@
 #include <stdint.h>
 
 /**
- * video/h264_encoder.h — RK3588 硬件 H.264 编码器封装（V4L2 M2M，rkvenc）。
+ * video/h264_encoder.h — RK3588 硬件 H.264 编码器封装。
+ *
+ * 后端自动选择：优先 FFmpeg h264_rkmpp（Rockchip MPP，编译启用 HAVE_AVCODEC
+ * 且运行时可用），否则 V4L2 M2M rkvenc（/dev/video-enc0 或探测到的节点）。
  *
  * 输入 NV12（Y 平面 w*h + 交错 UV w*h/2），输出 H.264 Annex-B 码流
  * （含 SPS/PPS/IDR/slice，以 00 00 00 01 分隔）。编码器为同步接口：
- * 一次调用编码一帧，内部通过 poll 等待 M2M 队列就绪。
+ * 一次调用编码一帧。
  *
  * 单线程使用（由录制线程独占），无线程安全问题。
  */
@@ -20,7 +23,7 @@ typedef struct h264_encoder_s h264_encoder_t;
    返回 0 成功并把节点路径写入 dev（调用方提供缓冲区）。 */
 int h264_encoder_probe(char *dev, size_t dev_size);
 
-/* 创建编码器（open /dev/video-enc0，配置 NV12→H264，设置码率 / 帧率 / GOP）。
+/* 创建编码器（优先 FFmpeg h264_rkmpp，回退 V4L2 rkvenc；NV12→H264，设置码率/帧率/GOP）。
    @param w/h          帧宽高（需偶数）
    @param fps          期望帧率（用于设置 GOP 与时间戳换算，不写死）
    @param bitrate_bps  目标码率（如 4000000）

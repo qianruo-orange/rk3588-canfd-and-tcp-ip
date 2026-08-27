@@ -156,7 +156,10 @@ void net_ip_apply_async(const char *ifname, const char *mode,
 void net_ip_apply_cfg(const struct app_config_t *cfg)
 {
     const app_args_t *a = &cfg->args;
-    if (!a->ip_ifname[0] || !a->ip_mode[0]) return;
-    LOG_INFO("net_ip: applying boot config on %s (mode=%s)", a->ip_ifname, a->ip_mode);
-    net_ip_apply(a->ip_ifname, a->ip_mode, a->ip_addr, a->ip_mask, a->ip_gw);
+    /* IP 配置针对 TCP 绑定网卡：未单独配置接口时回退用 tcp_bind */
+    const char *ifn = a->ip_ifname[0] ? a->ip_ifname
+                    : (a->tcp_bind[0] ? a->tcp_bind : "");
+    if (!ifn[0] || !a->ip_mode[0]) return;
+    LOG_INFO("net_ip: applying boot config on %s (mode=%s)", ifn, a->ip_mode);
+    net_ip_apply(ifn, a->ip_mode, a->ip_addr, a->ip_mask, a->ip_gw);
 }

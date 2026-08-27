@@ -106,3 +106,15 @@ target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBRKNNRT})
 
 find_library(LIBJPEG jpeg REQUIRED)
 target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBJPEG})
+
+# FFmpeg（可选）：提供 h264_rkmpp 硬件编码后端（Rockchip MPP）。
+# 系统装有带 rkmpp 的 libavcodec 时自动启用；否则编译 V4L2 后端。
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(AVCODEC QUIET IMPORTED_TARGET libavcodec libavutil)
+endif()
+if(AVCODEC_FOUND)
+    add_compile_definitions(HAVE_AVCODEC)
+    target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE PkgConfig::AVCODEC)
+    message(STATUS "FFmpeg found: h264_rkmpp backend enabled")
+endif()

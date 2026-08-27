@@ -1,9 +1,13 @@
 /**
- * h264_encoder.c — RK3588 硬件 H.264 编码器（V4L2 M2M，/dev/video-enc0 rkvenc）。
+ * h264_encoder.c — RK3588 硬件 H.264 编码器封装。
  *
- * 输入 NV12（单 plane），输出 H.264 Annex-B（含 SPS/PPS/IDR/slice）。
- * 同步接口：一次 encode 一帧，内部 poll 等待 M2M 队列就绪。
- * 关键帧（IDR）与 SPS/PPS 通过 NAL 扫描自动识别，供 MP4 封装写 avcC/stss。
+ * 后端自动选择（编译 + 运行时）：
+ *   1) FFmpeg h264_rkmpp（Rockchip MPP 硬件编码，HAVE_AVCODEC 且运行时存在）
+ *   2) V4L2 M2M rkvenc（/dev/video-enc0 或扫描到的编码器节点）
+ *
+ * 输入 NV12（Y 平面 w*h + 交错 UV w*h/2），输出 H.264 Annex-B
+ * （含 SPS/PPS/IDR/slice，以 00 00 00 01 分隔）。同步接口：一次 encode 一帧。
+ * 关键帧（IDR）与 SPS/PPS 自动识别，供 MP4 封装写 avcC/stss。
  *
  * 单线程使用（录制线程独占）。
  */
@@ -22,6 +26,11 @@
 #include <sys/mman.h>
 #include <linux/videodev2.h>
 #include <linux/v4l2-controls.h>
+
+#ifdef HAVE_AVCODEC
+#include <libavcodec/avcodec.h>
+#include <libavutil/pixfmt.h>
+#endif
 
 #include "video/h264_encoder.h"
 #include "core/log.h"
@@ -99,8 +108,15 @@ int h264_encoder_probe(char *dev, size_t dev_size)
 }
 
 struct h264_encoder_s {
-    int  fd;
     int  w, h;
+    int  using_ff;              /* 1=FFmpeg h264_rkmpp 后端，0=V4L2 后端 */
+#ifdef HAVE_AVCODEC
+    AVCodecContext *avctx;
+    AVFrame *frame;
+    int64_t pts;
+#endif
+    /* V4L2 后端状态 */
+    int  fd;
     int  sizeimage_in;              /* output 单 plane 容量 */
     int  sizeimage_out;             /* capture 单 plane 容量 */
     void *buf_in[ENC_BUFS];         /* mmap output 缓冲 */
@@ -125,6 +141,111 @@ static long nal_find(const unsigned char *d, size_t len, long from)
     }
     return -1;
 }
+
+/* ---- FFmpeg h264_rkmpp 后端 ---- */
+
+#ifdef HAVE_AVCODEC
+
+/* 从 avcC extradata 解析 SPS/PPS（NAL 无起始码，与 MP4 avcC 内嵌格式一致）。
+   布局：1(ver) profile constraint level | 0xFF(lengthSizeMinusOne) numSPS
+        [sps_len_be16 sps]*  numPPS  [pps_len_be16 pps]* */
+static void parse_avcc(h264_encoder_t *e, const unsigned char *d, int size)
+{
+    if (size < 8 || d[0] != 1) return;
+    int i = 5;
+    int num_sps = d[i++] & 0x1F;
+    for (int s = 0; s < num_sps && i + 2 <= size; s++) {
+        int len = (d[i] << 8) | d[i + 1]; i += 2;
+        if (i + len > size) return;
+        if (len <= (int)sizeof(e->sps)) { memcpy(e->sps, d + i, (size_t)len); e->sps_len = (unsigned int)len; }
+        i += len;
+    }
+    if (i < size) {
+        int num_pps = d[i++] & 0x1F;
+        for (int s = 0; s < num_pps && i + 2 <= size; s++) {
+            int len = (d[i] << 8) | d[i + 1]; i += 2;
+            if (i + len > size) return;
+            if (len <= (int)sizeof(e->pps)) { memcpy(e->pps, d + i, (size_t)len); e->pps_len = (unsigned int)len; }
+            i += len;
+        }
+    }
+}
+
+/* FFmpeg packet（AVCC，4 字节大端长度前缀）→ Annex-B（00 00 00 01 + NAL）。
+   返回 malloc 缓冲，*out_len 为实际长度。 */
+static unsigned char *avcc_to_annexb(const unsigned char *d, int size, size_t *out_len)
+{
+    *out_len = 0;
+    size_t total = 0, i = 0;
+    while (i + 4 <= (size_t)size) {
+        uint32_t len = ((uint32_t)d[i] << 24) | ((uint32_t)d[i + 1] << 16) |
+                       ((uint32_t)d[i + 2] << 8) | d[i + 3];
+        if (len == 0 || i + 4 + len > (size_t)size) break;
+        total += 4 + len;
+        i += 4 + len;
+    }
+    if (total == 0) return NULL;
+
+    unsigned char *out = malloc(total);
+    if (!out) return NULL;
+    size_t o = 0; i = 0;
+    while (i + 4 <= (size_t)size) {
+        uint32_t len = ((uint32_t)d[i] << 24) | ((uint32_t)d[i + 1] << 16) |
+                       ((uint32_t)d[i + 2] << 8) | d[i + 3];
+        if (len == 0 || i + 4 + len > (size_t)size) break;
+        out[o++] = 0; out[o++] = 0; out[o++] = 0; out[o++] = 1;
+        memcpy(out + o, d + i + 4, len);
+        o += len;
+        i += 4 + len;
+    }
+    *out_len = o;
+    return out;
+}
+
+/* 打开 FFmpeg h264_rkmpp 编码器；成功返回 0（e->using_ff=1） */
+static int ff_encoder_open(h264_encoder_t *e, int fps, int bitrate_bps)
+{
+    const AVCodec *codec = avcodec_find_encoder_by_name("h264_rkmpp");
+    if (!codec) return -1;                       /* 当前 FFmpeg 未编译 rkmpp */
+
+    AVCodecContext *ctx = avcodec_alloc_context3(codec);
+    if (!ctx) return -1;
+    ctx->width       = e->w;
+    ctx->height      = e->h;
+    ctx->pix_fmt     = AV_PIX_FMT_NV12;
+    ctx->time_base   = (AVRational){ 1, fps > 0 ? fps : 30 };
+    ctx->framerate   = (AVRational){ fps > 0 ? fps : 30, 1 };
+    ctx->bit_rate    = bitrate_bps;
+    ctx->gop_size    = (fps > 0 ? fps : 30) * 2;  /* GOP=2s */
+    ctx->max_b_frames = 0;
+    ctx->thread_count = 1;
+    ctx->flags      |= AV_CODEC_FLAG_LOW_DELAY;
+    /* 不用 GLOBAL_HEADER：SPS/PPS 随 IDR 内嵌输出，rec_mp4 封装从码流
+       扫描 SPS/PPS 写 avcC（与 V4L2 后端一致）；否则 avcC 会缺 SPS/PPS */
+
+    if (avcodec_open2(ctx, codec, NULL) < 0) {
+        avcodec_free_context(&ctx);
+        return -1;
+    }
+
+    if (ctx->extradata && ctx->extradata_size > 0)
+        parse_avcc(e, ctx->extradata, ctx->extradata_size);
+
+    e->frame = av_frame_alloc();
+    if (!e->frame) { avcodec_free_context(&ctx); return -1; }
+    e->frame->format     = AV_PIX_FMT_NV12;
+    e->frame->width      = e->w;
+    e->frame->height     = e->h;
+    e->frame->linesize[0] = e->w;
+    e->frame->linesize[1] = e->w;
+
+    e->avctx = ctx;
+    e->pts = 0;
+    e->using_ff = 1;
+    return 0;
+}
+
+#endif /* HAVE_AVCODEC */
 
 /* ---- 设备控制 ---- */
 
@@ -201,6 +322,15 @@ h264_encoder_t *h264_encoder_create(int w, int h, int fps, int bitrate_bps)
     if (!e) return NULL;
     e->fd = -1;
     e->w = w; e->h = h;
+
+#ifdef HAVE_AVCODEC
+    /* 优先 FFmpeg h264_rkmpp（Rockchip MPP 硬件编码） */
+    if (ff_encoder_open(e, fps, bitrate_bps) == 0) {
+        LOG_INFO("h264: FFmpeg rkmpp encoder ready %dx%d fps=%d bitrate=%d",
+                 w, h, fps, bitrate_bps);
+        return e;
+    }
+#endif
 
     char dev_path[64];
     if (h264_encoder_probe(dev_path, sizeof(dev_path)) != 0) {
@@ -295,6 +425,16 @@ fail:
 void h264_encoder_destroy(h264_encoder_t *e)
 {
     if (!e) return;
+
+#ifdef HAVE_AVCODEC
+    if (e->using_ff) {
+        avcodec_free_context(&e->avctx);
+        if (e->frame) av_frame_free(&e->frame);
+        free(e);
+        return;
+    }
+#endif
+
     if (e->fd >= 0) {
         uint32_t ot = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
         uint32_t ct = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -354,6 +494,40 @@ int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
     *out = NULL;
     *out_len = 0;
     if (keyframe) *keyframe = 0;
+
+#ifdef HAVE_AVCODEC
+    if (e->using_ff) {
+        e->frame->data[0] = (unsigned char *)nv12;
+        e->frame->data[1] = (unsigned char *)nv12 + (size_t)e->w * e->h;
+        e->frame->pts = e->pts++;
+        if (avcodec_send_frame(e->avctx, e->frame) < 0) {
+            LOG_ERROR("h264: avcodec_send_frame failed");
+            return -1;
+        }
+        AVPacket *pkt = av_packet_alloc();
+        if (!pkt) return -1;
+        if (avcodec_receive_packet(e->avctx, pkt) < 0) {
+            av_packet_free(&pkt);
+            LOG_ERROR("h264: avcodec_receive_packet failed");
+            return -1;
+        }
+        /* rkmpp 输出 AVCC（4 字节长度前缀）→ 转 Annex-B */
+        size_t alen = 0;
+        unsigned char *copy = avcc_to_annexb(pkt->data, pkt->size, &alen);
+        int kf = (pkt->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
+        av_packet_free(&pkt);
+        if (!copy) {
+            LOG_ERROR("h264: rkmpp packet malformed");
+            return -1;
+        }
+        /* 与 V4L2 后端一致：从输出码流补扫内嵌 SPS/PPS 与 IDR */
+        h264_scan(e, copy, alen, &kf);
+        *out = copy;
+        *out_len = alen;
+        if (keyframe) *keyframe = kf;
+        return 0;
+    }
+#endif
 
     /* 1. 取一个已排队的 output 缓冲并填数据 */
     struct v4l2_buffer ob;

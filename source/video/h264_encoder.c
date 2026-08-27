@@ -17,7 +17,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
-add#include <time.h>
+#include <time.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/videodev2.h>

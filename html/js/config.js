@@ -184,18 +184,31 @@
     el.appendChild(r);
   };
 
-  /* 加载网络接口列表，填充"绑定网卡"下拉框 */
+  var netIfaces = [];   /* 系统网卡列表（填充"绑定网卡"与 IP 接口下拉） */
+
+  /* 加载网络接口列表，填充"绑定网卡"与 IP 设置"接口"两个下拉框 */
   async function loadIfaces() {
+    netIfaces = [];
     var sel = document.getElementById('bind');
+    var ipSel = document.getElementById('ip_if');
     sel.innerHTML = '<option value="">所有网卡</option>';
+    ipSel.innerHTML = '';
     try {
       var r = await fetch('/api/network/ifaces');
       if (!r.ok) return;
-      var list = await r.json();
-      for (var i = 0; i < list.length; i++)
-        sel.innerHTML += '<option value="' + list[i] + '">' + list[i] + '</option>';
+      netIfaces = await r.json();
+      for (var i = 0; i < netIfaces.length; i++) {
+        sel.innerHTML += '<option value="' + netIfaces[i] + '">' + netIfaces[i] + '</option>';
+        ipSel.innerHTML += '<option value="' + netIfaces[i] + '">' + netIfaces[i] + '</option>';
+      }
     } catch(e) {}
   }
+
+  /* TCP 绑定网卡变化时，IP 设置接口跟随 */
+  window.onBindChange = function() {
+    var b = document.getElementById('bind').value;
+    if (b) document.getElementById('ip_if').value = b;
+  };
 
   /* 枚举系统全部 CAN 接口及其 CAN FD 支持情况 */
   async function loadCanIfaces() {
@@ -230,8 +243,9 @@
       document.getElementById('vw').value = cfg.video_width > 0 ? cfg.video_width : '';
       document.getElementById('vh').value = cfg.video_height > 0 ? cfg.video_height : '';
 
-      /* IP 设置：保存配置 + 当前运行时地址 */
-      document.getElementById('ip_if').value = cfg.ip_ifname || (netIfaces.length ? netIfaces[0] : '');
+      /* IP 设置：默认跟随 TCP 绑定网卡（未配置时）；保存配置 + 当前运行时地址 */
+      var bindVal = document.getElementById('bind').value;
+      document.getElementById('ip_if').value = cfg.ip_ifname || bindVal || (netIfaces.length ? netIfaces[0] : '');
       document.getElementById('ip_mode').value = cfg.ip_mode || '';
       document.getElementById('ip_a').value = cfg.ip_addr || '';
       document.getElementById('ip_m').value = cfg.ip_mask || '';
@@ -321,30 +335,11 @@
     await postConfig(d);
   };
 
-  /* 保存网络配置并重启 TCP 监听 */
+  /* 保存网络设置：TCP 服务参数 + IP 设置（IP 默认针对 TCP 绑定网卡） */
   window.saveNet = async function() {
-    await postConfig({
-      target: 'net',
-      tcp_port: document.getElementById('tp').value,
-      max_clients: document.getElementById('mc').value,
-      tcp_bind: document.getElementById('bind').value
-    });
-  };
-
-  /* 按 IP 模式显隐静态地址输入行 */
-  window.chkIpMode = function() {
-    var mode = document.getElementById('ip_mode').value;
-    var show = mode === 'static';
-    document.getElementById('ip_a_row').style.display = show ? 'flex' : 'none';
-    document.getElementById('ip_m_row').style.display = show ? 'flex' : 'none';
-    document.getElementById('ip_g_row').style.display = show ? 'flex' : 'none';
-  };
-
-  /* 保存并应用 IP 设置（静态/DHCP/关闭） */
-  window.saveIp = async function() {
     var mode = document.getElementById('ip_mode').value;
     var ifn = document.getElementById('ip_if').value;
-    if (!ifn) { show('err', '请选择接口'); return; }
+    if (!ifn) { show('err', '请选择 IP 设置接口'); return; }
     if (mode === 'static') {
       var a = document.getElementById('ip_a').value.trim();
       var m = document.getElementById('ip_m').value.trim();
@@ -355,6 +350,14 @@
     } else if (mode === 'dhcp') {
       if (!confirm('将把 ' + ifn + ' 切换到 DHCP 自动获取。\nIP 变化后请用新地址重新访问。')) return;
     }
+    /* 1) TCP 服务参数 */
+    await postConfig({
+      target: 'net',
+      tcp_port: document.getElementById('tp').value,
+      max_clients: document.getElementById('mc').value,
+      tcp_bind: document.getElementById('bind').value
+    });
+    /* 2) IP 设置 */
     await postConfig({
       target: 'ip',
       ip_ifname: ifn,
@@ -363,6 +366,15 @@
       ip_mask: document.getElementById('ip_m').value.trim(),
       ip_gw: document.getElementById('ip_g').value.trim()
     });
+  };
+
+  /* 按 IP 模式显隐静态地址输入行 */
+  window.chkIpMode = function() {
+    var mode = document.getElementById('ip_mode').value;
+    var show = mode === 'static';
+    document.getElementById('ip_a_row').style.display = show ? 'flex' : 'none';
+    document.getElementById('ip_m_row').style.display = show ? 'flex' : 'none';
+    document.getElementById('ip_g_row').style.display = show ? 'flex' : 'none';
   };
 
   /* 保存视频配置并重启视频流 */

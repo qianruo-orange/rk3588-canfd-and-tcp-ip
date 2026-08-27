@@ -22,19 +22,18 @@
 <div class="row"><label>DBC 文件</label><input type="file" id="dbc" accept=".dbc" style="flex:1"><button type="button" class="add-btn" onclick="uploadDbc()">上传</button></div>
 </div><div class="hint" id="hint">接口已关闭，开启后可配置</div></div>
 
-<div class="card" id="card_net"><h3>网络 <button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveNet()">💾 保存</button></h3>
-<div class="row"><label>绑定网卡</label><select name="bind" id="bind"><option value="">-- 加载中 --</option></select></div>
+<div class="card" id="card_net"><h3>网络设置 <button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveNet()">💾 保存</button></h3>
+<div class="sub-title">TCP 服务</div>
+<div class="row"><label>绑定网卡</label><select name="bind" id="bind" onchange="onBindChange()"><option value="">-- 加载中 --</option></select></div>
 <div class="row"><label>TCP端口</label><input name="tp" id="tp" type="number"></div>
 <div class="row"><label>最大客户端数</label><input name="mc" id="mc" type="number"></div>
-</div>
-
-<div class="card" id="card_ip"><h3>IP 设置 <button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveIp()">💾 保存</button></h3>
+<div class="sub-title">IP 设置</div>
 <div class="row"><label>接口</label><select id="ip_if"><option value="">-- 加载中 --</option></select></div>
 <div class="row"><label>模式</label><select id="ip_mode" onchange="chkIpMode()"><option value="">关闭（不管理）</option><option value="static">静态</option><option value="dhcp">DHCP</option></select></div>
 <div class="row" id="ip_a_row"><label>IP 地址</label><input id="ip_a" type="text" placeholder="192.168.1.100"></div>
 <div class="row" id="ip_m_row"><label>子网掩码</label><input id="ip_m" type="text" placeholder="255.255.255.0"></div>
 <div class="row" id="ip_g_row"><label>网关</label><input id="ip_g" type="text" placeholder="192.168.1.1"></div>
-<div class="hint" id="ip_cur">当前未读取</div>
+<div class="ip-cur" id="ip_cur">当前未读取</div>
 </div>
 
 <div class="card" id="card_video"><h3>视频 <button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveVideo()">💾 保存</button></h3>

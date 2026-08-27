@@ -114,6 +114,7 @@
 
   var capsData = null;
   var camDevs = [];   /* 系统枚举到的摄像头列表 [{path,card},...] */
+  var cfgVideoFps = 0;   /* 配置中的帧率（0=自动），分辨率切换后用于回选 */
 
   /* 页面加载时扫描可用摄像头 */
   async function loadDevices() {
@@ -171,6 +172,21 @@
     var s = capsData.formats[fi].sizes[ri];
     document.getElementById('vw').value = s.w;
     document.getElementById('vh').value = s.h;
+
+    /* 帧率下拉：按该格式/分辨率支持的 FPS 列表刷新（无数据时回退常见档位） */
+    var vf = document.getElementById('vf');
+    var fps = s.fps && s.fps.length ? s.fps : [60,50,30,25,20,15,10,5];
+    var cur = vf.value;
+    vf.innerHTML = '<option value="">自动（驱动默认）</option>';
+    for (var i = 0; i < fps.length; i++)
+      vf.innerHTML += '<option value="' + fps[i] + '">' + fps[i] + ' FPS</option>';
+    var kept = false;
+    for (var i = 0; i < vf.options.length; i++)
+      if (vf.options[i].value === cur) { vf.selectedIndex = i; kept = true; break; }
+    if (!kept && cfgVideoFps > 0) {   /* 切换分辨率后回选配置中的帧率 */
+      for (var i = 0; i < vf.options.length; i++)
+        if (parseInt(vf.options[i].value, 10) === cfgVideoFps) { vf.selectedIndex = i; break; }
+    }
   };
 
   window.addFilter = function() {
@@ -229,6 +245,18 @@
          配置中有有效值则匹配选中，否则默认取第一个支持的分辨率 */
       document.getElementById('vw').value = cfg.video_width > 0 ? cfg.video_width : '';
       document.getElementById('vh').value = cfg.video_height > 0 ? cfg.video_height : '';
+      cfgVideoFps = cfg.video_fps || 0;
+
+      /* AI 检测配置（线程数下拉框为 3 的倍数；置信度/NMS 显示为百分比） */
+      var el = document.getElementById('ai_en');
+      if (el) el.value = cfg.ai_enable ? 'on' : 'off';
+      el = document.getElementById('ai_th');
+      if (el) el.value = String(cfg.ai_threads || 3);
+      document.getElementById('ai_cf').value = Math.round((cfg.ai_conf || 0.25) * 100);
+      document.getElementById('ai_nm').value = Math.round((cfg.ai_nms || 0.45) * 100);
+      document.getElementById('ai_iv').value = cfg.ai_interval_ms || 10;
+      document.getElementById('ai_model_txt').textContent = cfg.ai_model || '-';
+      document.getElementById('ai_names_txt').textContent = cfg.ai_names || '-';
 
       /* IP 设置：IP 即 TCP 绑定网卡的 IP；回填保存配置 + 当前运行时地址 */
       document.getElementById('ip_mode').value = cfg.ip_mode || '';
@@ -370,8 +398,50 @@
       target: 'video',
       video_device: document.getElementById('vd').value,
       video_width: document.getElementById('vw').value,
-      video_height: document.getElementById('vh').value
+      video_height: document.getElementById('vh').value,
+      video_fps: document.getElementById('vf').value
     });
+  };
+
+  /* 保存 AI 配置并热重载推理池（线程数取 3 的倍数） */
+  window.saveAi = async function() {
+    var th = parseInt(document.getElementById('ai_th').value, 10);
+    if (!th || th % 3 !== 0) th = 3;
+    await postConfig({
+      target: 'ai',
+      ai_enable: document.getElementById('ai_en').value === 'on' ? 'on' : 'off',
+      ai_threads: th,
+      ai_conf: document.getElementById('ai_cf').value,
+      ai_nms: document.getElementById('ai_nm').value,
+      ai_interval_ms: document.getElementById('ai_iv').value
+    });
+    setTimeout(loadCfg, 1200);   /* 重载完成后刷新显示 */
+  };
+
+  /* 上传 AI 文件（模型 .rknn / 类别标签 .names）并热重载 */
+  window.uploadAi = async function(type) {
+    var input = document.getElementById(type === 'model' ? 'ai_model_f' : 'ai_names_f');
+    var file = input.files && input.files[0];
+    if (!file) { show('err', '请先选择' + (type === 'model' ? '模型' : '类别标签') + '文件'); return; }
+    try {
+      var r = await authFetch('/api/ai/upload?type=' + type, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/octet-stream'},
+        body: file
+      });
+      var j = r.ok ? await r.json() : null;
+      if (j && j.result === 'ok') {
+        var extra = type === 'names' ? ('（' + j.classes + ' 个类别）') : '';
+        show('ok', '✓ ' + j.path + ' 已上传并热生效' + extra);
+        setTimeout(loadCfg, 800);
+      } else if (j) {
+        show('err', '上传失败：' + (j.result || ('HTTP ' + r.status)));
+      } else {
+        show('err', '上传失败(' + r.status + ')');
+      }
+    } catch(e) { show('err', '上传失败'); }
+    input.value = '';
+    setTimeout(function() { document.getElementById('msg').className = ''; }, 4000);
   };
 
   window.reboot = async function() {

@@ -67,15 +67,17 @@ struct app_config_t {
     char          video_device[128];
     int           video_width;
     int           video_height;
+    int           video_fps;       /* 期望帧率；0 = 驱动默认 */
 
     /* ---- RKNN AI 检测（YOLO26）---- */
     int           ai_enable;        /* 0/1：是否启用 NPU 推理画框流 */
     char          ai_model[256];    /* .rknn 模型文件路径 */
+    char          ai_names[256];    /* 类别名文件（coco.names 格式，每行一个类名） */
     int           ai_input_size;    /* 模型输入边长（动态模型用；静态模型以模型实际尺寸为准） */
     float         ai_conf;          /* 置信度阈值 */
-    float         ai_nms;           /* NMS IoU 阈值（经典 3 头布局用） */
-    int           ai_interval_ms;   /* 推理节流间隔（ms），默认 200 */
-    int           ai_threads;       /* 推理工作线程数（1~4，默认 2），每线程独立 rknn context 并行推理 */
+    float         ai_nms;           /* NMS IoU 阈值 */
+    int           ai_interval_ms;   /* 推理节流间隔（ms），默认 10（每帧推理） */
+    int           ai_threads;       /* 推理工作线程数（3 的倍数：3~15，默认 3），每线程独立 rknn context，按 i%3 绑定 NPU 核 */
 };
 
 int  config_load(struct app_config_t *cfg);

@@ -64,15 +64,16 @@ static uint64_t now_ms(void)
 
 static unsigned long long g_ai_seq = 0;   /* 已消费画框帧序号 */
 static unsigned long long g_raw_seq = 0;  /* 已消费原始帧序号 */
+static uint64_t g_last_ai_ms = 0;         /* 最近取到标注帧时刻（原始帧回退的退避计时） */
 
-/* 尝试取 AI 画框帧（JPEG）；无新帧返回 -1 */
-static int rec_take_ai_frame(unsigned char **out, size_t *len)
+/* 尝试取 AI 画框帧的 NV12（渲染时已转换，免去二次 JPEG 解码）；无新帧返回 -1 */
+static int rec_take_ai_frame(unsigned char **out, size_t *len, int *w, int *h)
 {
     if (!rknn_yolo_enabled()) return -1;
     unsigned long long seq = rknn_yolo_get_frame_seq();
     if (seq == 0 || seq == g_ai_seq) return -1;
     unsigned long long aseq = 0;
-    if (rknn_yolo_get_frame(out, len, &aseq) != 0) return -1;
+    if (rknn_yolo_get_frame_nv12(out, len, &aseq, w, h) != 0) return -1;
     g_ai_seq = aseq;
     return 0;
 }
@@ -329,25 +330,28 @@ void *video_rec_task(void *arg)
                 pthread_mutex_unlock(&g_rec.lock);
                 if (!still) break;
 
-                /* 取帧：AI 画框帧（JPEG）优先，回退原始帧（JPEG/YUYV） */
+                /* 取帧：AI 画框帧（渲染时已转 NV12）优先，回退原始帧（JPEG/YUYV） */
                 unsigned char *nv12 = NULL;
                 size_t nlen = 0;
-                unsigned char *jpeg = NULL; size_t jlen = 0;
                 int fw = 0, fh = 0, took = -1;
-                if (rec_take_ai_frame(&jpeg, &jlen) == 0) {
-                    int aw = 0, ah = 0;
-                    if (rec_to_nv12(jpeg, jlen, VIDEO_FMT_MJPEG, pw, ph,
-                                    &nv12, &nlen, &aw, &ah) == 0) {
-                        if (aw == pw && ah == ph) {
-                            took = 0;
-                        } else {   /* AI 帧分辨率与编码器不符：丢弃，走原始帧 */
-                            free(nv12);
-                            nv12 = NULL;
-                        }
+                if (rec_take_ai_frame(&nv12, &nlen, &fw, &fh) == 0) {
+                    if (fw == pw && fh == ph) {
+                        took = 0;
+                        g_last_ai_ms = now_ms();
+                    } else {   /* AI 帧分辨率与编码器不符：丢弃，走原始帧 */
+                        free(nv12);
+                        nv12 = NULL;
                     }
-                    free(jpeg);
                 }
                 if (took < 0) {
+                    /* AI 可用时优先等下一帧标注帧，不逐 tick 回退原始帧：
+                       回退会使录像混入未标注帧，且原始帧 JPEG 解码白白烧 CPU
+                       （rec 线程实测 ~75%）。仅当标注帧 >1s 未更新（推理卡死
+                       降级）才回退原始帧保证录像不断流 */
+                    if (rknn_yolo_enabled() && now_ms() - g_last_ai_ms < 1000) {
+                        usleep(10000);
+                        continue;
+                    }
                     int fmt = 0; unsigned long long seq = 0;
                     unsigned char *raw = NULL; size_t raw_len = 0;
                     if (video_stream_get_frame(&raw, &raw_len, &fmt, &fw, &fh, &seq) == 0 &&

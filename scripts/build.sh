@@ -71,6 +71,65 @@ clean_build() {
     echo "[CLEAN] done"
 }
 
+# 构建依赖检查：构建前校验工具链与开发库，缺失时给出安装提示并中止，
+# 避免在 cmake / make 阶段才暴露晦涩的报错。
+check_deps() {
+    echo "[DEPS] checking build dependencies..."
+    local missing_cmds=() missing_pkgs=()
+
+    # 工具链
+    local cmd
+    for cmd in cmake make gcc g++; do
+        command -v "$cmd" >/dev/null 2>&1 || missing_cmds+=("$cmd")
+    done
+
+    # 开发库：每个条目给出若干候选包名，任一已安装即视为满足
+    local desc
+    check_pkg() {
+        desc="$1"; shift
+        local p ok=0
+        for p in "$@"; do
+            if dpkg -s "$p" >/dev/null 2>&1; then ok=1; break; fi
+        done
+        [ "$ok" = 1 ] || missing_pkgs+=("$desc")
+    }
+
+    check_pkg "libsystemd-dev" libsystemd-dev
+    check_pkg "libnl-3-dev" libnl-3-dev
+    check_pkg "libnl-route-3-dev" libnl-route-3-dev
+    check_pkg "libjpeg 开发库 (libjpeg62-turbo-dev)" libjpeg62-turbo-dev libjpeg-dev
+    check_pkg "OpenCV 开发库 (libopencv-dev)" libopencv-dev
+
+    # RKNN NPU 运行时（板载 Rockchip SDK 安装，非 apt 包）
+    local rknn_ok=0
+    for r in /lib/librknnrt.so /usr/lib/librknnrt.so /usr/lib/aarch64-linux-gnu/librknnrt.so; do
+        [ -f "$r" ] && { rknn_ok=1; break; }
+    done
+    [ "$rknn_ok" = 1 ] || missing_pkgs+=("librknnrt.so (RKNN NPU 运行时)")
+
+    if [ ${#missing_cmds[@]} -gt 0 ] || [ ${#missing_pkgs[@]} -gt 0 ]; then
+        echo "[DEPS] 缺少以下依赖："
+        for c in "${missing_cmds[@]}"; do echo "  - 命令: $c"; done
+        for p in "${missing_pkgs[@]}"; do echo "  - 包: $p"; done
+        echo "[DEPS] 安装命令（Debian/Ubuntu）："
+        echo "  sudo apt-get install -y build-essential cmake libsystemd-dev \\"
+        echo "      libnl-3-dev libnl-route-3-dev libjpeg62-turbo-dev libopencv-dev"
+        echo "[DEPS] librknnrt.so 需从 Rockchip 官方 SDK 安装到 /lib 或 /usr/lib。"
+        exit 1
+    fi
+
+    # 可选依赖：FFmpeg（h264_rkmpp 硬编码后端），缺失时自动回退 V4L2 rkvenc
+    if ! dpkg -s libavcodec-dev >/dev/null 2>&1; then
+        echo "[DEPS] 提示: 未安装 libavcodec-dev，FFmpeg rkmpp 后端不可用（可选，回退 V4L2）"
+    fi
+    echo "[DEPS] all required dependencies satisfied"
+}
+
+# 清理模式不构建，跳过依赖检查
+if [ "${1:-}" != "-C" ] && [ "${1:-}" != "--clean" ]; then
+    check_deps
+fi
+
 case "${1:-}" in
     -D|--debug)
         echo "=== build $BIN_NAME ==="

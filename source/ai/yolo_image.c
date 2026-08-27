@@ -10,7 +10,7 @@
 
 #include "ai/yolo_image.h"
 
-#define YOLO_JPEG_QUALITY 85
+#define YOLO_JPEG_QUALITY 95   /* 高画质：标签文字清晰无压缩伪影；流码率仍远低于原图 */
 
 int yolo_jpeg_to_rgb(const unsigned char *jpeg, size_t jpeg_len,
                      unsigned char **rgb_out, int *w_out, int *h_out)
@@ -107,6 +107,26 @@ void yolo_yuyv_to_rgb(const unsigned char *src, int w, int h, unsigned char *dst
             *dst++ = (unsigned char)r;
             *dst++ = (unsigned char)g;
             *dst++ = (unsigned char)b;
+        }
+    }
+}
+
+void yolo_rgb_to_nv12(const unsigned char *rgb, int w, int h, unsigned char *nv12)
+{
+    unsigned char *Y = nv12;
+    unsigned char *UV = nv12 + (size_t)w * h;
+    for (int y = 0; y < h; y++) {
+        const unsigned char *row = rgb + (size_t)y * w * 3;
+        unsigned char *Yrow = Y + (size_t)y * w;
+        for (int x = 0; x < w; x++) {
+            const unsigned char *p = row + x * 3;
+            int r = p[0], g = p[1], b = p[2];
+            Yrow[x] = (unsigned char)((66 * r + 129 * g + 25 * b + 128) / 256 + 16);
+            if ((y & 1) == 0 && (x & 1) == 0) {
+                unsigned char *uv = UV + (size_t)(y / 2) * w + x;
+                uv[0] = (unsigned char)((-38 * r - 74 * g + 112 * b + 128) / 256 + 128);
+                uv[1] = (unsigned char)((112 * r - 94 * g - 18 * b + 128) / 256 + 128);
+            }
         }
     }
 }

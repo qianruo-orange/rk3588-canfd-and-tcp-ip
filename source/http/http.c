@@ -75,6 +75,7 @@ static void http_can_send_wrap(app_ctx_t *app, int fd, const char *method, const
 #define HTTP_WBUF_INIT 8192             /* 输出缓冲初始大小 */
 #define HTTP_WBUF_MAX  (16UL * 1024 * 1024)  /* 输出缓冲上限：慢客户端超限即断开 */
 #define HTTP_BODY_MAX  ((long)HTTP_BUF_SIZE - 4096)  /* 请求 body 上限（须能收进读缓冲） */
+#define HTTP_UPLOAD_MAX (64L * 1024 * 1024)  /* /api/ai/upload body 上限（落盘，不占读缓冲） */
 #define HTTP_CONN_IDLE 30               /* 连接空闲超时（秒） */
 
 typedef struct http_conn {
@@ -91,6 +92,12 @@ typedef struct http_conn {
     long body_cl;          /* Content-Length；-1 表示已被拒绝 */
     char method[16];
     char uri[HTTP_URI_MAX];
+
+    /* AI 文件上传（/api/ai/upload）：body 流式落盘到临时文件，不占读缓冲 */
+    FILE *up_fp;           /* 上传临时文件（NULL = 非上传连接） */
+    char up_path[64];      /* 上传临时文件路径（fd 在连接生命周期内唯一，不冲突） */
+    long up_cl;            /* 上传 Content-Length */
+    long up_got;           /* 已落盘字节数 */
 
     /* 输出缓冲 */
     char *wbuf;
@@ -143,6 +150,8 @@ static void conn_close(http_conn_t *c)
     if (*pp) *pp = c->next;
     if (c->src) fclose(c->src);
     if (c->src_unlink) { unlink(c->src_unlink); free(c->src_unlink); c->src_unlink = NULL; }
+    if (c->up_fp) { fclose(c->up_fp); c->up_fp = NULL; }
+    if (c->up_path[0]) { unlink(c->up_path); c->up_path[0] = 0; }
     close(c->fd);
     c->fd = -1;
     free(c->wbuf);
@@ -165,6 +174,8 @@ static void conn_detach(http_conn_t *c)
     c->closed = 1;
     if (c->src) fclose(c->src);
     if (c->src_unlink) { unlink(c->src_unlink); free(c->src_unlink); }
+    if (c->up_fp) { fclose(c->up_fp); c->up_fp = NULL; }
+    if (c->up_path[0]) { unlink(c->up_path); c->up_path[0] = 0; }
     free(c->wbuf);
     c->wbuf = NULL;
     c->next = g_dead;
@@ -183,6 +194,12 @@ static http_conn_t *conn_new(int fd)
     c->next = g_conns;
     g_conns = c;
     return c;
+}
+
+/* AI 文件上传走落盘模式：body 直接写入临时文件，不占读缓冲 */
+static int conn_is_ai_upload(const http_conn_t *c)
+{
+    return strncmp(c->uri, "/api/ai/upload", 15) == 0;
 }
 
 /* 追加数据到输出缓冲；超限（慢客户端）直接断开连接 */
@@ -320,6 +337,7 @@ void http_send_response(int fd, int code, const char *status,
                        "%s"
                        "Content-Type: %s\r\n"
                        "Content-Length: %zu\r\n"
+                       "Cache-Control: no-cache\r\n"
                        "Connection: close\r\n\r\n",
                        code, status,
                        code == 401 ? "WWW-Authenticate: Basic realm=\"data_transport\"\r\n" : "",
@@ -563,7 +581,8 @@ void http_serve_file(int fd, const char *uri)
         return;
     }
 
-    http_serve_stream(fd, http_mime_type(path), NULL, fp, size, NULL);
+    /* no-cache：前端文件每次部署后立即可见，避免浏览器启发式缓存旧 JS/CSS */
+    http_serve_stream(fd, http_mime_type(path), "Cache-Control: no-cache\r\n", fp, size, NULL);
 }
 
 /* 视频推流线程退出回调：关闭 fd 并归还连接计数 */
@@ -617,6 +636,12 @@ static void http_process_request(http_conn_t *c)
     if (strcmp(c->uri, "/dbc") == 0 || strncmp(c->uri, "/dbc.html", 9) == 0) {
         if (!http_check_auth_user(req, fd)) goto finish;
         http_serve_file(fd, "/dbc.html"); goto finish;
+    }
+    if (strncmp(c->uri, "/api/ai/upload", 15) == 0) {
+        /* AI 文件上传：body 已由读取状态机落盘到 c->up_path */
+        if (!http_check_auth_root(req, fd)) goto finish;
+        http_ai_upload(app, fd, c->uri, c->up_path);
+        goto finish;
     }
 
     static const struct { const char *uri; int pre; const char *method; api_fn fn; int (*auth)(const char*,int); }
@@ -703,9 +728,12 @@ static void conn_read(http_conn_t *c)
         if (sep) {
             c->hdr_done = 1;
             c->hdr_len = (size_t)(sep - c->rbuf) + (sep[0] == '\r' ? 4 : 2);
+            sscanf(c->rbuf, "%15s %255s", c->method, c->uri);
             long cl = http_content_length(c->rbuf);
             if (cl > 0) c->body_cl = cl;
-            if (c->body_cl > HTTP_BODY_MAX) {   /* body 过大：拒绝，避免读缓冲溢出 */
+            /* body 上限：普通请求须收进读缓冲；文件上传落盘后不受读缓冲限制 */
+            long max_body = conn_is_ai_upload(c) ? HTTP_UPLOAD_MAX : HTTP_BODY_MAX;
+            if (c->body_cl > max_body) {   /* body 过大：拒绝，避免读缓冲溢出 */
                 http_send_response(c->fd, 413, "Payload Too Large", "text/plain", "body too large", 15);
                 c->body_cl = -1;
                 c->done = 1;
@@ -713,12 +741,39 @@ static void conn_read(http_conn_t *c)
                 if (!c->closed) conn_update_events(c);
                 return;
             }
-            sscanf(c->rbuf, "%15s %255s", c->method, c->uri);
+            if (conn_is_ai_upload(c) && c->body_cl > 0) {
+                snprintf(c->up_path, sizeof(c->up_path), "/tmp/ai_upload_%d.tmp", c->fd);
+                c->up_fp = fopen(c->up_path, "wb");
+                c->up_cl = c->body_cl;
+                if (!c->up_fp) {
+                    LOG_ERROR("http: cannot create upload temp file %s", c->up_path);
+                    c->up_path[0] = 0;
+                    c->up_cl = 0;
+                }
+            }
         }
     }
 
     if (c->hdr_done) {
         size_t body_got = (c->rlen > c->hdr_len) ? c->rlen - c->hdr_len : 0;
+        if (c->up_fp) {   /* 上传连接：body 写入临时文件，读缓冲压缩回头部 */
+            if (body_got > 0) {
+                if (fwrite(c->rbuf + c->hdr_len, 1, body_got, c->up_fp) != body_got) {
+                    conn_close(c);
+                    return;
+                }
+                c->up_got += (long)body_got;
+                c->rlen = c->hdr_len;
+                c->rbuf[c->hdr_len] = '\0';
+            }
+            if (c->up_got >= c->up_cl) {
+                fclose(c->up_fp);
+                c->up_fp = NULL;
+                c->done = 1;
+                http_process_request(c);
+            }
+            return;
+        }
         if (body_got >= (size_t)c->body_cl) {
             c->done = 1;
             http_process_request(c);

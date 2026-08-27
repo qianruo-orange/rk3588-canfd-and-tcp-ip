@@ -8,6 +8,7 @@
 #include "video/video_stream.h"
 #include "watchdog/watchdog.h"
 #include "tcp/net_ip.h"
+#include "ai/rknn_yolo.h"
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <ctype.h>
@@ -53,7 +54,13 @@ void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri
         ip_if, cur_addr, cur_mask, cur_gw);
 
     if (cfg->video_device[0]) JSON_ADD(json, off, ",\"video_device\":\"%s\"", cfg->video_device);
-    JSON_ADD(json, off, ",\"video_width\":%d,\"video_height\":%d", cfg->video_width, cfg->video_height);
+    JSON_ADD(json, off, ",\"video_width\":%d,\"video_height\":%d,\"video_fps\":%d",
+             cfg->video_width, cfg->video_height, cfg->video_fps);
+    /* AI 检测配置（前端据此决定默认展示画框流 /video/mjpeg_ai 还是原始流） */
+    JSON_ADD(json, off, ",\"ai_enable\":%d,\"ai_model\":\"%s\",\"ai_names\":\"%s\",\"ai_input_size\":%d,"
+        "\"ai_conf\":%.2f,\"ai_nms\":%.2f,\"ai_interval_ms\":%d,\"ai_threads\":%d",
+        cfg->ai_enable, cfg->ai_model, cfg->ai_names, cfg->ai_input_size,
+        cfg->ai_conf, cfg->ai_nms, cfg->ai_interval_ms, cfg->ai_threads);
     JSON_ADD(json, off, "}");
 
     http_ok_json(fd, json, (size_t)off);
@@ -255,6 +262,46 @@ static int apply_video(app_ctx_t *app, const http_form_field_t *fields, int coun
         int nh = parse_int_clamped(v, 1, 4096, cfg->video_height > 0 ? cfg->video_height : 480);
         if (nh != cfg->video_height) { changed = 1; cfg->video_height = nh; }
     }
+    v = http_form_find(fields, count, "video_fps");
+    if (v) {
+        int nf = parse_int_clamped(v, 0, 120, 0);   /* 0/空 = 驱动默认帧率 */
+        if (nf != cfg->video_fps) { changed = 1; cfg->video_fps = nf; }
+    }
+    return changed;
+}
+
+/* AI：解析参数（ai_threads 必须是 3 的倍数），任一变化则热重载推理池 */
+static int apply_ai(app_ctx_t *app, const http_form_field_t *fields, int count)
+{
+    struct app_config_t *cfg = app->cfg;
+    int changed = 0;
+
+    const char *v = http_form_find(fields, count, "ai_enable");
+    if (v) {
+        int e = (!strcmp(v, "on") || !strcmp(v, "1") || !strcmp(v, "true"));
+        if (e != cfg->ai_enable) { cfg->ai_enable = e; changed = 1; }
+    }
+    v = http_form_find(fields, count, "ai_threads");
+    if (v) {
+        int t = parse_int_clamped(v, 3, 15, 3);
+        t -= t % 3;   /* 必须是 3 的倍数（3~15）：每个 NPU 核等量 worker */
+        if (t != cfg->ai_threads) { cfg->ai_threads = t; changed = 1; }
+    }
+    v = http_form_find(fields, count, "ai_conf");
+    if (v) {
+        float f = parse_int_clamped(v, 1, 100, 25) / 100.0f;
+        if (f != cfg->ai_conf) { cfg->ai_conf = f; changed = 1; }
+    }
+    v = http_form_find(fields, count, "ai_nms");
+    if (v) {
+        float f = parse_int_clamped(v, 1, 100, 45) / 100.0f;
+        if (f != cfg->ai_nms) { cfg->ai_nms = f; changed = 1; }
+    }
+    v = http_form_find(fields, count, "ai_interval_ms");
+    if (v) {
+        int n = parse_int_clamped(v, 10, 5000, 10);
+        if (n != cfg->ai_interval_ms) { cfg->ai_interval_ms = n; changed = 1; }
+    }
     return changed;
 }
 
@@ -341,12 +388,18 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         if (target && strcmp(target, "video") == 0) vid_changed = 1;
     }
 
+    int ai_changed = 0;
+    if (!target || strcmp(target, "all") == 0 || strcmp(target, "ai") == 0)
+        ai_changed = apply_ai(app, fields, count);
+
     LOG_INFO("config: applied to runtime, saving to file");
     config_save(app);
     http_ok_text(fd, "saved");
 
     /* 视频参数变更后重启视频流（target=video 时用户点击保存即按变更结果重启） */
     if (vid_changed) video_stream_restart();
+    /* AI 参数变更后热重载推理池（停旧池 → 重读配置重建），无需重启服务 */
+    if (ai_changed) rknn_yolo_reload();
 
     pthread_mutex_unlock(&app->can_mutex);
 }

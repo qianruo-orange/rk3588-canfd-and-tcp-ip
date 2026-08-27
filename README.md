@@ -9,7 +9,7 @@
 - TCP/IP 通信：TCP 服务监听，端口与绑定网卡均可配置
 - Web 管理界面：数据监控、配置修改、日志查看与重启 / 关机控制
 - 视频流服务：通过 V4L2 接入摄像头并输出 MJPEG 视频流
-- AI 目标检测：RKNN + YOLO26 三输出模式，多线程推理池并行加速，检测结果实时画框推流
+- AI 目标检测：RKNN + YOLO26（官方 ultralytics rknn 单输出格式），多线程推理池并行加速，检测结果实时画框推流
 - 网络录像：默认自动开启录屏（按天分目录 `recordings/YYYYMMDD/`，AI 画框帧优先），RK3588 硬件编码为 H.264 并封装 MP4(avc1) 文件，分辨率取自摄像头配置；下载界面与日志合并为「文件下载」页（/logs 双 TAB），支持下载、删除、打包下载
 - systemd 看门狗：监控关键线程心跳，防止异常卡死
 - 热更新配置：Web 页面修改后立即生效
@@ -168,7 +168,7 @@ rk3588-canfd-and-tcp-ip/
 │   │   ├── rknn_yolo.h               # RKNN YOLO 框架入口
 │   │   ├── yolo_types.h              # 检测结果结构定义
 │   │   ├── yolo_image.h              # 图像处理接口（JPEG / YUYV / 缩放）
-│   │   ├── yolo_postprocess.h        # 三输出后处理接口
+│   │   ├── yolo_postprocess.h        # 单输出后处理接口
 │   │   ├── yolo_draw.h               # 画框接口
 │   │   └── rknn_api.h                # RKNN 运行时头文件（rknn-toolkit2 提供）
 │   └── watchdog/
@@ -195,6 +195,7 @@ rk3588-canfd-and-tcp-ip/
 │   │   ├── http_api_system.c         # 系统 API
 │   │   ├── http_api_video.c          # 视频 API
 │   │   ├── http_api_rec.c            # 录像 API（start/stop/status/list/delete/pack/下载）
+│   │   ├── http_api_ai.c             # AI 文件上传 API（模型 / 类别标签，热重载）
 │   │   ├── http_logs.c               # 日志查看
 │   │   └── http_reboot.c             # 重启 / 关机
 │   ├── video/
@@ -203,10 +204,10 @@ rk3588-canfd-and-tcp-ip/
 │   │   ├── h264_encoder.c            # H.264 硬件编码器实现（V4L2 M2M MPLANE，NV12→H.264）
 │   │   └── rec_mp4.c                 # MP4(avc1) 封装器实现
 │   ├── ai/
-│   │   ├── rknn_yolo.c               # 模型加载 + 多线程推理池 + 帧快照
+│   │   ├── rknn_yolo.c               # 模型加载 + 多线程推理池 + 乱序重排 + 帧快照
 │   │   ├── yolo_image.c              # 图像处理实现（libjpeg / 格式转换 / 缩放）
-│   │   ├── yolo_postprocess.c        # YOLO26 三输出后处理（sigmoid + NMS）
-│   │   └── yolo_draw.c               # 画框实现
+│   │   ├── yolo_postprocess.c        # YOLO26 单输出后处理（框已解码，阈值 + NMS）
+│   │   └── yolo_draw.cpp             # 画框实现（OpenCV cv::rectangle / cv::putText）
 │   └── watchdog/
 │       └── watchdog.c                # 看门狗实现
 ├── html/                             # Web 前端
@@ -242,20 +243,21 @@ rk3588-canfd-and-tcp-ip/
 
 ## 依赖要求
 
-- gcc（C11）
+- gcc / g++（C11 / C++11，检测框渲染模块为 C++ 并直接调用 OpenCV）
 - cmake ≥ 3.10
 - libsystemd
 - libnl-3
 - libnl-route-3
 - librknnrt（板载 RKNN 运行时，模型由 rknn-toolkit2 在 PC 上转换）
 - libjpeg（JPEG 解码与 AI 画框用）
+- OpenCV 4（core + imgproc，检测框画框与标签文字渲染）
 - RK3588 硬件编码器 `/dev/video-enc0`（rkvenc，Linux V4L2 M2M 驱动，录像 H.264 编码用）
 - Linux SocketCAN 支持
 
 安装示例：
 
 ```bash
-apt install gcc cmake libsystemd-dev libnl-3-dev libnl-route-3-dev libjpeg-dev
+apt install build-essential cmake libsystemd-dev libnl-3-dev libnl-route-3-dev libjpeg62-turbo-dev libopencv-dev
 ```
 
 ## 构建
@@ -266,6 +268,8 @@ cd /home/orangepi/rk3588-canfd-and-tcp-ip
 ./scripts/build.sh -D   # Debug
 ./scripts/build.sh -C   # 清理构建产物与 logs
 ```
+
+`build.sh` 构建前会自动检查依赖（工具链 + 开发库 + librknnrt），缺失时打印具体缺项与安装命令并中止，避免在 cmake / make 阶段才暴露晦涩报错；`libavcodec-dev`（FFmpeg rkmpp 后端）为可选依赖，缺失时自动回退 V4L2 rkvenc 编码。
 
 构建产物：`./bin/rk3588-canfd-and-tcp-ip`
 
@@ -338,12 +342,13 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | `video_width` / `video_height` | `<n>` | 分辨率，默认 640×480 |
 | `can_dbc` | `<name> <path>` | 按 CAN 通道配置 DBC 数据库文件路径，留空则不启用该通道信号解码 |
 | `ai_enable` | `on\|off` | 启用 NPU 推理画框流，默认 `off` |
-| `ai_model` | `<path>` | YOLO26 三输出 `.rknn` 模型路径，默认 `config/yolo26.rknn` |
+| `ai_model` | `<path>` | YOLO26 官方单输出 `.rknn` 模型路径，默认 `config/yolo26.rknn` |
+| `ai_names` | `<path>` | 类别标签文件路径（COCO 格式，每行一个类名），默认 `config/coco.names` |
 | `ai_input_size` | `<n>` | 模型输入边长（32~2048），默认 640 |
 | `ai_conf` | `<n>` | 置信度阈值百分比（1~100），默认 25（0.25） |
 | `ai_nms` | `<n>` | NMS IoU 阈值百分比（1~100），默认 45（0.45） |
-| `ai_interval_ms` | `<n>` | 推理节流间隔（10~5000ms），默认 200 |
-| `ai_threads` | `<n>` | 推理工作线程数（1~4），默认 2；每线程独立 rknn context 并行推理 |
+| `ai_interval_ms` | `<n>` | 推理节流间隔（10~5000ms），默认 10（每帧推理） |
+| `ai_threads` | `<n>` | 推理工作线程数（3 的倍数：3~15，自动向下取整），默认 3；每线程独立 rknn context，worker i 绑定 NPU 核 i%3 |
 
 未提供配置文件时，将从系统枚举实际存在的 CAN 接口（netlink 路由，`kind=="can"`）并套用默认参数；若系统无法枚举到接口，则回退到 `can0` / `can1`。
 
@@ -378,6 +383,8 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | POST | `/api/can/send` | root | 发送 CAN 帧 |
 | POST | `/api/can/dbc?ifname=` | root | 上传某通道的 DBC 文件 |
 | POST | `/api/can/toggle` | root | 切换 CAN 接口开关 |
+| POST | `/api/ai/upload?type=model` | root | 上传 YOLO26 `.rknn` 模型（≤64MB，校验 RKNN magic），原子替换后热重载推理池 |
+| POST | `/api/ai/upload?type=names` | root | 上传类别标签文件（≤256KB，1~128 行，每行 ≤23 字符），原子替换后热重载 |
 | GET/POST | `/api/config` | root | 读取 / 写入配置 |
 | GET | `/api/network` | 无 | 网络统计 |
 | GET | `/api/network/ifaces` | 无 | 网络接口信息 |
@@ -399,12 +406,25 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 
 ## AI 目标检测
 
-RKNN + YOLO26 三输出模式（YOLOv8 风格 P3/P4/P5 检测头），由 `rknn-toolkit2` 将模型转换为 `.rknn` 后在板载 NPU 推理。
+RKNN + YOLO26（官方 ultralytics 单输出格式 `(1, 84, 8400)`，fp16，官方 mean/std），由 `rknn-toolkit2` 转换后在板载 NPU 推理：
 
-- 模型加载：`ai_model` 指向 `.rknn` 文件，`init` 校验输出必须为 3 个检测头
-- 多线程推理池：`ai_threads`（1~4）个工作线程各自持有独立 rknn context，对队列中的不同帧并行推理；结果按 seq 单调更新快照，乱序完成不串帧
-- 画框推流：检测结果实时画框并编码为 JPEG，经 `/video/mjpeg_ai` 输出；前端视频卡默认展示画框流
+- 模型加载：`ai_model` 指向 `.rknn` 文件，校验输出必须为单个检测头 `(1, 84, 8400)`；类别名由 `ai_names` 加载（COCO 格式，每行一个类名，缺失回退内置 COCO 80 类）
+- 流水线：`ai_task` 按 `ai_interval_ms` 采样采集帧（seq 去重）→ 有界任务队列（容量 4）→ N 个推理 worker（独立 rknn context，worker i 绑定 NPU 核 i%3，RK3588 三核等量分配）→ 单 composer 线程严格按 seq 顺序消费结果（乱序重排、100ms 超时跳缺口、seq 回绕回退游标）→ EMA 平滑（α=0.4，同类 IoU≥0.3 匹配）→ 渲染 → 快照
+- 画框渲染：直接调用 OpenCV（`cv::rectangle` 3px 实色 + LINE_AA 抗锯齿；`cv::putText` Hershey Simplex 白色粗体字 + 实色底块，默认挂在框顶外侧，顶部不足落框内），每一帧都输出标注帧，不混入未推理的原始帧
+- 热更新：`ai_enable` / `ai_threads` / `ai_conf` / `ai_nms` / `ai_interval_ms` 保存后立即重建推理池生效，无需重启进程；`ai_model` / `ai_names` 可通过 Web 配置页或 API 上传（校验 RKNN magic / 标签格式后原子替换文件并热重载）
 - 优雅降级：模型缺失 / NPU 驱动未加载 / 推理失败时 `enabled=0`，原视频流照常，画框流回退原始帧，不崩溃不阻断启动
+
+### RKNN 转换工作流
+
+在 PC（x86_64，Python 3.10）上用 rknn-toolkit2 将官方 YOLO26 权重转为板端模型：
+
+1. 获取权重与工具：从 ultralytics 官方发布页下载 YOLO26 权重（如 `yolo26n.pt`）；安装 `rknn-toolkit2`（含 `rknn-toolkit-lite2` 用于板端验证）与 `ultralytics`
+2. 导出 ONNX：用 ultralytics 官方脚本导出检测头（640×640，单输出，输出张量 `(1, 84, 8400)`，84 = 4 框 + 80 类）
+3. 转换 RKNN：`rknn.config(mean_values=官方默认, std_values=官方默认, target_platform='rk3588')`，`hybrid_quantization_step2` 不启用，导出 fp16 权重（推荐）或 int8（需量化数据集）；转换后校验输出 shape 必须为 `(1, 84, 8400)`
+4. 板端验证：在 RK3588 上用 `rknn-toolkit-lite2` 加载推理，与 ONNX/PT 输出对拍（允许 fp16 微小误差）；`rknn_init` 通过后即可部署
+5. 部署：Web 配置页上传 `yolo26.rknn`（或放入 `config/` 并设置 `ai_model`），同时上传类别标签文件（或 `config/coco.names`）；日志输出 `ai: model '...' loaded, classes '...' (80), input 640x640, single output, threads N (NPU core i%3)` 即转换正确
+
+> 仓库 `config/yolo26.rknn` 为 yolo26n 官方权重转换（fp16，单输出 (1,84,8400)，官方 mean/std，无内置 NMS）。
 
 ## 网络录像
 

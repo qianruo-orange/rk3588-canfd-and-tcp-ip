@@ -74,6 +74,46 @@ static void caps_add_std_sizes(int *sw, int *sh, int *sn,
     caps_add_size(sw, sh, sn, maxw, maxh);
 }
 
+/* 枚举某格式/分辨率支持的帧率（fps = 分母/分子，四舍五入），写入 fps[] 返回数量。
+   驱动不支持枚举时回退常见帧率档位 */
+static int caps_enum_fps(int dev_fd, unsigned int pixfmt, int w, int h,
+                         int *fps, int maxfps)
+{
+    static const int kStdFps[] = { 60, 50, 30, 25, 20, 15, 10, 5 };
+#define kStdFpsN ((int)(sizeof(kStdFps) / sizeof(kStdFps[0])))
+    int n = 0;
+    for (int ii = 0; ii < 32; ii++) {
+        struct v4l2_frmivalenum fv;
+        memset(&fv, 0, sizeof(fv));
+        fv.index = ii;
+        fv.pixel_format = pixfmt;
+        fv.width = w;
+        fv.height = h;
+        if (ioctl(dev_fd, VIDIOC_ENUM_FRAMEINTERVALS, &fv) < 0) break;
+        if (fv.type == V4L2_FRMIVAL_TYPE_DISCRETE) {
+            int f = (int)((fv.discrete.denominator + fv.discrete.numerator / 2)
+                          / fv.discrete.numerator);
+            if (f < 1 || f > 120) continue;
+            int dup = 0;
+            for (int k = 0; k < n; k++) if (fps[k] == f) { dup = 1; break; }
+            if (!dup && n < maxfps) fps[n++] = f;
+        } else if (fv.type == V4L2_FRMIVAL_TYPE_STEPWISE) {
+            /* 区间帧率：min fps 对应 min.denominator/min.numerator */
+            int fmin = (int)(fv.stepwise.min.denominator / fv.stepwise.min.numerator);
+            int fmax = (int)(fv.stepwise.max.denominator / fv.stepwise.max.numerator);
+            for (int k = 0; k < kStdFpsN; k++)
+                if (kStdFps[k] >= fmin && kStdFps[k] <= fmax && n < maxfps)
+                    fps[n++] = kStdFps[k];
+            break;
+        }
+    }
+    if (n == 0) {   /* 驱动不支持枚举：回退常见档位 */
+        for (int k = 0; k < kStdFpsN && n < maxfps; k++) fps[n++] = kStdFps[k];
+    }
+    return n;
+#undef kStdFpsN
+}
+
 /* 枚举设备真实格式/分辨率写入 json。全部写入成功且有可用项返回 1，否则 0 */
 static int video_caps_fill(int dev_fd, char *json, int json_size,
                            const char *device, const char *card)
@@ -120,8 +160,16 @@ static int video_caps_fill(int dev_fd, char *json, int json_size,
                           fmtd.pixelformat == V4L2_PIX_FMT_MJPEG ? "MJPEG" : "YUYV 4:2:2");
         if (off < 0) return 0;
         for (int k = 0; k < sn; k++) {
-            off = http_json_append(json, (size_t)json_size, off, "%s{\"w\":%d,\"h\":%d}",
-                              k > 0 ? "," : "", sw[k], sh[k]);
+            int fps[16], fn = caps_enum_fps(dev_fd, fmtd.pixelformat,
+                                            sw[k], sh[k], fps, 16);
+            char fps_str[128];
+            int foff = 0;
+            for (int m = 0; m < fn; m++)
+                foff += snprintf(fps_str + foff, sizeof(fps_str) - (size_t)foff,
+                                 "%s%d", m > 0 ? "," : "", fps[m]);
+            off = http_json_append(json, (size_t)json_size, off,
+                              "%s{\"w\":%d,\"h\":%d,\"fps\":[%s]}",
+                              k > 0 ? "," : "", sw[k], sh[k], fps_str);
             if (off < 0) return 0;
         }
         off = http_json_append(json, (size_t)json_size, off, "]}");
@@ -159,7 +207,7 @@ void http_video_caps(app_ctx_t *app, int fd, const char *method, const char *uri
     }
 
     char card[64] = "Unknown Camera";
-    char json[4096];
+    char json[16384];   /* 尺寸 × 格式 × FPS 列表可能较大 */
     int off = 0;
 
     int dev_fd = open(device, O_RDONLY | O_NONBLOCK);
@@ -194,14 +242,14 @@ void http_video_caps(app_ctx_t *app, int fd, const char *method, const char *uri
         "{\"fmt\":\"MJPG\",\"desc\":\"MJPEG\",\"sizes\":[", device, card);
 
     for (int i = 0; i < NP; i++)
-        JSON_ADD(json, off, "%s{\"w\":%d,\"h\":%d,\"label\":\"%s\"}",
+        JSON_ADD(json, off, "%s{\"w\":%d,\"h\":%d,\"label\":\"%s\",\"fps\":[30,25,20,15,10,5]}",
                  i > 0 ? "," : "", presets[i].w, presets[i].h, presets[i].label);
 
     JSON_ADD(json, off, "]},"
         "{\"fmt\":\"YUYV\",\"desc\":\"YUYV 4:2:2\",\"sizes\":[");
 
     for (int i = 0; i < NP; i++)
-        JSON_ADD(json, off, "%s{\"w\":%d,\"h\":%d,\"label\":\"%s\"}",
+        JSON_ADD(json, off, "%s{\"w\":%d,\"h\":%d,\"label\":\"%s\",\"fps\":[30,25,20,15,10,5]}",
                  i > 0 ? "," : "", presets[i].w, presets[i].h, presets[i].label);
 
     JSON_ADD(json, off, "]}]}");

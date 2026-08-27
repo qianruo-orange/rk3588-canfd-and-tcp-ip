@@ -8,6 +8,45 @@
   var lastNet = {eth0:{rx:0,tx:0,ts:0},wlan0:{rx:0,tx:0,ts:0}};
   var netInited = false;
 
+  /* 视频流 FPS：独立 fetch 读取 MJPEG 字节流，扫描 JPEG 帧头（SOI FF D8）计数。
+     与 img 显示解耦，不依赖浏览器 multipart 解析逐帧触发 load 事件 */
+  var fpsCnt = 0, fpsWin = Date.now(), fpsVal = 0;
+  var fpsUrl = '', fpsAbort = null, fpsLastByte = -1;
+
+  function resetFps() { fpsCnt = 0; fpsWin = Date.now(); fpsVal = 0; }
+
+  function fpsStart(url) {
+    if (fpsUrl === url && fpsAbort) return;   /* 同一流已在计数 */
+    fpsStop();
+    fpsUrl = url;
+    fpsLastByte = -1;
+    resetFps();
+    var ac = new AbortController();
+    fpsAbort = ac;
+    fetch(url, {signal: ac.signal}).then(function(r) {
+      if (!r.ok || !r.body) return;
+      var rd = r.body.getReader();
+      (function pump() {
+        rd.read().then(function(c) {
+          if (c.done) return;
+          var b = new Uint8Array(c.value);
+          for (var i = 0; i < b.length - 1; i++)
+            if (b[i] === 0xFF && b[i + 1] === 0xD8) fpsCnt++;
+          if (fpsLastByte === 0xFF && b.length && b[0] === 0xD8) fpsCnt++;  /* 帧头跨块 */
+          if (b.length) fpsLastByte = b[b.length - 1];
+          pump();
+        }).catch(function() {});
+      })();
+    }).catch(function() {
+      if (fpsAbort === ac) fpsAbort = null;   /* 流中断：下次 update 自动重连 */
+    });
+  }
+
+  function fpsStop() {
+    if (fpsAbort) { fpsAbort.abort(); fpsAbort = null; }
+    fpsUrl = '';
+  }
+
   function barColor(p) { return p < 60 ? 'green' : p < 85 ? 'yellow' : 'red'; }
 
   function fmtSpeed(bytesPerSec) {
@@ -164,7 +203,9 @@
           var r2 = await fetch('/api/config');
           if (r2.ok) {
             var cfg = await r2.json();
-            streamUrl = cfg.stream_url || cfg.video_url || streamUrl;
+            /* AI 启用时默认展示画框流（AI 降级时服务端自动回退原始帧） */
+            streamUrl = cfg.stream_url || cfg.video_url ||
+                        (cfg.ai_enable ? '/video/mjpeg_ai' : '/video/mjpeg');
           }
         }
         if (streamUrl) {
@@ -173,18 +214,22 @@
           var useImg = streamUrl.indexOf('/video/mjpeg') === 0
                      || streamUrl.match(/\.mjpeg$|\.jpg$|\.jpeg$/i);
           if (useImg) {
+            fpsStart(streamUrl);   /* 每次轮询都调用：内部幂等，流中断时自动重连 */
             if (!img.src || img.getAttribute('data-src') !== streamUrl) {
               img.setAttribute('data-src', streamUrl);
               img.src = streamUrl;
               img.style.display = '';
               vid.style.display = 'none';
+              resetFps();
             }
           } else {
+            fpsStop();
             if (!vid.src || vid.getAttribute('data-src') !== streamUrl) {
               vid.setAttribute('data-src', streamUrl);
               vid.src = streamUrl;
               vid.style.display = '';
               img.style.display = 'none';
+              resetFps();
             }
           }
         }
@@ -195,6 +240,22 @@
 
   update();
   setInterval(update, 200);
+
+  /* 每秒刷新视频流 FPS 徽标：窗口内无新帧则显示 --（流停滞） */
+  setInterval(function() {
+    var el = document.getElementById('video_fps');
+    if (!el) return;
+    var now = Date.now();
+    if (now > fpsWin) {
+      if (fpsCnt > 0) {
+        fpsVal = fpsCnt * 1000 / (now - fpsWin);
+        fpsCnt = 0; fpsWin = now;
+      } else {
+        fpsVal = 0;
+      }
+    }
+    el.textContent = fpsVal > 0 ? Math.round(fpsVal) + ' FPS' : '-- FPS';
+  }, 1000);
 
   window.reboot = function() { if (!confirm('确定要重启设备吗？')) return; authFetch('/api/reboot').catch(function(){}); };
   window.shutdown = function() { if (!confirm('确定要关闭设备吗？')) return; authFetch('/api/shutdown').catch(function(){}); };

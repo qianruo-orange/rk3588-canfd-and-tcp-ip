@@ -104,6 +104,21 @@ static int init_video_device(video_ctx_t *vs, int verbose)
         (char)((fmt.fmt.pix.pixelformat >> 24) & 0xFF),
         vs->width, vs->height);
 
+    /* 帧率：配置 video_fps > 0 时设置驱动帧间隔（S_PARM），否则保持驱动默认 */
+    if (vs->app && vs->app->cfg && vs->app->cfg->video_fps > 0) {
+        struct v4l2_streamparm sp;
+        memset(&sp, 0, sizeof(sp));
+        sp.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        sp.parm.capture.timeperframe.numerator = 1;
+        sp.parm.capture.timeperframe.denominator = vs->app->cfg->video_fps;
+        if (ioctl(vs->fd, VIDIOC_S_PARM, &sp) == 0) {
+            LOG_INFO("video_stream: fps set to %d", vs->app->cfg->video_fps);
+        } else {
+            LOG_ERROR("video_stream: S_PARM fps=%d failed, keeping driver default",
+                      vs->app->cfg->video_fps);
+        }
+    }
+
     struct v4l2_requestbuffers req = {0};
     req.count  = 4;
     req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -436,7 +451,8 @@ static void *video_stream_client_task(void *arg)
                       "Content-Type: multipart/x-mixed-replace; boundary=--frame\r\n"
                       "Connection: close\r\n\r\n";
     fd_write_all_blocking(fd, hdr, strlen(hdr));
-    int last = 0;
+    int last_raw = 0;   /* 原始帧 pacing：seq 单调递增，wait_next 依赖此不变量 */
+    unsigned long long last_ann = (unsigned long long)-1; /* 已推的标注帧 seq（-1 表示尚未推过） */
     time_t last_write = time(NULL);   /* 最近一次成功写帧的时间，用于空闲超时 */
     while (g_ctx && g_ctx->app->running) {
         /* 空闲超时：长时间未成功写出任何帧（客户端不读/网络黑洞），释放连接，
@@ -452,18 +468,26 @@ static void *video_stream_client_task(void *arg)
         /* 推流线程基于非阻塞写 + 轮询，不会长期阻塞，无需独立看门狗监督 */
         unsigned char *frame = NULL; size_t flen = 0;
         if (ai_mode && rknn_yolo_enabled()) {
-            /* 画框帧优先；无新画框帧（推理未跟上 / 首帧未就绪）时回退原始帧，保持画面流动 */
-            if (rknn_yolo_get_frame_seq() != (unsigned long long)last) {
+            /* 画框流：推流的每一帧都必须是推理标注后的画面。
+               新标注帧未就绪（推理进行中 / 首帧未生成）时短暂等待，绝不混入原始帧，
+               否则画面会在标注帧与原始帧之间来回闪烁（抖动）。
+               标注帧用独立的 last_ann 去重：不能与原始帧共用 last，
+               否则标注帧 seq（推理时刻，必然滞后于最新原始帧）会把 last 拉回过去，
+               wait_next 永不阻塞，同一对帧被无限重复发送（死循环刷流）。
+               原始帧回退仅在 AI 完全降级（rknn_yolo_enabled()=0）时由下方分支承担 */
+            unsigned long long aseq_now = rknn_yolo_get_frame_seq();
+            if (aseq_now != last_ann) {
                 unsigned long long aseq = 0;
                 if (rknn_yolo_get_frame(&frame, &flen, &aseq) == 0)
-                    last = (int)aseq;
+                    last_ann = aseq;
             }
+            if (!frame) { usleep(10000); continue; }   /* 等标注帧，不回退原始帧 */
         }
         if (!frame) {
-            int seq = video_stream_wait_next(last, &frame, &flen);
+            int seq = video_stream_wait_next(last_raw, &frame, &flen);
             if (seq < 0) break;
-            if (seq == last) { usleep(20000); continue; }
-            last = seq;
+            if (seq == last_raw) { usleep(20000); continue; }
+            last_raw = seq;
         }
         if (!frame || flen == 0) { usleep(20000); continue; }   /* 分配失败等：跳过 */
         char mhdr[128];

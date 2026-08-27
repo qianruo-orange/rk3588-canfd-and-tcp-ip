@@ -8,10 +8,33 @@
 
 <form id="f">
 <div class="can-grid">
+<div class="card" id="card_ai"><h3>AI 检测 <button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveAi()">💾 保存</button></h3>
+<div class="ai-split">
+<div class="ai-col">
+<div class="grp-t">推理参数</div>
+<div class="cfg-grid ai-basic">
+<div class="row"><label>启用</label><select id="ai_en"><option value="on">on</option><option value="off">off</option></select></div>
+<div class="row"><label>推理线程数</label><select id="ai_th"><option value="3">3（每核 1 个）</option><option value="6">6（每核 2 个）</option><option value="9">9（每核 3 个）</option><option value="12">12（每核 4 个）</option><option value="15">15（每核 5 个）</option></select></div>
+<div class="row"><label>置信度</label><input id="ai_cf" type="number" min="1" max="100" step="1"><span class="unit">%</span></div>
+<div class="row"><label>NMS IoU</label><input id="ai_nm" type="number" min="1" max="100" step="1"><span class="unit">%</span></div>
+<div class="row"><label>推理间隔</label><input id="ai_iv" type="number" min="10" max="5000"><span class="unit">ms</span></div>
+</div>
+</div>
+<div class="ai-col">
+<div class="grp-t">模型文件</div>
+<div class="cfg-grid ai-upload">
+<div class="row"><label>上传模型</label><input type="file" id="ai_model_f" accept=".rknn" style="flex:1;max-width:none"><button type="button" class="add-btn" onclick="uploadAi('model')">上传</button></div>
+<div class="row"><label>上传标签</label><input type="file" id="ai_names_f" accept=".names,.txt" style="flex:1;max-width:none"><button type="button" class="add-btn" onclick="uploadAi('names')">上传</button></div>
+</div>
+</div>
+</div>
+</div>
+
 <div class="card" id="card_can"><h3><select id="canSel" onchange="onCanSel()"></select> <span id="st"></span> <label class="toggle"><input type="checkbox" id="tg" onchange="toggleCan(this.checked)"><span class="slider"></span></label><button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveCan()">💾 保存</button></h3>
 <div id="cfg">
-<div class="cfg-grid">
+<div class="cfg-grid can-basic">
 <div class="row"><label>波特率</label><input name="br" id="br" type="number"><span class="unit">bps</span></div>
+<div class="row"><label>DBC 文件</label><input type="file" id="dbc" accept=".dbc" style="flex:1"><button type="button" class="add-btn" onclick="uploadDbc()">上传</button></div>
 <div class="row"><label>CAN FD</label><select name="fd" id="fd" onchange="chkFd()"><option value="on">on</option><option value="off">off</option></select></div>
 <div class="row" id="dbr"><label>FD波特率</label><input name="db" id="db" type="number"><span class="unit">bps</span></div>
 </div>
@@ -19,11 +42,10 @@
 <h4><span>CAN-ID 过滤器</span><button type="button" class="add-btn" onclick="addFilter()">+ 添加</button></h4>
 <div id="fil"></div>
 </div>
-<div class="row"><label>DBC 文件</label><input type="file" id="dbc" accept=".dbc" style="flex:1"><button type="button" class="add-btn" onclick="uploadDbc()">上传</button></div>
 </div><div class="hint" id="hint">接口已关闭，开启后可配置</div></div>
 
 <div class="card" id="card_net"><h3>网络设置 <button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveNet()">💾 保存</button></h3>
-<div class="tip">TCP 数据通道的网卡 / 端口 / IP 配置（供上位机连接传输 CAN 数据）；网页服务器固定 80 端口，不受此配置影响。</div>
+<div class="cfg-grid net2">
 <div class="row"><label>绑定网卡</label><select name="bind" id="bind"><option value="">所有网卡</option></select></div>
 <div class="row"><label>TCP端口</label><input name="tp" id="tp" type="number"></div>
 <div class="row"><label>最大客户端数</label><input name="mc" id="mc" type="number"></div>
@@ -31,14 +53,19 @@
 <div class="row" id="ip_a_row"><label>IP 地址</label><input id="ip_a" type="text" placeholder="192.168.1.100"></div>
 <div class="row" id="ip_m_row"><label>子网掩码</label><input id="ip_m" type="text" placeholder="255.255.255.0"></div>
 <div class="row" id="ip_g_row"><label>网关</label><input id="ip_g" type="text" placeholder="192.168.1.1"></div>
+</div>
 <div class="ip-cur" id="ip_cur">当前未读取</div>
 </div>
 
 <div class="card" id="card_video"><h3>视频 <button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveVideo()">💾 保存</button></h3>
+<div class="cfg-grid vid2">
 <div class="row"><label>设备</label><select name="vd" id="vd" onchange="queryCaps()"><option value="">-- 扫描中 --</option></select></div>
 <div class="row"><label>格式 / 分辨率</label><select name="vr" id="vr" onchange="onResChange()"><option value="">-- 请选择设备 --</option></select></div>
+<div class="row"><label>帧率 (FPS)</label><select id="vf"><option value="">自动（驱动默认）</option></select></div>
+</div>
 <input type="hidden" id="vw"><input type="hidden" id="vh">
 </div>
+
 </div>
 <div id="msg"></div>
 </form>

@@ -1,8 +1,10 @@
 cmake_minimum_required(VERSION 3.10)
-project(rk3588-canfd-and-tcp-ip VERSION 1.1.0 LANGUAGES C)
+project(rk3588-canfd-and-tcp-ip VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(APP_NAME "${PROJECT_NAME}")
 set(APP_VERSION "${PROJECT_VERSION}")
@@ -71,7 +73,7 @@ if(DEBUG)
 endif()
 
 # 通配符收集源文件与头文件（新增模块无需再改 CMakeLists）
-file(GLOB APP_SOURCES CONFIGURE_DEPENDS source/**/*.c)
+file(GLOB APP_SOURCES CONFIGURE_DEPENDS source/**/*.c source/**/*.cpp)
 file(GLOB APP_HEADERS CONFIGURE_DEPENDS include/**/*.h)
 
 add_executable(rk3588-canfd-and-tcp-ip ${APP_SOURCES} ${APP_HEADERS})
@@ -102,6 +104,10 @@ target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBRKNNRT})
 
 find_library(LIBJPEG jpeg REQUIRED)
 target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBJPEG})
+
+# OpenCV（core + imgproc）：检测框画框 / 标签文字渲染（cv::rectangle / cv::putText）
+find_package(OpenCV REQUIRED COMPONENTS core imgproc)
+target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${OpenCV_LIBS})
 
 # FFmpeg（可选）：提供 h264_rkmpp 硬件编码后端（Rockchip MPP）。
 # 系统装有带 rkmpp 的 libavcodec 时自动启用；否则编译 V4L2 后端。

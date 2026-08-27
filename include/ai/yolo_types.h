@@ -25,4 +25,12 @@ typedef struct {
     yolo_det_t        dets[YOLO_MAX_DETS];
 } yolo_result_t;
 
+/* 类别名表（官方 COCO 格式文件 config/coco.names，每行一个类名） */
+#define YOLO_MAX_CLASSES     128
+#define YOLO_CLASS_NAME_LEN  24
+typedef struct {
+    int  count;
+    char names[YOLO_MAX_CLASSES][YOLO_CLASS_NAME_LEN];
+} yolo_classes_t;
+
 #endif /* YOLO_TYPES_H */

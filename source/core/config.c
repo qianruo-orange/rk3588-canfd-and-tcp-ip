@@ -27,14 +27,16 @@ static void config_defaults(struct app_config_t *cfg)
     safe_strncpy(cfg->video_device, sizeof(cfg->video_device), "/dev/video0");
     cfg->video_width  = 640;
     cfg->video_height = 480;
+    cfg->video_fps    = 0;    /* 0 = 驱动默认帧率 */
 
-    cfg->ai_enable      = 0;
+    cfg->ai_enable      = 1;   /* 默认开启（无模型/NPU 时优雅降级，不影响其它功能） */
     safe_strncpy(cfg->ai_model, sizeof(cfg->ai_model), "config/yolo26.rknn");
+    safe_strncpy(cfg->ai_names, sizeof(cfg->ai_names), "config/coco.names");
     cfg->ai_input_size  = 640;
     cfg->ai_conf        = 0.25f;
     cfg->ai_nms         = 0.45f;
-    cfg->ai_interval_ms = 200;
-    cfg->ai_threads     = 2;
+    cfg->ai_interval_ms = 10;
+    cfg->ai_threads     = 3;
 
     app_args_t *args = &cfg->args;
     args->tcp_port    = 6666;
@@ -62,10 +64,11 @@ int config_load(struct app_config_t *cfg)
     memset(cfg, 0, sizeof(*cfg));
     safe_strncpy(cfg->log_dir, sizeof(cfg->log_dir), PATH_LOGS);
     cfg->video_width = 640; cfg->video_height = 480;
-    cfg->ai_enable = 0;
+    cfg->ai_enable = 1;   /* 默认开启（无模型/NPU 时优雅降级） */
     safe_strncpy(cfg->ai_model, sizeof(cfg->ai_model), "config/yolo26.rknn");
+    safe_strncpy(cfg->ai_names, sizeof(cfg->ai_names), "config/coco.names");
     cfg->ai_input_size = 640; cfg->ai_conf = 0.25f; cfg->ai_nms = 0.45f;
-    cfg->ai_interval_ms = 200; cfg->ai_threads = 2;
+    cfg->ai_interval_ms = 10; cfg->ai_threads = 3;
     app_args_t *a = &cfg->args;
 
     char line[256];
@@ -122,14 +125,20 @@ int config_load(struct app_config_t *cfg)
         else if (strcmp(key, "video_device") == 0) safe_strncpy(cfg->video_device, sizeof(cfg->video_device), val);
         else if (strcmp(key, "video_width") == 0) cfg->video_width = parse_int_clamped(val, 1, 4096, 640);
         else if (strcmp(key, "video_height") == 0) cfg->video_height = parse_int_clamped(val, 1, 4096, 480);
+        else if (strcmp(key, "video_fps") == 0) cfg->video_fps = parse_int_clamped(val, 0, 120, 0);
         else if (strcmp(key, "ai_enable") == 0)
             cfg->ai_enable = !strcmp(val, "on") || !strcmp(val, "1") || !strcmp(val, "true");
         else if (strcmp(key, "ai_model") == 0) safe_strncpy(cfg->ai_model, sizeof(cfg->ai_model), val);
+        else if (strcmp(key, "ai_names") == 0) safe_strncpy(cfg->ai_names, sizeof(cfg->ai_names), val);
         else if (strcmp(key, "ai_input_size") == 0) cfg->ai_input_size = parse_int_clamped(val, 32, 2048, 640);
         else if (strcmp(key, "ai_conf") == 0) cfg->ai_conf = parse_int_clamped(val, 1, 100, 25) / 100.0f;
         else if (strcmp(key, "ai_nms") == 0) cfg->ai_nms = parse_int_clamped(val, 1, 100, 45) / 100.0f;
         else if (strcmp(key, "ai_interval_ms") == 0) cfg->ai_interval_ms = parse_int_clamped(val, 10, 5000, 200);
-        else if (strcmp(key, "ai_threads") == 0) cfg->ai_threads = parse_int_clamped(val, 1, 4, 2);
+        else if (strcmp(key, "ai_threads") == 0) {
+            /* 必须是 3 的倍数（3~15）：每个 NPU 核等量 worker，向下取整 */
+            int t = parse_int_clamped(val, 3, 15, 3);
+            cfg->ai_threads = t - (t % 3);
+        }
         else if (strcmp(key, "can_dbc") == 0) {
             char nm[64], path[256];
             if (sscanf(val, "%63s %255s", nm, path) == 2) {
@@ -196,9 +205,11 @@ void config_save(app_ctx_t *app)
     fprintf(fp, "video_device %s\n", cfg->video_device);
     fprintf(fp, "video_width %d\n", cfg->video_width);
     fprintf(fp, "video_height %d\n", cfg->video_height);
+    fprintf(fp, "video_fps %d\n", cfg->video_fps);
     fprintf(fp, "\n# --- AI 检测 (YOLO26, RKNN) ---\n");
     fprintf(fp, "ai_enable %s\n", cfg->ai_enable ? "on" : "off");
     fprintf(fp, "ai_model %s\n", cfg->ai_model[0] ? cfg->ai_model : "config/yolo26.rknn");
+    fprintf(fp, "ai_names %s\n", cfg->ai_names[0] ? cfg->ai_names : "config/coco.names");
     fprintf(fp, "ai_input_size %d\n", cfg->ai_input_size > 0 ? cfg->ai_input_size : 640);
     fprintf(fp, "ai_conf %d\n", (int)(cfg->ai_conf > 0 ? cfg->ai_conf * 100 : 25));
     fprintf(fp, "ai_nms %d\n", (int)(cfg->ai_nms > 0 ? cfg->ai_nms * 100 : 45));

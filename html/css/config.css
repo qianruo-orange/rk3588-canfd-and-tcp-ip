@@ -31,10 +31,14 @@ h1{font-size:24px;margin-bottom:16px}
 .ai-basic .row input,.ai-basic .row select{max-width:150px}
 .ai-upload{grid-template-columns:1fr}
 @media(max-width:1200px){.ai-split{grid-template-columns:1fr}}
-/* 网络/视频卡：每行两个参数；按钮与输入框留间距 */
-.net2,.vid2{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
-.net2 .row label,.vid2 .row label{min-width:96px}
-.net2 .row input,.net2 .row select,.vid2 .row input,.vid2 .row select{max-width:none;width:100%}
+/* 网络卡：每行两个参数；按钮与输入框留间距 */
+.net2{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.net2 .row label{min-width:96px}
+.net2 .row input,.net2 .row select{max-width:none;width:100%}
+/* 视频卡：两行纵向排列，标签定宽对齐，下拉框等宽铺满整行 */
+.vid2{grid-template-columns:1fr}
+.vid2 .row label{width:150px;min-width:150px}
+.vid2 .row input,.vid2 .row select{max-width:none;width:100%}
 .row button{margin-left:8px;flex:none}
 .btn{padding:8px 18px;border-radius:10px;border:none;cursor:pointer;font-size:13px;margin:4px;transition:all .2s}
 .btn-save{background:linear-gradient(135deg,#236e4a,#2d8a5c);color:#fff;box-shadow:0 2px 12px rgba(35,110,74,.3)}

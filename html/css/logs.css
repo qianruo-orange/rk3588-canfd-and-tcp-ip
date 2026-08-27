@@ -14,8 +14,20 @@ table{border-collapse:collapse;width:100%;min-width:480px;background:var(--card-
 th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--card-border);white-space:nowrap}
 th{color:var(--muted);font-size:12px}
 td{font-size:13px}
-.del{background:rgba(192,57,78,.8);color:#fff;border:none;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:8px}
+.del{background:rgba(192,57,78,.8);color:#fff;border:none;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:8px;transition:opacity .15s}
+.del:hover{opacity:.85}
+.del:disabled{background:var(--btn-bg);color:var(--muted);cursor:not-allowed;opacity:1}
 .dl{color:var(--accent)}
+/* 正在录制的行高亮 */
+tr.row-active td{background:rgba(30,111,212,.08)}
+tr.row-active td:first-child{border-left:3px solid var(--accent)}
+/* 加载/空状态 */
+.loading,.empty{text-align:center;color:var(--muted);padding:18px 0}
+/* 轻量提示 */
+.toast{position:fixed;left:50%;bottom:32px;transform:translateX(-50%) translateY(80px);background:var(--card-bg);border:1px solid var(--card-border);color:var(--text);padding:10px 18px;border-radius:10px;font-size:13px;opacity:0;transition:all .25s;pointer-events:none;backdrop-filter:blur(12px);z-index:99;max-width:86vw}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast-ok{border-color:rgba(46,160,67,.6)}
+.toast-err{border-color:rgba(192,57,78,.6)}
 @media(max-width:540px){
   body{padding:12px}
   h1{font-size:18px}

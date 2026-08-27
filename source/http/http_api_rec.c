@@ -148,9 +148,11 @@ static void serve_rec_download(int fd, const char *rel)
 }
 
 /* 删除：body = YYYYMMDD/rec_*.mp4 */
-static void serve_rec_delete(int fd, const char *body)
+static void serve_rec_delete(int fd, const char *req)
 {
     char name[160];
+    /* req 是完整 HTTP 请求，必须提取 body（此前直接当 body 用 → 永远 400） */
+    const char *body = http_body_start(req);
     if (!body || !*body) { http_err(fd, 400, "Bad Request", NULL); return; }
     safe_strncpy(name, sizeof(name), body);
     /* 去掉尾部空白/换行 */
@@ -160,6 +162,13 @@ static void serve_rec_delete(int fd, const char *body)
     char subdir[64], fname[256];
     if (rec_resolve_rel(name, subdir, sizeof(subdir), fname, sizeof(fname)) != 0) {
         http_err(fd, 400, "Bad Request", NULL);
+        return;
+    }
+    /* 拒绝删除正在录制的文件：unlink 后录制句柄仍在写，数据丢失且磁盘不释放 */
+    video_rec_status_t st;
+    video_rec_status(&st);
+    if (st.recording && st.file[0] && strcmp(st.file, name) == 0) {
+        http_err(fd, 409, "Conflict", "recording in progress");
         return;
     }
     char path[512];

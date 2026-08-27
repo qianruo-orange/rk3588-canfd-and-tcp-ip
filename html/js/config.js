@@ -184,31 +184,18 @@
     el.appendChild(r);
   };
 
-  var netIfaces = [];   /* 系统网卡列表（填充"绑定网卡"与 IP 接口下拉） */
-
-  /* 加载网络接口列表，填充"绑定网卡"与 IP 设置"接口"两个下拉框 */
+  /* 加载网络接口列表，填充"绑定网卡"下拉框 */
   async function loadIfaces() {
-    netIfaces = [];
     var sel = document.getElementById('bind');
-    var ipSel = document.getElementById('ip_if');
     sel.innerHTML = '<option value="">所有网卡</option>';
-    ipSel.innerHTML = '';
     try {
       var r = await fetch('/api/network/ifaces');
       if (!r.ok) return;
-      netIfaces = await r.json();
-      for (var i = 0; i < netIfaces.length; i++) {
-        sel.innerHTML += '<option value="' + netIfaces[i] + '">' + netIfaces[i] + '</option>';
-        ipSel.innerHTML += '<option value="' + netIfaces[i] + '">' + netIfaces[i] + '</option>';
-      }
+      var list = await r.json();
+      for (var i = 0; i < list.length; i++)
+        sel.innerHTML += '<option value="' + list[i] + '">' + list[i] + '</option>';
     } catch(e) {}
   }
-
-  /* TCP 绑定网卡变化时，IP 设置接口跟随 */
-  window.onBindChange = function() {
-    var b = document.getElementById('bind').value;
-    if (b) document.getElementById('ip_if').value = b;
-  };
 
   /* 枚举系统全部 CAN 接口及其 CAN FD 支持情况 */
   async function loadCanIfaces() {
@@ -243,9 +230,7 @@
       document.getElementById('vw').value = cfg.video_width > 0 ? cfg.video_width : '';
       document.getElementById('vh').value = cfg.video_height > 0 ? cfg.video_height : '';
 
-      /* IP 设置：默认跟随 TCP 绑定网卡（未配置时）；保存配置 + 当前运行时地址 */
-      var bindVal = document.getElementById('bind').value;
-      document.getElementById('ip_if').value = cfg.ip_ifname || bindVal || (netIfaces.length ? netIfaces[0] : '');
+      /* IP 设置：IP 即 TCP 绑定网卡的 IP；回填保存配置 + 当前运行时地址 */
       document.getElementById('ip_mode').value = cfg.ip_mode || '';
       document.getElementById('ip_a').value = cfg.ip_addr || '';
       document.getElementById('ip_m').value = cfg.ip_mask || '';
@@ -309,7 +294,7 @@
   /* 提交一个模块的配置（target 指定模块，后端只应用该模块并重启对应模块） */
   async function postConfig(d) {
     try {
-      var r = await fetch('/api/config', {method: 'POST', body: new URLSearchParams(d)});
+      var r = await authFetch('/api/config', {method: 'POST', body: new URLSearchParams(d)});
       show(r.ok ? 'ok' : 'err', r.ok ? '✓ 已保存，模块已重启生效' : '失败(' + r.status + ')');
       if (r.ok) setTimeout(function() { document.getElementById('msg').className = ''; }, 3000);
     } catch(e) { show('err', '请求失败'); }
@@ -335,29 +320,31 @@
     await postConfig(d);
   };
 
-  /* 保存网络设置：TCP 服务参数 + IP 设置（IP 默认针对 TCP 绑定网卡） */
+  /* 保存网络设置：TCP 数据通道参数 + 该网卡的 IP 配置（IP 即 TCP 绑定网卡的 IP） */
   window.saveNet = async function() {
     var mode = document.getElementById('ip_mode').value;
-    var ifn = document.getElementById('ip_if').value;
-    if (!ifn) { show('err', '请选择 IP 设置接口'); return; }
-    if (mode === 'static') {
-      var a = document.getElementById('ip_a').value.trim();
-      var m = document.getElementById('ip_m').value.trim();
-      if (!a || !m) { show('err', '静态模式需要填写 IP 地址与子网掩码'); return; }
-      if (!confirm('将把 ' + ifn + ' 设为静态 IP ' + a + '/' + m
-        + (document.getElementById('ip_g').value ? '，网关 ' + document.getElementById('ip_g').value : '')
-        + '。\n若当前页面通过该网卡访问，连接会断开，请用新 IP 重新访问。')) return;
-    } else if (mode === 'dhcp') {
-      if (!confirm('将把 ' + ifn + ' 切换到 DHCP 自动获取。\nIP 变化后请用新地址重新访问。')) return;
+    var ifn = document.getElementById('bind').value;
+    if (mode !== '') {
+      if (!ifn) { show('err', '配置 IP 需要先选择绑定网卡'); return; }
+      if (mode === 'static') {
+        var a = document.getElementById('ip_a').value.trim();
+        var m = document.getElementById('ip_m').value.trim();
+        if (!a || !m) { show('err', '静态模式需要填写 IP 地址与子网掩码'); return; }
+        if (!confirm('将把 ' + ifn + ' 设为静态 IP ' + a + '/' + m
+          + (document.getElementById('ip_g').value ? '，网关 ' + document.getElementById('ip_g').value : '')
+          + '。\n若当前页面通过该网卡访问，连接会断开，请用新 IP 重新访问。')) return;
+      } else if (mode === 'dhcp') {
+        if (!confirm('将把 ' + ifn + ' 切换到 DHCP 自动获取。\nIP 变化后请用新地址重新访问。')) return;
+      }
     }
     /* 1) TCP 服务参数 */
     await postConfig({
       target: 'net',
       tcp_port: document.getElementById('tp').value,
       max_clients: document.getElementById('mc').value,
-      tcp_bind: document.getElementById('bind').value
+      tcp_bind: ifn
     });
-    /* 2) IP 设置 */
+    /* 2) IP 设置（mode 为空 = 关闭不管理，仍保存字段） */
     await postConfig({
       target: 'ip',
       ip_ifname: ifn,

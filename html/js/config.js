@@ -77,7 +77,7 @@
     var tg = document.getElementById('tg');
     tg.disabled = true;
     try {
-      await fetch('/api/can/toggle', {
+      await authFetch('/api/can/toggle', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'ifname=' + n + '&action=' + (on ? 'up' : 'down')
@@ -97,7 +97,7 @@
     if (!file) { show('err', '请先选择 DBC 文件'); return; }
     var n = curName();
     try {
-      var r = await fetch('/api/can/dbc?ifname=' + n, {
+      var r = await authFetch('/api/can/dbc?ifname=' + n, {
         method: 'POST',
         headers: {'Content-Type': 'application/octet-stream'},
         body: file
@@ -230,6 +230,19 @@
       document.getElementById('vw').value = cfg.video_width > 0 ? cfg.video_width : '';
       document.getElementById('vh').value = cfg.video_height > 0 ? cfg.video_height : '';
 
+      /* IP 设置：保存配置 + 当前运行时地址 */
+      document.getElementById('ip_if').value = cfg.ip_ifname || (netIfaces.length ? netIfaces[0] : '');
+      document.getElementById('ip_mode').value = cfg.ip_mode || '';
+      document.getElementById('ip_a').value = cfg.ip_addr || '';
+      document.getElementById('ip_m').value = cfg.ip_mask || '';
+      document.getElementById('ip_g').value = cfg.ip_gw || '';
+      var cur = '当前 ' + (cfg.ip_cur_if || '') + '  ';
+      cur += cfg.ip_cur_addr ? ('IP ' + cfg.ip_cur_addr) : '无 IP';
+      if (cfg.ip_cur_mask) cur += ' / ' + cfg.ip_cur_mask;
+      if (cfg.ip_cur_gw) cur += ' 网关 ' + cfg.ip_cur_gw;
+      document.getElementById('ip_cur').textContent = cur;
+      chkIpMode();
+
       canNames = Object.keys(cfg.cans || {});
 
       /* 与系统实际枚举的接口合并：枚举接口优先展示，配置中已存在但未枚举到的保留。
@@ -318,6 +331,40 @@
     });
   };
 
+  /* 按 IP 模式显隐静态地址输入行 */
+  window.chkIpMode = function() {
+    var mode = document.getElementById('ip_mode').value;
+    var show = mode === 'static';
+    document.getElementById('ip_a_row').style.display = show ? 'flex' : 'none';
+    document.getElementById('ip_m_row').style.display = show ? 'flex' : 'none';
+    document.getElementById('ip_g_row').style.display = show ? 'flex' : 'none';
+  };
+
+  /* 保存并应用 IP 设置（静态/DHCP/关闭） */
+  window.saveIp = async function() {
+    var mode = document.getElementById('ip_mode').value;
+    var ifn = document.getElementById('ip_if').value;
+    if (!ifn) { show('err', '请选择接口'); return; }
+    if (mode === 'static') {
+      var a = document.getElementById('ip_a').value.trim();
+      var m = document.getElementById('ip_m').value.trim();
+      if (!a || !m) { show('err', '静态模式需要填写 IP 地址与子网掩码'); return; }
+      if (!confirm('将把 ' + ifn + ' 设为静态 IP ' + a + '/' + m
+        + (document.getElementById('ip_g').value ? '，网关 ' + document.getElementById('ip_g').value : '')
+        + '。\n若当前页面通过该网卡访问，连接会断开，请用新 IP 重新访问。')) return;
+    } else if (mode === 'dhcp') {
+      if (!confirm('将把 ' + ifn + ' 切换到 DHCP 自动获取。\nIP 变化后请用新地址重新访问。')) return;
+    }
+    await postConfig({
+      target: 'ip',
+      ip_ifname: ifn,
+      ip_mode: mode,
+      ip_addr: document.getElementById('ip_a').value.trim(),
+      ip_mask: document.getElementById('ip_m').value.trim(),
+      ip_gw: document.getElementById('ip_g').value.trim()
+    });
+  };
+
   /* 保存视频配置并重启视频流 */
   window.saveVideo = async function() {
     await postConfig({
@@ -330,12 +377,12 @@
 
   window.reboot = async function() {
     if (!confirm('确定要重启设备吗？')) return;
-    try { await fetch('/api/reboot'); } catch(e) {}
+    try { await authFetch('/api/reboot'); } catch(e) {}
   };
 
   window.shutdown = async function() {
     if (!confirm('确定要关闭设备吗？')) return;
-    try { await fetch('/api/shutdown'); } catch(e) {}
+    try { await authFetch('/api/shutdown'); } catch(e) {}
   };
 
   /* 先扫描设备列表、CAN 接口与网卡列表，再加载配置 */

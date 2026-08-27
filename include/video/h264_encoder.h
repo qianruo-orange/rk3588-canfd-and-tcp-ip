@@ -16,6 +16,10 @@
 
 typedef struct h264_encoder_s h264_encoder_t;
 
+/* 探测可用的 V4L2 H.264 编码器节点：优先 /dev/video-enc0，其次扫描 /dev/video0..15。
+   返回 0 成功并把节点路径写入 dev（调用方提供缓冲区）。 */
+int h264_encoder_probe(char *dev, size_t dev_size);
+
 /* 创建编码器（open /dev/video-enc0，配置 NV12→H264，设置码率 / 帧率 / GOP）。
    @param w/h          帧宽高（需偶数）
    @param fps          期望帧率（用于设置 GOP 与时间戳换算，不写死）

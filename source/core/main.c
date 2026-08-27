@@ -29,6 +29,7 @@
 #include "video/video_stream.h"
 #include "video/video_rec.h"
 #include "ai/rknn_yolo.h"
+#include "tcp/net_ip.h"
 
 /* 模块生命周期函数 */
 typedef struct {
@@ -250,6 +251,9 @@ int main(void)
     log_init(PATH_LOGS);
     config_load(&cfg);
     log_close(); log_init(cfg.log_dir);
+
+    /* 启动时按配置应用网卡 IP（静态/DHCP）；未配置则跳过 */
+    net_ip_apply_cfg(&cfg);
 
     /* 按 CAN 通道加载 DBC（可选）：失败不阻塞启动，仅记录日志 */
     for (int i = 0; i < cfg.args.can_count; i++) {

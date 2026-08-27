@@ -65,7 +65,7 @@
       }
       logs.forEach(function(f) {
         addRow(tbody, f, '/logfile/', function() {
-          fetch('/logfile/' + encodeURIComponent(f.name), {method: 'DELETE'})
+          authFetch('/logfile/' + encodeURIComponent(f.name), {method: 'DELETE'})
             .then(loadLogs);
         });
       });
@@ -88,8 +88,9 @@
       files.forEach(function(f) {
         addRow(tbody, f, '/recfile/', function() {
           if (!confirm('删除录像 ' + f.name + '？')) return;
-          fetch('/api/rec/delete', {method: 'POST', body: f.name})
-            .then(function(r) { return r.ok ? loadRec() : alert('删除失败'); });
+          authFetch('/api/rec/delete', {method: 'POST', body: f.name})
+            .then(function(r) { return r.ok ? loadRec() : alert('删除失败(' + r.status + ')'); })
+            .catch(function() {});
         });
       });
     } catch(e) {

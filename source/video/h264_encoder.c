@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+add#include <time.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/videodev2.h>
@@ -24,12 +25,78 @@
 
 #include "video/h264_encoder.h"
 #include "core/log.h"
+#include "core/common.h"   /* safe_strncpy */
 
 #define ENC_DEV   "/dev/video-enc0"
 #define ENC_BUFS  3      /* 每队列缓冲数 */
 
 #define V4L2_CID_MPEG_VIDEO_H264_SPS_PPS_BEFORE_IDR \
     0x00980919u  /* Rockchip 扩展 control（V4L2_CID_MPEG_VIDEO_BASE+24） */
+
+/* 编码器创建失败的日志限频：同一错误 10s 内只打一条，
+   避免录制线程 0.5s 重试时无限刷屏 */
+static struct timespec g_last_err_ts = { 0, 0 };
+static int errlog_spam_ok(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long dt_ms = (now.tv_sec - g_last_err_ts.tv_sec) * 1000L +
+                 (now.tv_nsec - g_last_err_ts.tv_nsec) / 1000000L;
+    if (g_last_err_ts.tv_sec == 0 || dt_ms > 10000) {
+        g_last_err_ts = now;
+        return 1;
+    }
+    return 0;
+}
+
+/* 判断某节点是否为 V4L2 M2M 编码器：
+   QUERYCAP 通过（M2M/M2M_MPLANE）且 output 队列支持 NV12（编码器特征，
+   解码器 output 只接受压缩格式） */
+static int node_is_v4l2_encoder(const char *path)
+{
+    int fd = open(path, O_RDWR | O_NONBLOCK, 0);
+    if (fd < 0) return 0;
+
+    struct v4l2_capability cap;
+    int ok = 0;
+    if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0) {
+        uint32_t caps = (cap.capabilities & V4L2_CAP_DEVICE_CAPS)
+                            ? cap.device_caps : cap.capabilities;
+        if (caps & (V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_VIDEO_M2M)) {
+            for (int i = 0; i < 32; i++) {
+                struct v4l2_fmtdesc fdsc;
+                memset(&fdsc, 0, sizeof(fdsc));
+                fdsc.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+                fdsc.index = (uint32_t)i;
+                if (ioctl(fd, VIDIOC_ENUM_FMT, &fdsc) < 0) break;
+                if (fdsc.pixelformat == V4L2_PIX_FMT_NV12 ||
+                    fdsc.pixelformat == V4L2_PIX_FMT_NV12M) { ok = 1; break; }
+            }
+        }
+    }
+    close(fd);
+    return ok;
+}
+
+/* 探测可用的 V4L2 H.264 编码器节点：优先 /dev/video-enc0，其次扫描 /dev/video0..15。
+   返回 0 成功并把节点路径写入 dev（调用方提供缓冲区）。 */
+int h264_encoder_probe(char *dev, size_t dev_size)
+{
+    if (node_is_v4l2_encoder(ENC_DEV)) {
+        safe_strncpy(dev, dev_size, ENC_DEV);
+        return 0;
+    }
+    for (int i = 0; i < 16; i++) {
+        char p[32];
+        snprintf(p, sizeof(p), "/dev/video%d", i);
+        if (node_is_v4l2_encoder(p)) {
+            safe_strncpy(dev, dev_size, p);
+            return 0;
+        }
+    }
+    dev[0] = '\0';
+    return -1;
+}
 
 struct h264_encoder_s {
     int  fd;
@@ -135,16 +202,26 @@ h264_encoder_t *h264_encoder_create(int w, int h, int fps, int bitrate_bps)
     e->fd = -1;
     e->w = w; e->h = h;
 
-    e->fd = open(ENC_DEV, O_RDWR | O_NONBLOCK, 0);
+    char dev_path[64];
+    if (h264_encoder_probe(dev_path, sizeof(dev_path)) != 0) {
+        if (errlog_spam_ok())
+            LOG_ERROR("h264: no V4L2 encoder node (tried %s and /dev/video0-15)", ENC_DEV);
+        free(e);
+        return NULL;
+    }
+
+    e->fd = open(dev_path, O_RDWR | O_NONBLOCK, 0);
     if (e->fd < 0) {
-        LOG_ERROR("h264: open %s failed: %s", ENC_DEV, strerror(errno));
+        if (errlog_spam_ok())
+            LOG_ERROR("h264: open %s failed: %s", dev_path, strerror(errno));
         free(e);
         return NULL;
     }
 
     struct v4l2_capability cap;
     if (ioctl(e->fd, VIDIOC_QUERYCAP, &cap) < 0) {
-        LOG_ERROR("h264: QUERYCAP failed: %s", strerror(errno));
+        if (errlog_spam_ok())
+            LOG_ERROR("h264: QUERYCAP failed on %s: %s", dev_path, strerror(errno));
         goto fail;
     }
     /* Rockchip 编码器固件差异：有的只在 device_caps 报 M2M，有的仅报 M2M 不带 MPLANE，
@@ -153,8 +230,9 @@ h264_encoder_t *h264_encoder_create(int w, int h, int fps, int bitrate_bps)
                         ? cap.device_caps : cap.capabilities;
     if (!(caps & (V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_VIDEO_M2M |
                   V4L2_CAP_VIDEO_OUTPUT_MPLANE | V4L2_CAP_VIDEO_CAPTURE_MPLANE))) {
-        LOG_ERROR("h264: %s not M2M (caps=0x%x device_caps=0x%x)",
-                  ENC_DEV, cap.capabilities, cap.device_caps);
+        if (errlog_spam_ok())
+            LOG_ERROR("h264: %s not M2M (caps=0x%x device_caps=0x%x)",
+                      dev_path, cap.capabilities, cap.device_caps);
         goto fail;
     }
 

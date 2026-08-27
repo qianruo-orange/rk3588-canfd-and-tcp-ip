@@ -2,6 +2,7 @@
 <link rel="stylesheet" href="/css/common.css">
 <link rel="stylesheet" href="/css/config.css">
 <script src="/js/theme.js"></script>
+<script src="/js/auth.js"></script>
 </head><body>
 <div class="top"><h1> 配置</h1><div class="nav"><a href="/">📊 仪表盘</a><a href="/dbc">📡 DBC解析</a><a href="/logs">📁 文件下载</a></div><button type="button" class="btn btn-back" onclick="loadCfg()">🔄 查询</button><button id="themeBtn" class="theme-btn" onclick="toggleTheme()" title="切换主题">🌙 主题</button></div>
 
@@ -25,6 +26,15 @@
 <div class="row"><label>绑定网卡</label><select name="bind" id="bind"><option value="">-- 加载中 --</option></select></div>
 <div class="row"><label>TCP端口</label><input name="tp" id="tp" type="number"></div>
 <div class="row"><label>最大客户端数</label><input name="mc" id="mc" type="number"></div>
+</div>
+
+<div class="card" id="card_ip"><h3>IP 设置 <button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveIp()">💾 保存</button></h3>
+<div class="row"><label>接口</label><select id="ip_if"><option value="">-- 加载中 --</option></select></div>
+<div class="row"><label>模式</label><select id="ip_mode" onchange="chkIpMode()"><option value="">关闭（不管理）</option><option value="static">静态</option><option value="dhcp">DHCP</option></select></div>
+<div class="row" id="ip_a_row"><label>IP 地址</label><input id="ip_a" type="text" placeholder="192.168.1.100"></div>
+<div class="row" id="ip_m_row"><label>子网掩码</label><input id="ip_m" type="text" placeholder="255.255.255.0"></div>
+<div class="row" id="ip_g_row"><label>网关</label><input id="ip_g" type="text" placeholder="192.168.1.1"></div>
+<div class="hint" id="ip_cur">当前未读取</div>
 </div>
 
 <div class="card" id="card_video"><h3>视频 <button type="button" class="btn btn-save" style="margin-left:auto;padding:4px 14px" onclick="saveVideo()">💾 保存</button></h3>

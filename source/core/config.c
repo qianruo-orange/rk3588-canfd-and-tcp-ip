@@ -114,6 +114,11 @@ int config_load(struct app_config_t *cfg)
         } else if (strcmp(key, "tcp_port") == 0) a->tcp_port = parse_int_clamped(val, 1, 65535, 6666);
         else if (strcmp(key, "max_clients") == 0) a->max_clients = parse_int_clamped(val, 1, TCP_MAX_CLIENTS, 16);
         else if (strcmp(key, "tcp_bind") == 0) safe_strncpy(a->tcp_bind, sizeof(a->tcp_bind), val);
+        else if (strcmp(key, "ip_ifname") == 0) safe_strncpy(a->ip_ifname, sizeof(a->ip_ifname), val);
+        else if (strcmp(key, "ip_mode") == 0) safe_strncpy(a->ip_mode, sizeof(a->ip_mode), val);
+        else if (strcmp(key, "ip_addr") == 0) safe_strncpy(a->ip_addr, sizeof(a->ip_addr), val);
+        else if (strcmp(key, "ip_mask") == 0) safe_strncpy(a->ip_mask, sizeof(a->ip_mask), val);
+        else if (strcmp(key, "ip_gw") == 0) safe_strncpy(a->ip_gw, sizeof(a->ip_gw), val);
         else if (strcmp(key, "video_device") == 0) safe_strncpy(cfg->video_device, sizeof(cfg->video_device), val);
         else if (strcmp(key, "video_width") == 0) cfg->video_width = parse_int_clamped(val, 1, 4096, 640);
         else if (strcmp(key, "video_height") == 0) cfg->video_height = parse_int_clamped(val, 1, 4096, 480);
@@ -181,6 +186,12 @@ void config_save(app_ctx_t *app)
     fprintf(fp, "\ntcp_port %d\nmax_clients %d\n", tcp->port, tcp->max_clients);
     if (tcp->bind_ifname[0])
         fprintf(fp, "tcp_bind %s\n", tcp->bind_ifname);
+    fprintf(fp, "\n# --- 网卡 IP ---\n");
+    if (cfg->args.ip_ifname[0]) fprintf(fp, "ip_ifname %s\n", cfg->args.ip_ifname);
+    if (cfg->args.ip_mode[0])   fprintf(fp, "ip_mode %s\n", cfg->args.ip_mode);
+    if (cfg->args.ip_addr[0])   fprintf(fp, "ip_addr %s\n", cfg->args.ip_addr);
+    if (cfg->args.ip_mask[0])   fprintf(fp, "ip_mask %s\n", cfg->args.ip_mask);
+    if (cfg->args.ip_gw[0])     fprintf(fp, "ip_gw %s\n", cfg->args.ip_gw);
     fprintf(fp, "\n# --- 视频 ---\n");
     fprintf(fp, "video_device %s\n", cfg->video_device);
     fprintf(fp, "video_width %d\n", cfg->video_width);

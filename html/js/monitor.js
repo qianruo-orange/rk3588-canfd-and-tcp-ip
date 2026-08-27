@@ -196,6 +196,6 @@
   update();
   setInterval(update, 200);
 
-  window.reboot = function() { if (!confirm('确定要重启设备吗？')) return; fetch('/api/reboot').catch(function(){}); };
-  window.shutdown = function() { if (!confirm('确定要关闭设备吗？')) return; fetch('/api/shutdown').catch(function(){}); };
+  window.reboot = function() { if (!confirm('确定要重启设备吗？')) return; authFetch('/api/reboot').catch(function(){}); };
+  window.shutdown = function() { if (!confirm('确定要关闭设备吗？')) return; authFetch('/api/shutdown').catch(function(){}); };
 })();

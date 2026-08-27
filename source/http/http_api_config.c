@@ -7,6 +7,7 @@
 #include "tcp/tcp_server.h"
 #include "video/video_stream.h"
 #include "watchdog/watchdog.h"
+#include "tcp/net_ip.h"
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <ctype.h>
@@ -39,6 +40,18 @@ void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri
     JSON_ADD(json, off, "},");
 
     JSON_ADD(json, off, "\"tcp_port\":%d,\"max_clients\":%d,\"tcp_bind\":\"%s\"", tcp->port, tcp->max_clients, tcp->bind_ifname);
+
+    /* IP 设置：保存的配置 + 网卡当前运行时地址 */
+    const char *ip_if = cfg->args.ip_ifname[0] ? cfg->args.ip_ifname
+                                                : (tcp->bind_ifname[0] ? tcp->bind_ifname : "eth0");
+    JSON_ADD(json, off, ",\"ip_ifname\":\"%s\",\"ip_mode\":\"%s\",\"ip_addr\":\"%s\",\"ip_mask\":\"%s\",\"ip_gw\":\"%s\"",
+        cfg->args.ip_ifname, cfg->args.ip_mode, cfg->args.ip_addr,
+        cfg->args.ip_mask, cfg->args.ip_gw);
+    char cur_addr[32] = "", cur_mask[32] = "", cur_gw[32] = "";
+    net_ip_get_current(ip_if, cur_addr, sizeof(cur_addr), cur_mask, sizeof(cur_mask), cur_gw, sizeof(cur_gw));
+    JSON_ADD(json, off, ",\"ip_cur_if\":\"%s\",\"ip_cur_addr\":\"%s\",\"ip_cur_mask\":\"%s\",\"ip_cur_gw\":\"%s\"",
+        ip_if, cur_addr, cur_mask, cur_gw);
+
     if (cfg->video_device[0]) JSON_ADD(json, off, ",\"video_device\":\"%s\"", cfg->video_device);
     JSON_ADD(json, off, ",\"video_width\":%d,\"video_height\":%d", cfg->video_width, cfg->video_height);
     JSON_ADD(json, off, "}");
@@ -245,6 +258,52 @@ static int apply_video(app_ctx_t *app, const http_form_field_t *fields, int coun
     return changed;
 }
 
+/* IP 设置：更新网卡静态/DHCP 地址。应用放后台线程延迟 ~300ms，
+   先让 HTTP 响应发出，避免改 IP 切断当前连接导致浏览器收不到结果 */
+static void apply_ip(app_ctx_t *app, const http_form_field_t *fields, int count)
+{
+    struct app_config_t *cfg = app->cfg;
+    app_args_t *a = &cfg->args;
+
+    const char *v = http_form_find(fields, count, "ip_ifname");
+    char ifn[IFNAMSIZ] = "";
+    if (v && v[0]) safe_strncpy(ifn, sizeof(ifn), v);
+    else if (a->ip_ifname[0]) safe_strncpy(ifn, sizeof(ifn), a->ip_ifname);
+    if (!ifn[0]) return;
+
+    char mode[8] = "", addr[32] = "", mask[32] = "", gw[32] = "";
+    v = http_form_find(fields, count, "ip_mode");
+    if (v) safe_strncpy(mode, sizeof(mode), v);
+    else   safe_strncpy(mode, sizeof(mode), a->ip_mode);
+    v = http_form_find(fields, count, "ip_addr");
+    if (v) safe_strncpy(addr, sizeof(addr), v);
+    else   safe_strncpy(addr, sizeof(addr), a->ip_addr);
+    v = http_form_find(fields, count, "ip_mask");
+    if (v) safe_strncpy(mask, sizeof(mask), v);
+    else   safe_strncpy(mask, sizeof(mask), a->ip_mask);
+    v = http_form_find(fields, count, "ip_gw");
+    if (v) safe_strncpy(gw, sizeof(gw), v);
+    else   safe_strncpy(gw, sizeof(gw), a->ip_gw);
+
+    if (strcmp(mode, "static") == 0 && (!addr[0] || !mask[0])) {
+        LOG_ERROR("config: static IP requires address and netmask");
+        return;
+    }
+
+    /* 持久化到运行时 + 配置文件 */
+    safe_strncpy(a->ip_ifname, sizeof(a->ip_ifname), ifn);
+    safe_strncpy(a->ip_mode,   sizeof(a->ip_mode),   mode);
+    safe_strncpy(a->ip_addr,   sizeof(a->ip_addr),   addr);
+    safe_strncpy(a->ip_mask,   sizeof(a->ip_mask),   mask);
+    safe_strncpy(a->ip_gw,     sizeof(a->ip_gw),     gw);
+
+    LOG_INFO("config: IP set %s mode=%s%s%s%s%s", ifn, mode[0] ? mode : "off",
+             addr[0] ? " addr=" : "", addr,
+             mask[0] ? " mask=" : "", mask,
+             gw[0] ? " gw=" : "", gw);
+    net_ip_apply_async(ifn, mode, addr, mask, gw);
+}
+
 void http_config_post(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body)
 {
     (void)method; (void)uri;
@@ -271,6 +330,8 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
         apply_can(app, fields, count);
     if (!target || strcmp(target, "all") == 0 || strcmp(target, "net") == 0)
         apply_net(app, fields, count);
+    if (!target || strcmp(target, "all") == 0 || strcmp(target, "ip") == 0)
+        apply_ip(app, fields, count);
 
     int vid_changed = 0;
     if (!target || strcmp(target, "all") == 0 || strcmp(target, "video") == 0) {

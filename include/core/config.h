@@ -51,6 +51,13 @@ typedef struct {
     int         tcp_port;
     int         max_clients;
     char        tcp_bind[IFNAMSIZ]; /* TCP 监听绑定网卡名（空 = 绑定所有网卡 INADDR_ANY） */
+
+    /* ---- 网卡 IP 设置（配置页 IP 卡片，static/dhcp） ---- */
+    char        ip_ifname[IFNAMSIZ]; /* 管理的网卡（空 = 不管理） */
+    char        ip_mode[8];          /* "static" / "dhcp" / "" */
+    char        ip_addr[32];         /* 静态 IPv4 地址 */
+    char        ip_mask[32];         /* 子网掩码（点分） */
+    char        ip_gw[32];           /* 网关 */
 } app_args_t;
 
 struct app_config_t {

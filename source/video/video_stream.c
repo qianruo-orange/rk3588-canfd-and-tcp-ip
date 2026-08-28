@@ -367,14 +367,22 @@ void *video_stream_task(void *arg)
         }
 
         /* 会话结束（重启/退出/错误）：退让等待锁外解码者释放引用（推理侧
-           锁外解码期间持有 claims），随后摘除全部 mmap 指针，
+           任务在途期间持有 claims），随后摘除全部 mmap 指针，
            STREAMOFF/munmap 才安全 */
         frame_ring_quiesce_begin(&vs->ring);
-        if (frame_ring_quiesce_wait(&vs->ring, 1000) != 0)
+        int q_timeout = frame_ring_quiesce_wait(&vs->ring, 1000) != 0;
+        if (q_timeout)
             LOG_ERROR("video_stream: ring quiesce timeout (claims not drained)");
 
         close(epfd);
         deinit_video_device(vs);
+        /* 超时兜底：STREAMOFF/munmap 后 claim 持有者只剩推理 worker（读的是
+           job rgb 而非 mmap），通常随即写槽摘除 claim——再等一次；仍不归零
+           （推理线程卡死）则强制清空槽，迟到写槽/摘除走防御分支无副作用 */
+        if (q_timeout && frame_ring_quiesce_wait(&vs->ring, 1000) != 0) {
+            LOG_ERROR("video_stream: quiesce retry timeout, force clearing slots");
+            frame_ring_quiesce_force_clear(&vs->ring);
+        }
         __atomic_store_n(&vs->restart_req, 0, __ATOMIC_RELEASE);
     }
 
@@ -453,6 +461,13 @@ unsigned long long video_stream_get_frame_seq(void)
     unsigned long long seq = vs->ring.produce_seq;
     frame_ring_unlock(&vs->ring);
     return seq;
+}
+
+/* 环形队列句柄：AI/录像消费方直接操作槽位（零拷贝路径），模块未初始化返回 NULL */
+frame_ring_t *video_stream_get_ring(void)
+{
+    video_ctx_t *vs = g_ctx;
+    return vs ? &vs->ring : NULL;
 }
 
 /* 运行时重启视频流（切换设备/分辨率，不重启进程） */

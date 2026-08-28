@@ -29,6 +29,11 @@ int video_stream_get_frame(unsigned char **out, size_t *out_len, int *fmt,
    （720p MJPEG ~100-200KB）后因序号未变而丢弃 */
 unsigned long long video_stream_get_frame_seq(void);
 
+/* 视频帧环形队列句柄（供 AI 推理/录像消费方直接访问槽位，见 video/frame_ring.h）；
+   模块未初始化返回 NULL */
+struct frame_ring;
+struct frame_ring *video_stream_get_ring(void);
+
 /* 启动一个 MJPEG 推流线程（每个 HTTP 连接一个，detached）；成功返回 0。
    on_close 在推流线程退出时回调，由调用方负责关闭 fd 与释放资源 */
 typedef void (*video_stream_client_close_cb)(int fd);

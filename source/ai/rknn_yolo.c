@@ -2,27 +2,34 @@
  * rknn_yolo.c — RKNN + YOLO26 检测主模块：模型管理 + 多线程推理池 + 按序渲染。
  *
  * 数据流（ai_task 采集线程 + 3 的倍数个推理 worker + 1 渲染 composer）：
- *   ai_task:  video_stream_get_frame → 解码 RGB24 → 投递任务队列（seq 去重）
+ *   ai_task:  事件驱动等新帧（环条件变量，2s 超时仅用于退出检查）→ 按序
+ *             claim 槽 raw（零拷贝引用 V4L2 mmap）→ 锁外解码 RGB24 进池缓冲 →
+ *             投递任务队列。claim 随任务移交 worker：任务在途期间槽位被
+ *             claims 钉住，不会被采集复用/退让清空
  *   worker i: 出队 → 双线性缩放 → NPU 推理（独立 context，绑定 NPU 核 i%3）→
- *             单输出后处理 → 提交到按 seq 索引的完成槽
- *   composer: 最新结果优先消费完成槽（seq 严格递增，绝不回退；旧结果释放）→
- *             EMA 时间平滑 → OpenCV 画框 JPEG（含标签）+ 同步 NV12 转换 →
- *             更新帧快照（JPEG 供 /video/mjpeg_ai 推流，NV12 供录像编码复用）；
- *             渲染节拍 ~30fps，与推流速率匹配并锁定渲染/编码 CPU
+ *             单输出后处理 → 结果与 rgb 一起写槽（rgb_done=1）→ unclaim
+ *   composer: 最新结果优先消费槽（seq 严格递增，绝不回退；旧结果回池）→
+ *             EMA 时间平滑 → 槽内 rgb 原地画框 → JPEG（含标签）+ NV12 写槽
+ *             （display_done=1，display_seq 推进）；渲染节拍 ~30fps
  *
- * 渲染 seq 单调不回退，画面不会抖动/闪烁；被跳过的旧结果直接释放。
+ * 帧数据全部走视频帧环形队列（video/frame_ring.h）：采集 raw（V4L2 mmap）、
+ * 解码 rgb、画框 nv12/jpeg 四个阶段缓冲只在槽位间移动指针，零拷贝。
+ * 推流/录像消费方锁内拷贝或窃取最新显示槽（rknn_yolo_get_frame*），
+ * 快照缓冲与按 seq 索引的完成槽（AI_SLOT_N）已随环接入删除。
+ *
+ * 渲染 seq 单调不回退，画面不会抖动/闪烁；被跳过的旧结果直接回池。
  * 推流客户端在 AI 可用时只推标注帧，画面不再在标注帧/原始帧之间闪烁。
  *
- * 热重载：rknn_yolo_reload() 停止推理池（pool_running=0 → 线程退出/join）→
- * 释放模型与 context → 重读配置（ai_enable/ai_model/ai_names/ai_threads/
- * ai_conf/ai_nms/ai_interval_ms）→ 重建池。由前端上传模型/标签文件与
- * AI 参数保存触发。
+ * 热重载：rknn_yolo_reload() 停止推理池（pool_running=0 → 线程退出/join，
+ * 在途任务 rgb 回池 + 摘除槽 claim）→ 释放模型与 context → 重读配置
+ * （ai_enable/ai_model/ai_names/ai_threads/ai_conf/ai_nms/ai_interval_ms）
+ * → 重建池。由前端上传模型/标签文件与 AI 参数保存触发。
  *
  * 优雅降级：无模型 / NPU 驱动未加载 / 推理失败 → enabled=0，原视频流照常，
  * 画框流客户端回退到原始帧。所有失败路径只记日志不崩溃。
  *
  * 图像处理与后处理已拆分为独立模块（yolo_image / yolo_postprocess / yolo_draw），
- * 本文件仅保留：模型生命周期、推理线程池、任务队列、重排槽、快照与对外 API。
+ * 本文件仅保留：模型生命周期、推理线程池、任务队列、环形队列槽消费、快照与对外 API。
  */
 
 #define _GNU_SOURCE
@@ -48,38 +55,19 @@
 #include "core/config.h"
 #include "watchdog/watchdog.h"
 #include "video/video_stream.h"
+#include "video/frame_ring.h"
 
 #define AI_MAX_WORKERS 15    /* 推理工作线程上限（3 的倍数 3~15，每核 1~5 个） */
 #define AI_QUEUE_CAP   4     /* 任务队列容量（帧），与 worker 数共同约束在途帧内存 */
-#define AI_SLOT_N      32    /* 完成槽数量（2 的幂；>= 队列 4 + 在途 worker 15） */
 
-/* 与 ai/rknn_yolo.h 的解耦：画框帧快照类型在此定义（须在 g_ai 之前） */
-typedef struct {
-    unsigned char    *data;        /* 画框 JPEG（推流客户端按需拷贝） */
-    size_t            len;
-    size_t            cap;         /* data 分配容量（退役进 spare 复用时记录） */
-    unsigned char    *nv12;        /* 渲染时同步转换的 NV12（录像编码链路零拷贝取用） */
-    size_t            nv12_len;
-    unsigned long long seq;
-    int               w, h;
-} yolo_frame_t;
-
-/* 推理任务：解码后的 RGB 帧（由消费它的 worker 释放） */
+/* 推理任务：解码后的 RGB 帧（池内缓冲，由消费它的 worker 写槽/回池）。
+   槽 claim 随任务移交：ai_task claim 后不摘除，worker 写槽时一并 unclaim */
 typedef struct {
     unsigned char    *rgb;
+    size_t            rgb_cap;
     int               w, h;
     unsigned long long seq;
 } yolo_job_t;
-
-/* 完成槽：worker 提交推理结果与帧所有权（rgb 由 composer 消费释放），
-   按 seq & (AI_SLOT_N-1) 索引，供 composer 按 seq 顺序重排 */
-typedef struct {
-    int               valid;
-    unsigned long long seq;
-    yolo_result_t     res;
-    unsigned char    *rgb;
-    int               w, h;
-} yolo_slot_t;
 
 /* 单个推理工作线程：独立 rknn context，可与其它线程并行 run */
 typedef struct {
@@ -114,12 +102,8 @@ static struct {
     pthread_t       render_tid;
     int             n_created;               /* 实际创建成功的 worker 线程数（停池据此 join） */
 
-    /* 完成槽（worker 提交 → composer 按序消费） */
-    yolo_slot_t     slots[AI_SLOT_N];
-    pthread_mutex_t slot_mutex;
-    pthread_cond_t  slot_cond;
-
-    long long       next_seq;                /* 渲染游标：下一个待渲染 seq（-1 = 未初始化） */
+    unsigned long long next_seq;             /* 渲染游标：下一个待渲染 seq（环 seq 单调，0 起步，
+                                               跨 reload 保留不重复渲染） */
 
     /* EMA 平滑状态（仅 composer 线程访问） */
     yolo_result_t   prev;
@@ -128,30 +112,42 @@ static struct {
     yolo_classes_t  classes;
     char            names_path[256];
 
-    unsigned long long last_seq;             /* 采集去重 */
+    unsigned long long last_seq;             /* 采集游标：最近已解码/消费的帧 seq */
 
     /* 快照：composer 按序写入，仅当新 seq 大于当前时更新 */
     pthread_mutex_t result_mutex;
     yolo_result_t   result;
-    pthread_mutex_t frame_mutex;
-    yolo_frame_t   *frame;
-
-    /* NV12 缓冲复用池（仅 composer 线程访问）：替换快照时回收未被录像线程
-       取走的旧 NV12 缓冲，下一帧转换直接复用，消除每帧 w*h*3/2 malloc/free
-       （1080p 30fps ≈ 90MB/s 堆churn）。被录像线程取走所有权的缓冲由其释放，
-       不进池，无跨线程复用风险 */
-    unsigned char  *nv12_spare;
-    size_t          nv12_spare_len;
-
-    /* JPEG 编码缓冲复用池（仅 composer 线程访问）：替换快照时把旧 JPEG 缓冲
-       退役进 spare，下一帧编码直接复用（yolo_rgb_to_jpeg_reuse realloc 增长），
-       消除每帧 ~100-200KB malloc/free（该尺寸常走 mmap，30fps 下开销明显）。
-       与 nv12_spare 同模式：缓冲从未跨线程共享，无并发风险 */
-    unsigned char  *jpeg_spare;
-    size_t          jpeg_spare_cap;
 } g_ai;
 
 static pthread_mutex_t g_reload_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* ---- 环形队列访问 ---- */
+
+/* 环句柄：video 模块先于 ai 初始化，正常非 NULL；防御性判空由调用方处理 */
+static frame_ring_t *ai_ring(void)
+{
+    return video_stream_get_ring();
+}
+
+static frame_slot_t *ai_slot(frame_ring_t *r, unsigned long long seq)
+{
+    return &r->slots[seq & (FRAME_RING_N - 1)];
+}
+
+/* 任务作废（停池/推理失败/队列拒绝）：摘除槽 claim（raw 恢复可释放）
+   并把 rgb 归还池。解码已成功，作废不计 infer_dropped */
+static void yolo_job_abandon(const yolo_job_t *job)
+{
+    frame_ring_t *ring = ai_ring();
+    if (!ring) return;
+    frame_ring_lock(ring);
+    frame_slot_t *s = ai_slot(ring, job->seq);
+    if (s->seq == job->seq && s->raw_claims > 0)
+        frame_ring_infer_unclaim_locked(ring, s, 1);
+    if (job->rgb)
+        frame_ring_buf_put_locked(ring, FRAME_RING_POOL_RGB, job->rgb, job->rgb_cap);
+    frame_ring_unlock(ring);
+}
 
 /* ---- 任务队列 ---- */
 
@@ -241,11 +237,14 @@ static void *yolo_worker_task(void *arg)
     int idx = (int)(intptr_t)arg;
     cpu_bind_big();
     yolo_worker_t *wk = &g_ai.workers[idx];
+    frame_ring_t *ring = ai_ring();
 
     while (g_ai.running && g_ai.pool_running) {
+        if (!ring) { usleep(200000); continue; }   /* 防御：video 未初始化 */
+
         yolo_job_t job;
         if (yolo_queue_pop(&job) < 0) break;      /* 停池/退出且队列空 */
-        if (!g_ai.running || !g_ai.pool_running) { free(job.rgb); break; }
+        if (!g_ai.running || !g_ai.pool_running) { yolo_job_abandon(&job); break; }
 
         yolo_rgb_resize_fast(job.rgb, job.w, job.h, wk->in_buf, g_ai.in_w, g_ai.in_h);
 
@@ -256,13 +255,16 @@ static void *yolo_worker_task(void *arg)
         in.fmt   = RKNN_TENSOR_NHWC;
         in.size  = (uint32_t)(g_ai.in_w * g_ai.in_h * 3);
         in.buf   = wk->in_buf;
-        if (rknn_inputs_set(wk->ctx, 1, &in) != RKNN_SUCC) { free(job.rgb); continue; }
-        if (rknn_run(wk->ctx, NULL) != RKNN_SUCC) { free(job.rgb); continue; }
+        if (rknn_inputs_set(wk->ctx, 1, &in) != RKNN_SUCC) { yolo_job_abandon(&job); continue; }
+        if (rknn_run(wk->ctx, NULL) != RKNN_SUCC) { yolo_job_abandon(&job); continue; }
 
         rknn_output output;
         memset(&output, 0, sizeof(output));
         output.want_float = 1;
-        if (rknn_outputs_get(wk->ctx, 1, &output, NULL) != RKNN_SUCC) { free(job.rgb); continue; }
+        if (rknn_outputs_get(wk->ctx, 1, &output, NULL) != RKNN_SUCC) {
+            yolo_job_abandon(&job);
+            continue;
+        }
 
         const float *out_buf[1] = { (const float *)output.buf };
         yolo_result_t res;
@@ -275,24 +277,27 @@ static void *yolo_worker_task(void *arg)
                                      res.dets, YOLO_MAX_DETS, g_ai.conf, g_ai.nms, NULL);
         rknn_outputs_release(wk->ctx, 1, &output);
 
-        /* 提交到完成槽：rgb 所有权移交 composer；槽满（同余旧帧未消费）则等待 */
-        int s = (int)(job.seq & (AI_SLOT_N - 1));
-        pthread_mutex_lock(&g_ai.slot_mutex);
-        while (g_ai.slots[s].valid && g_ai.running && g_ai.pool_running)
-            pthread_cond_wait(&g_ai.slot_cond, &g_ai.slot_mutex);
-        if (!g_ai.running || !g_ai.pool_running) {
-            pthread_mutex_unlock(&g_ai.slot_mutex);
-            free(job.rgb);
-            break;
+        /* 停池竞态：推理期间 pool_running 被清 → 作废任务（不写槽，
+           避免停池后槽内滞留 rgb 阻碍该槽复用） */
+        if (!g_ai.running || !g_ai.pool_running) { yolo_job_abandon(&job); continue; }
+
+        /* 结果与 rgb 一起写槽（claim 钉住槽位：任务在途期间不会被复用/清空，
+           故 s->seq == job.seq 必然成立；防御分支防退让强制清空的迟到写） */
+        frame_ring_lock(ring);
+        frame_slot_t *s = ai_slot(ring, job.seq);
+        if (s->seq == job.seq && s->raw_claims > 0) {
+            s->rgb.buf  = job.rgb;
+            s->rgb.cap  = job.rgb_cap;
+            s->rgb.len  = (size_t)job.w * job.h * 3;
+            s->rgb_done = 1;
+            s->res      = res;
+            frame_ring_infer_unclaim_locked(ring, s, 1);
+        } else {
+            frame_ring_buf_put_locked(ring, FRAME_RING_POOL_RGB, job.rgb, job.rgb_cap);
+            if (s->seq == job.seq && s->raw_claims > 0)
+                frame_ring_infer_unclaim_locked(ring, s, 1);
         }
-        g_ai.slots[s].valid = 1;
-        g_ai.slots[s].seq   = job.seq;
-        g_ai.slots[s].res   = res;
-        g_ai.slots[s].rgb   = job.rgb;
-        g_ai.slots[s].w     = job.w;
-        g_ai.slots[s].h     = job.h;
-        pthread_cond_signal(&g_ai.slot_cond);
-        pthread_mutex_unlock(&g_ai.slot_mutex);
+        frame_ring_unlock(ring);
     }
     return NULL;
 }
@@ -300,8 +305,8 @@ static void *yolo_worker_task(void *arg)
 /* ---- 渲染 composer：最新结果优先（seq 单调不回退）+ ~30fps 渲染节拍 ----
 
    严格按 seq 顺序消费会因 worker 乱序完成而等待缺口（实测卡顿 100~700ms）。
-   改为消费最新完成结果：渲染 seq 严格递增（绝不回退，画面不抖动），
-   被跳过的旧结果直接释放；EMA 平滑本身即可容忍帧间小跳跃。
+   改为消费最新完成槽：渲染 seq 严格递增（绝不回退，画面不抖动），
+   被跳过的旧结果直接回池；EMA 平滑本身即可容忍帧间小跳跃。
    渲染节拍与推流/显示速率匹配（~30fps），同时把 OpenCV 渲染 + JPEG 编码 +
    NV12 转换的 CPU 锁定在上限内。 */
 
@@ -309,126 +314,66 @@ static void *yolo_render_task(void *arg)
 {
     (void)arg;
     cpu_bind_big();
+    frame_ring_t *ring = ai_ring();
     struct timespec last_render = { 0, 0 };
     while (g_ai.running && g_ai.pool_running) {
+        if (!ring) { usleep(200000); continue; }   /* 防御：video 未初始化 */
+
+        /* 事件驱动：等新 rgb_done 槽（40ms 超时仅用于退出检查） */
+        if (!frame_ring_wait_render(ring, g_ai.next_seq, 40)) continue;
+
         yolo_result_t res;
-        unsigned char *rgb = NULL;
         int w = 0, h = 0;
+        unsigned long long picked_seq = 0;
+        ring_buf_t nv12b = { 0 }, jpegb = { 0 };
+        frame_ring_lock(ring);
+        frame_slot_t *s = frame_ring_display_pick_locked(ring, g_ai.next_seq);
+        if (!s) { frame_ring_unlock(ring); continue; }
+        picked_seq = s->seq;
+        res = s->res;
+        w = s->w; h = s->h;
+        /* 渲染输出缓冲：池内 NV12（供录像窃取）与 JPEG（供推流拷贝）。
+           s->rgb 由 rgb_done && seq > display_seq 钉住，锁外渲染期间无人释放 */
+        frame_ring_buf_take_locked(ring, FRAME_RING_POOL_NV12, (size_t)w * h * 3 / 2, &nv12b);
+        frame_ring_buf_take_locked(ring, FRAME_RING_POOL_JPEG, 64 * 1024, &jpegb);
+        g_ai.next_seq = picked_seq;
+        frame_ring_unlock(ring);
 
-        pthread_mutex_lock(&g_ai.slot_mutex);
-        for (;;) {
-            /* 选槽：有效槽中取 seq > next_seq 的最新者（MAX seq）；
-               游标未初始化时取最小 seq 起步 */
-            int pick = -1;
-            unsigned long long sel = 0;
-            int found = 0;
-            for (int s = 0; s < AI_SLOT_N; s++) {
-                if (!g_ai.slots[s].valid) continue;
-                if (g_ai.next_seq < 0) {
-                    if (!found || g_ai.slots[s].seq < sel) { sel = g_ai.slots[s].seq; pick = s; found = 1; }
-                } else if ((long long)g_ai.slots[s].seq > g_ai.next_seq) {
-                    if (!found || g_ai.slots[s].seq > sel) { sel = g_ai.slots[s].seq; pick = s; found = 1; }
-                }
-            }
-            if (found) {
-                yolo_slot_t *sl = &g_ai.slots[pick];
-                res = sl->res;
-                rgb = sl->rgb; sl->rgb = NULL;
-                w = sl->w; h = sl->h;
-                g_ai.next_seq = (long long)sl->seq;
-                /* 释放所有 ≤ 已选 seq 的旧槽（不会被渲染），解除对应 worker 的槽等待 */
-                for (int s = 0; s < AI_SLOT_N; s++) {
-                    if (g_ai.slots[s].valid && (long long)g_ai.slots[s].seq <= g_ai.next_seq) {
-                        free(g_ai.slots[s].rgb);
-                        g_ai.slots[s].rgb = NULL;
-                        g_ai.slots[s].valid = 0;
-                    }
-                }
-                sl->valid = 0;
-                pthread_cond_broadcast(&g_ai.slot_cond);
-                break;
-            }
-            /* 无更新结果：等待 40ms；超时且所有有效槽都落后于游标 → 视为
-               seq 回绕（相机重启），重置游标重新起步 */
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_nsec += 40 * 1000000;
-            if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
-            int rc = 0;
-            while (g_ai.running && g_ai.pool_running && rc == 0)
-                rc = pthread_cond_timedwait(&g_ai.slot_cond, &g_ai.slot_mutex, &ts);
-            if (!g_ai.running || !g_ai.pool_running) {
-                pthread_mutex_unlock(&g_ai.slot_mutex);
-                goto out;
-            }
-            if (rc == ETIMEDOUT && g_ai.next_seq >= 0) {
-                unsigned long long mx = 0;
-                int any = 0;
-                for (int s = 0; s < AI_SLOT_N; s++) {
-                    if (g_ai.slots[s].valid &&
-                        (!any || g_ai.slots[s].seq > mx)) { mx = g_ai.slots[s].seq; any = 1; }
-                }
-                if (any && (unsigned long long)g_ai.next_seq - mx > 1000)
-                    g_ai.next_seq = -1;
-            }
-        }
-        pthread_mutex_unlock(&g_ai.slot_mutex);
-
-        /* 渲染：EMA 平滑（prev 仅本线程访问）+ OpenCV 画框标签 → JPEG + NV12 双快照 */
+        /* 锁外渲染：EMA 平滑（prev 仅本线程访问）+ 槽内 rgb 原地画框标签 */
         yolo_result_t disp = res;
         yolo_smooth(&g_ai.prev, &disp);
-
-        /* JPEG 编码缓冲：优先复用 spare（上一帧替换时退役的旧快照缓冲，
-           编码器 realloc 增长） */
-        unsigned char *jpeg = g_ai.jpeg_spare;
-        size_t jcap = g_ai.jpeg_spare_cap;
-        g_ai.jpeg_spare = NULL;
-        g_ai.jpeg_spare_cap = 0;
-        size_t jlen = 0;
-        if (yolo_render_annotated(rgb, w, h, &disp, &g_ai.classes,
-                                  &jpeg, &jcap, &jlen) == 0) {
-            /* NV12 目标缓冲：优先复用 spare（上一帧替换时回收） */
-            size_t nv12_len = (size_t)w * h * 3 / 2;
-            unsigned char *nv12 = NULL;
-            if (g_ai.nv12_spare && g_ai.nv12_spare_len >= nv12_len) {
-                nv12 = g_ai.nv12_spare;
-                g_ai.nv12_spare = NULL;
-            } else {
-                free(g_ai.nv12_spare);
-                g_ai.nv12_spare = NULL;
-                nv12 = malloc(nv12_len);
-            }
-            if (nv12) yolo_rgb_to_nv12_fast(rgb, w, h, nv12);
+        unsigned char *jbuf = jpegb.buf;
+        size_t jcap = jpegb.cap, jlen = 0;
+        int ok = (jbuf && nv12b.buf &&
+                  yolo_render_annotated(s->rgb.buf, w, h, &disp, &g_ai.classes,
+                                        &jbuf, &jcap, &jlen) == 0);
+        jpegb.buf = jbuf; jpegb.cap = jcap;   /* realloc 可能更换指针 */
+        if (ok) {
+            yolo_rgb_to_nv12_fast(s->rgb.buf, w, h, nv12b.buf);
+            jpegb.len = jlen;
             g_ai.prev = disp;
             snap_result(&disp);
-            pthread_mutex_lock(&g_ai.frame_mutex);
-            if (!g_ai.frame) g_ai.frame = calloc(1, sizeof(*g_ai.frame));
-            if (g_ai.frame) {
-                /* 旧 JPEG 所有权一直在快照（客户端只拷贝）：退役进 spare 供
-                   下一帧编码复用（spare 空槽 = 本帧编码前刚取走）；旧 NV12
-                   若未被录像线程取走则回收进 spare，结构体本身原地复用 */
-                free(g_ai.jpeg_spare);
-                g_ai.jpeg_spare = g_ai.frame->data;
-                g_ai.jpeg_spare_cap = g_ai.frame->cap;
-                if (g_ai.frame->nv12) {
-                    free(g_ai.nv12_spare);
-                    g_ai.nv12_spare = g_ai.frame->nv12;
-                    g_ai.nv12_spare_len = g_ai.frame->nv12_len;
-                }
-                g_ai.frame->data = jpeg; jpeg = NULL;   /* 所有权移交快照 */
-                g_ai.frame->cap  = jcap;
-                g_ai.frame->len  = jlen;
-                g_ai.frame->nv12 = nv12; nv12 = NULL;
-                g_ai.frame->nv12_len = nv12_len;
-                g_ai.frame->seq  = disp.seq;
-                g_ai.frame->w    = w;
-                g_ai.frame->h    = h;
-            }
-            pthread_mutex_unlock(&g_ai.frame_mutex);
-            free(nv12);
         }
-        free(jpeg);   /* 编码失败/快照 calloc 失败时释放本次取走的缓冲 */
-        free(rgb);
+
+        frame_ring_lock(ring);
+        /* 槽可能已被退让清空（相机重启）：校验 seq 后提交，否则缓冲回池 */
+        if (s->seq == picked_seq && s->rgb_done && s->rgb.buf) {
+            if (ok) {
+                s->nv12     = nv12b;
+                s->nv12.len = (size_t)w * h * 3 / 2;
+                s->jpeg     = jpegb;
+            } else {
+                /* 渲染失败（编码 OOM 等）：仍推进 display（释放 rgb 防槽卡死），
+                   推流/录像客户端随 get_frame 失败回退原始帧 */
+                frame_ring_buf_put_locked(ring, FRAME_RING_POOL_NV12, nv12b.buf, nv12b.cap);
+                frame_ring_buf_put_locked(ring, FRAME_RING_POOL_JPEG, jpegb.buf, jpegb.cap);
+            }
+            frame_ring_display_commit_locked(ring, s);
+        } else {
+            frame_ring_buf_put_locked(ring, FRAME_RING_POOL_NV12, nv12b.buf, nv12b.cap);
+            frame_ring_buf_put_locked(ring, FRAME_RING_POOL_JPEG, jpegb.buf, jpegb.cap);
+        }
+        frame_ring_unlock(ring);
 
         /* 渲染节拍 ~30fps：超出部分在下一次渲染前补眠，平滑帧间隔 */
         struct timespec now;
@@ -441,7 +386,6 @@ static void *yolo_render_task(void *arg)
         }
         clock_gettime(CLOCK_MONOTONIC, &last_render);
     }
-out:
     return NULL;
 }
 
@@ -510,15 +454,22 @@ static void ai_free_workers(void)
     g_ai.model = NULL;
 }
 
-/* 停止推理池：置 pool_running=0 → 唤醒各线程 → join → 清理队列/槽/快照/模型。
-   可安全重入（池未启动时 n_created=0，各清理为幂等操作） */
+/* 停止推理池：置 pool_running=0 → 唤醒各线程 → join → 清理队列/模型。
+   可安全重入（池未启动时 n_created=0，各清理为幂等操作）。
+   在途任务：worker 推理中检出停池后作废（rgb 回池 + 摘除 claim），
+   队列残余任务由本函数统一作废 */
 static void ai_stop_pool(void)
 {
+    frame_ring_t *ring = ai_ring();
     g_ai.pool_running = 0;
-    /* 唤醒可能阻塞在队列/槽上的采集线程、工作线程与渲染线程 */
+    /* raw 释放规则切回编码路径（ai_active=0），并唤醒等待中的
+       ai_task（wait_new）与 composer（wait_render） */
+    if (ring) {
+        frame_ring_set_ai_active(ring, 0);
+        frame_ring_signal(ring);
+    }
     pthread_cond_broadcast(&g_ai.q_not_empty);
     pthread_cond_broadcast(&g_ai.q_not_full);
-    pthread_cond_broadcast(&g_ai.slot_cond);
 
     for (int i = 0; i < g_ai.n_created; i++)
         pthread_join(g_ai.w_tid[i], NULL);
@@ -530,36 +481,19 @@ static void ai_stop_pool(void)
 
     /* 释放队列中未被消费的任务（已消费槽位 rgb 已置 NULL） */
     for (int i = 0; i < AI_QUEUE_CAP; i++) {
-        if (g_ai.jobs[i].rgb) { free(g_ai.jobs[i].rgb); g_ai.jobs[i].rgb = NULL; }
+        if (g_ai.jobs[i].rgb) {
+            yolo_job_t job = g_ai.jobs[i];
+            g_ai.jobs[i].rgb = NULL;
+            yolo_job_abandon(&job);
+        }
     }
     g_ai.q_head = g_ai.q_tail = g_ai.q_count = 0;
 
-    /* 释放未被 composer 消费的槽内存 */
-    for (int s = 0; s < AI_SLOT_N; s++) {
-        if (g_ai.slots[s].rgb) { free(g_ai.slots[s].rgb); g_ai.slots[s].rgb = NULL; }
-        g_ai.slots[s].valid = 0;
-    }
-
-    /* 清空快照与渲染状态（新池从干净状态开始） */
-    pthread_mutex_lock(&g_ai.frame_mutex);
-    if (g_ai.frame) {
-        free(g_ai.frame->data);
-        free(g_ai.frame->nv12);   /* 录像线程可能已取走（置 NULL），双重释放安全 */
-        free(g_ai.frame);
-        g_ai.frame = NULL;
-    }
-    pthread_mutex_unlock(&g_ai.frame_mutex);
-    free(g_ai.nv12_spare);        /* 渲染线程已 join，spare 无并发访问 */
-    g_ai.nv12_spare = NULL;
-    g_ai.nv12_spare_len = 0;
-    free(g_ai.jpeg_spare);
-    g_ai.jpeg_spare = NULL;
-    g_ai.jpeg_spare_cap = 0;
+    /* 清空快照与渲染状态（新池从干净状态开始；next_seq 保留跨 reload 连续） */
     pthread_mutex_lock(&g_ai.result_mutex);
     memset(&g_ai.result, 0, sizeof(g_ai.result));
     pthread_mutex_unlock(&g_ai.result_mutex);
     memset(&g_ai.prev, 0, sizeof(g_ai.prev));
-    g_ai.next_seq = -1;
     g_ai.last_seq = 0;
 
     ai_free_workers();
@@ -672,6 +606,8 @@ static void ai_start_pool(void)
         g_ai.render_tid = 0;
     }
     g_ai.enabled = 1;
+    /* 环内 raw 释放规则切回推理路径（infer_done 门槛） */
+    if (ai_ring()) frame_ring_set_ai_active(ai_ring(), 1);
     LOG_INFO("ai: model '%s' loaded, classes '%s' (%d), input %dx%d, "
              "single output, threads %d (NPU core i%%3), conf %.2f nms %.2f",
              model_path, g_ai.names_path, ncls, g_ai.in_w, g_ai.in_h,
@@ -699,14 +635,10 @@ int rknn_yolo_init(void *arg)
     app_ctx_t *app = (app_ctx_t *)arg;
     g_ai.app = app;
     g_ai.running = 1;
-    g_ai.next_seq = -1;
     pthread_mutex_init(&g_ai.result_mutex, NULL);
-    pthread_mutex_init(&g_ai.frame_mutex, NULL);
     pthread_mutex_init(&g_ai.q_lock, NULL);
-    pthread_mutex_init(&g_ai.slot_mutex, NULL);
     pthread_cond_init(&g_ai.q_not_empty, NULL);
     pthread_cond_init(&g_ai.q_not_full, NULL);
-    pthread_cond_init(&g_ai.slot_cond, NULL);
 
     if (!app || !app->cfg) {
         LOG_ERROR("ai: init without config");
@@ -723,12 +655,9 @@ void rknn_yolo_destroy(void *arg)
     ai_stop_pool();
 
     pthread_mutex_destroy(&g_ai.q_lock);
-    pthread_mutex_destroy(&g_ai.slot_mutex);
     pthread_cond_destroy(&g_ai.q_not_empty);
     pthread_cond_destroy(&g_ai.q_not_full);
-    pthread_cond_destroy(&g_ai.slot_cond);
     pthread_mutex_destroy(&g_ai.result_mutex);
-    pthread_mutex_destroy(&g_ai.frame_mutex);
     g_ai.enabled = 0;
 }
 
@@ -737,7 +666,7 @@ int rknn_yolo_enabled(void)
     return g_ai.enabled;
 }
 
-/* ---- 快照访问（供推流客户端）---- */
+/* ---- 显示槽快照访问（供推流客户端/录像线程）---- */
 
 int rknn_yolo_get(yolo_result_t *out)
 {
@@ -751,20 +680,23 @@ int rknn_yolo_get(yolo_result_t *out)
 int rknn_yolo_get_frame(unsigned char **data, size_t *len, unsigned long long *seq)
 {
     if (!g_ai.enabled || !data || !len || !seq) return -1;
-    pthread_mutex_lock(&g_ai.frame_mutex);
-    if (!g_ai.frame || g_ai.frame->len == 0) {
-        pthread_mutex_unlock(&g_ai.frame_mutex);
+    frame_ring_t *ring = ai_ring();
+    if (!ring) return -1;
+    frame_ring_lock(ring);
+    frame_slot_t *s = ai_slot(ring, ring->display_seq);
+    if (s->seq != ring->display_seq || !s->jpeg.buf || s->jpeg.len == 0) {
+        frame_ring_unlock(ring);
         return -1;
     }
-    unsigned char *c = malloc(g_ai.frame->len);
+    unsigned char *c = malloc(s->jpeg.len);
     if (!c) {
-        pthread_mutex_unlock(&g_ai.frame_mutex);
+        frame_ring_unlock(ring);
         return -1;
     }
-    memcpy(c, g_ai.frame->data, g_ai.frame->len);
-    *len = g_ai.frame->len;
-    *seq = g_ai.frame->seq;
-    pthread_mutex_unlock(&g_ai.frame_mutex);
+    memcpy(c, s->jpeg.buf, s->jpeg.len);
+    *len = s->jpeg.len;
+    *seq = s->seq;
+    frame_ring_unlock(ring);
     *data = c;
     return 0;
 }
@@ -772,9 +704,11 @@ int rknn_yolo_get_frame(unsigned char **data, size_t *len, unsigned long long *s
 unsigned long long rknn_yolo_get_frame_seq(void)
 {
     if (!g_ai.enabled) return 0;
-    pthread_mutex_lock(&g_ai.frame_mutex);
-    unsigned long long s = g_ai.frame ? g_ai.frame->seq : 0;
-    pthread_mutex_unlock(&g_ai.frame_mutex);
+    frame_ring_t *ring = ai_ring();
+    if (!ring) return 0;
+    frame_ring_lock(ring);
+    unsigned long long s = ring->display_seq;
+    frame_ring_unlock(ring);
     return s;
 }
 
@@ -782,82 +716,94 @@ int rknn_yolo_get_frame_nv12(unsigned char **data, size_t *len,
                              unsigned long long *seq, int *w, int *h)
 {
     if (!g_ai.enabled || !data || !len || !seq) return -1;
-    pthread_mutex_lock(&g_ai.frame_mutex);
-    if (!g_ai.frame || !g_ai.frame->nv12 || g_ai.frame->nv12_len == 0) {
-        pthread_mutex_unlock(&g_ai.frame_mutex);
+    frame_ring_t *ring = ai_ring();
+    if (!ring) return -1;
+    frame_ring_lock(ring);
+    frame_slot_t *s = ai_slot(ring, ring->display_seq);
+    if (s->seq != ring->display_seq || !s->nv12.buf || s->nv12.len == 0) {
+        frame_ring_unlock(ring);
         return -1;
     }
-    /* 所有权移交（单消费者：录像编码线程），免去每帧 3MB 拷贝 */
-    *data = g_ai.frame->nv12;
-    g_ai.frame->nv12 = NULL;
-    *len = g_ai.frame->nv12_len;
-    *seq = g_ai.frame->seq;
-    if (w) *w = g_ai.frame->w;
-    if (h) *h = g_ai.frame->h;
-    pthread_mutex_unlock(&g_ai.frame_mutex);
+    /* 所有权移交（单消费者：录像编码线程）：槽内指针摘除，免每帧 3MB 拷贝。
+       缓冲为池内 malloc 内存，free 合法（第 4 阶段改为用毕回池） */
+    *data = s->nv12.buf;
+    *len  = s->nv12.len;
+    *seq  = s->seq;
+    if (w) *w = s->w;
+    if (h) *h = s->h;
+    s->nv12.buf = NULL;
+    s->nv12.len = s->nv12.cap = 0;
+    frame_ring_unlock(ring);
     return 0;
 }
 
-/* ---- AI 采集线程（main 模块框架 task）：取帧 → 解码 → 投递队列 ---- */
+/* ---- AI 采集线程（main 模块框架 task）：等新帧 → claim → 解码 → 投递队列 ---- */
 void *rknn_ai_task(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;
     if (!app) return NULL;
 
     cpu_bind_big();
+    frame_ring_t *ring = ai_ring();
 
     while (app->running && g_ai.running) {
         watchdog_feed_self("ai");
 
-        /* 未启用 / 池未运行（重载中）：空转喂狗，不占推理资源。
+        /* 未启用 / 池未运行（重载中）/ video 未初始化：空转喂狗，不占推理资源。
            重载后 enabled 恢复时自动继续采集 */
-        if (!g_ai.enabled || !g_ai.pool_running) { usleep(200000); continue; }
+        if (!ring || !g_ai.enabled || !g_ai.pool_running) { usleep(200000); continue; }
 
-        /* 先无拷贝窥探帧序号：10ms 轮询大多时刻无新帧（30fps 相机约 70% 轮询
-           落空），直接跳过整帧 malloc+memcpy（720p MJPEG ~100-200KB/次） */
-        unsigned long long seq = video_stream_get_frame_seq();
-        if (seq == 0 || seq == g_ai.last_seq) {
-            usleep(g_ai.interval_ms * 1000);
-            continue;
-        }
+        /* 事件驱动：阻塞等新帧（2s 超时仅用于周期性检查退出/热插拔），
+           替代旧版 10ms 轮询，唤醒即处理、无帧即休眠 */
+        if (!frame_ring_wait_new(ring, g_ai.last_seq, 2000)) continue;
 
-        unsigned char *raw = NULL;
-        size_t raw_len = 0;
-        int fmt = 0, w = 0, h = 0;
-        if (video_stream_get_frame(&raw, &raw_len, &fmt, &w, &h, &seq) != 0) {
-            usleep(g_ai.interval_ms * 1000);
-            continue;
+        /* 按序 claim 下一个未处理帧的 raw（与旧轮询版语义一致：每帧都解码，
+           队列背压即限速）。槽已被编码回退消费/退让清空时顺延跳过。
+           claim 随任务移交 worker（写槽时 unclaim），任务在途期间槽位
+           被 claims 钉住，不会被采集复用，raw 也不会被释放 */
+        frame_ring_lock(ring);
+        frame_slot_t *s = NULL;
+        while (g_ai.last_seq < ring->produce_seq) {
+            s = frame_ring_infer_claim_locked(ring, g_ai.last_seq + 1);
+            if (s) break;
+            g_ai.last_seq++;
         }
-        /* 窥探与拷贝间隙恰有新帧发布时，返回帧可能新于返回的 seq：
-           拷贝后仍按 seq 去重，防止同一帧被重复解码 */
-        if (seq == g_ai.last_seq || raw_len == 0 || w <= 0 || h <= 0) {
-            free(raw);
-            usleep(g_ai.interval_ms * 1000);
-            continue;
+        if (!s) { frame_ring_unlock(ring); continue; }
+        unsigned long long seq = s->seq;
+        int fmt = s->fmt, w = s->w, h = s->h;
+        unsigned char *raw = s->raw.buf;
+        size_t raw_len = s->raw.len;
+        /* 解码目标：池内 RGB（job 持有，worker 写槽时移交槽） */
+        ring_buf_t rgbb;
+        frame_ring_buf_take_locked(ring, FRAME_RING_POOL_RGB, (size_t)w * h * 3, &rgbb);
+        frame_ring_unlock(ring);
+
+        /* 锁外解码：槽 raw 由 claim 保护（零拷贝读 mmap，不再整帧拷贝） */
+        int decode_ok = 0;
+        if (raw && rgbb.buf && w > 0 && h > 0) {
+            if (fmt == FRAME_RING_FMT_MJPEG)
+                decode_ok = yolo_jpeg_to_rgb_buf(raw, raw_len, rgbb.buf, w, h) == 0;
+            else   /* YUYV */
+                { yolo_yuyv_to_rgb(raw, w, h, rgbb.buf); decode_ok = 1; }
         }
         g_ai.last_seq = seq;
-
-        unsigned char *rgb = NULL;
-        int rw = 0, rh = 0;
-        if (fmt == RKNN_FMT_MJPEG) {
-            if (yolo_jpeg_to_rgb(raw, raw_len, &rgb, &rw, &rh) != 0) {
-                free(raw);
-                usleep(g_ai.interval_ms * 1000);   /* 坏帧退避，避免忙转 */
-                continue;
-            }
-        } else {   /* YUYV */
-            rgb = malloc((size_t)w * h * 3);
-            if (rgb) { yolo_yuyv_to_rgb(raw, w, h, rgb); rw = w; rh = h; }
-        }
-        free(raw);
-        if (!rgb) {
-            usleep(g_ai.interval_ms * 1000);
+        if (!decode_ok) {
+            frame_ring_lock(ring);
+            if (rgbb.buf)
+                frame_ring_buf_put_locked(ring, FRAME_RING_POOL_RGB, rgbb.buf, rgbb.cap);
+            frame_ring_infer_unclaim_locked(ring, s, 0);   /* 解码失败：infer_dropped++ */
+            frame_ring_unlock(ring);
+            usleep(g_ai.interval_ms * 1000);   /* 坏帧退避，避免忙转 */
             continue;
         }
 
-        yolo_job_t job = { .rgb = rgb, .w = rw, .h = rh, .seq = seq };
-        if (yolo_queue_push(&job) != 0) free(rgb);   /* 停池/退出中：释放 */
+        yolo_job_t job = { .rgb = rgbb.buf, .rgb_cap = rgbb.cap,
+                           .w = w, .h = h, .seq = seq };
+        if (yolo_queue_push(&job) != 0)
+            yolo_job_abandon(&job);   /* 停池/退出中：claim 摘除 + rgb 回池 */
 
+        /* 帧间隔下限（ai_interval_ms 语义）：事件驱动下默认 10ms 无感，
+           调大即可限制推理帧率，不再与相机帧率耦合 */
         usleep(g_ai.interval_ms * 1000);
     }
     return NULL;

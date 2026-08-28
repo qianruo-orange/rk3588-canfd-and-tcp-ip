@@ -47,6 +47,35 @@ int yolo_jpeg_to_rgb(const unsigned char *jpeg, size_t jpeg_len,
     return 0;
 }
 
+int yolo_jpeg_to_rgb_buf(const unsigned char *jpeg, size_t jpeg_len,
+                        unsigned char *dst, int w, int h)
+{
+    struct jpeg_decompress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_decompress(&cinfo);
+    jpeg_mem_src(&cinfo, (unsigned char *)jpeg, jpeg_len);
+    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+        jpeg_destroy_decompress(&cinfo);
+        return -1;
+    }
+    cinfo.out_color_space = JCS_RGB;
+    jpeg_start_decompress(&cinfo);
+    if ((int)cinfo.output_width != w || (int)cinfo.output_height != h) {
+        jpeg_destroy_decompress(&cinfo);
+        return -1;   /* 尺寸不符：调用方缓冲不可用（坏帧/参数变更过渡期） */
+    }
+    /* 行指针直接指向调用方缓冲：免去行缓冲 malloc 与每行 w*3 的 memcpy */
+    while (cinfo.output_scanline < cinfo.output_height) {
+        unsigned int y = cinfo.output_scanline;
+        JSAMPROW row_ptr = dst + (size_t)y * w * 3;
+        if (jpeg_read_scanlines(&cinfo, &row_ptr, 1) != 1) break;
+    }
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    return 0;
+}
+
 /* 自定义 JPEG 输出管理器：写入调用方提供的缓冲，容量不足时 realloc 增长。
    渲染热路径（30fps）复用上一帧退役的 JPEG 缓冲，消除每帧 ~100-200KB
    malloc/free（该尺寸常走 mmap/munmap，syscall 与页表开销明显）。 */

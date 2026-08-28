@@ -12,6 +12,12 @@
 int yolo_jpeg_to_rgb(const unsigned char *jpeg, size_t jpeg_len,
                      unsigned char **rgb_out, int *w_out, int *h_out);
 
+/* JPEG → RGB24（解码进调用方缓冲，dst 需 w*h*3 字节；实际尺寸与 w/h 不符
+   返回 -1）。零拷贝解码路径：ai_task 把采集帧直接解码进环形队列池缓冲，
+   免去中间 malloc + 整帧 memcpy */
+int yolo_jpeg_to_rgb_buf(const unsigned char *jpeg, size_t jpeg_len,
+                        unsigned char *dst, int w, int h);
+
 /* RGB24 → JPEG（malloc 输出）；成功返回 0，调用方 free *out。
    热路径请用 yolo_rgb_to_jpeg_reuse 复用缓冲 */
 int yolo_rgb_to_jpeg(const unsigned char *rgb, int w, int h,

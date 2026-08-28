@@ -12,8 +12,9 @@
  * 32 个槽位描述符 + 四阶段指针（raw/rgb/nv12/jpeg）。各阶段只移动缓冲指针，
  * 缓冲本身在阶段间传递、游标越过后回池复用：
  *   采集(video worker)  V4L2 mmap 指针直接入槽，延迟 QBUF（真正零拷贝）
- *   推理(ai_task)       claims++ 后锁外解码槽内 raw → 池内 rgb 写入槽
- *   推理(worker)        resize 读槽内 rgb，结果写槽 res，置 rgb_done
+ *   推理(ai_task)       claims++ 后锁外解码槽内 raw → 池内 rgb（job 持有）；
+ *                       claim 随任务移交 worker（任务在途期间槽位被钉住不可复用）
+ *   推理(worker)        resize 读 job rgb，结果与 rgb 一起写槽，置 rgb_done，unclaim
  *   显示(composer)      最新 rgb_done 槽原地画框 → nv12/jpeg 写槽，置 display_done
  *   编码(rec)           窃取槽内 nv12（所有权转移），置 encode_done；AI 停摆/停用时
  *                       锁内拷贝最新 raw（回退），同样置 encode_done
@@ -25,7 +26,8 @@
  *          (ai_active&&!infer_stalled ? infer_done : encode_done||!rec_active)
  *   rgb  → 池：seq <= 最新已渲染 seq（含被跳过的槽）
  *   jpeg → 池：seq != 最新已渲染 seq
- *   nv12 → 池：encode_done || !rec_active（rec 激活时保留最新显示槽）
+ *   nv12 → 池：seq != display_seq 且（encode_done || !rec_active）；
+ *             当前显示槽 nv12 始终钉住供 rec 窃取（显示推进后按本规则回收）
  *
  * 并发：单一互斥锁 + 条件变量。锁内：标志/指针交接/池/客户端拷贝（~百 µs）、
  * QBUF 回调（ioctl ~µs）；锁外：JPEG 解码、NPU 推理、渲染、H.264 编码。
@@ -67,7 +69,7 @@ typedef struct {
     int raw_present;          /* 槽内持有 raw（采集已写入、尚未释放） */
     int raw_is_mmap;          /* raw 指向 V4L2 mmap：释放走回调 QBUF，不能 free */
     int raw_vbuf_index;       /* mmap 时对应的驱动缓冲索引（释放回调参数） */
-    int raw_claims;           /* 锁外读 raw 的引用计数（解码中/退让期间） */
+    int raw_claims;           /* 锁外引用 raw 的计数（ai_task 解码至 worker 写槽全程/退让期间） */
 
     /* ---- 推理阶段 ---- */
     ring_buf_t rgb;           /* JPEG/YUYV 解码 RGB24（池内缓冲） */
@@ -84,7 +86,7 @@ typedef struct {
     int encode_done;          /* rec 已消费（窃取/回退拷贝/尺寸不符跳过） */
 } frame_slot_t;
 
-typedef struct {
+typedef struct frame_ring {
     frame_slot_t slots[FRAME_RING_N];
     unsigned long long produce_seq;   /* 最新已发布 seq（0 = 尚无帧） */
     unsigned long long display_seq;   /* 最新已渲染 seq（钉住最新显示帧，维护规则用） */
@@ -190,6 +192,10 @@ void frame_ring_quiesce_begin(frame_ring_t *r);
    非 mmap raw free，阶段缓冲回池），复位完成标志，解除 quiescing。
    成功 0，超时 -1（调用方记 ERROR 后仍须执行 STREAMOFF/munmap） */
 int frame_ring_quiesce_wait(frame_ring_t *r, int timeout_ms);
+/* 超时兜底：mmap 已 unmap 后 claims 仍不归零（推理线程卡死）时强制清空槽并
+   解除 quiescing。迟到写槽因 seq 不匹配走调用方防御分支（rgb 回池），
+   迟到 unclaim 有计数守卫，均无副作用 */
+void frame_ring_quiesce_force_clear(frame_ring_t *r);
 
 /* ---- 诊断 ---- */
 void frame_ring_stats(frame_ring_t *r, frame_ring_stats_t *out);

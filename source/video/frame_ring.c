@@ -120,7 +120,7 @@ static void release_raw_locked(frame_ring_t *r, frame_slot_t *s)
  *        消费完成（AI 激活时等 infer_done；AI 停用/停摆时等编码消费或录像未激活）
  *   rgb  worker 结果入槽后，seq 已越过最新渲染即回池（含跳帧与迟到 worker）
  *   jpeg 最新显示帧钉住（推流客户端锁内拷贝），其余回池
- *   nv12 录像未激活全部回池；激活时保留最新显示帧待 rec 消费 */
+ *   nv12 当前显示帧钉住（rec 窃取目标），其余 encode_done 或录像未激活即回池 */
 static void frame_ring_maintain_locked(frame_ring_t *r)
 {
     for (int i = 0; i < FRAME_RING_N; i++) {
@@ -143,8 +143,8 @@ static void frame_ring_maintain_locked(frame_ring_t *r)
             s->jpeg.buf = NULL;
             s->jpeg.len = s->jpeg.cap = 0;
         }
-        if (s->nv12.buf && (s->encode_done || !r->rec_active) &&
-            (s->seq != r->display_seq || !r->rec_active)) {
+        if (s->nv12.buf && s->seq != r->display_seq &&
+            (s->encode_done || !r->rec_active)) {
             frame_ring_buf_put_locked(r, FRAME_RING_POOL_NV12, s->nv12.buf, s->nv12.cap);
             s->nv12.buf = NULL;
             s->nv12.len = s->nv12.cap = 0;
@@ -358,6 +358,22 @@ void frame_ring_quiesce_begin(frame_ring_t *r)
     frame_ring_unlock(r);
 }
 
+/* 清空槽：mmap 指针直接摘除（STREAMOFF 后驱动自收，不能 QBUF），
+   非 mmap raw 释放，阶段缓冲回池。seq 保持单调不重置（须持锁） */
+static void quiesce_clear_all_locked(frame_ring_t *r)
+{
+    for (int i = 0; i < FRAME_RING_N; i++) {
+        frame_slot_t *s = &r->slots[i];
+        if (s->raw_present && !s->raw_is_mmap) free(s->raw.buf);
+        if (s->rgb.buf)  frame_ring_buf_put_locked(r, FRAME_RING_POOL_RGB,  s->rgb.buf,  s->rgb.cap);
+        if (s->nv12.buf) frame_ring_buf_put_locked(r, FRAME_RING_POOL_NV12, s->nv12.buf, s->nv12.cap);
+        if (s->jpeg.buf) frame_ring_buf_put_locked(r, FRAME_RING_POOL_JPEG, s->jpeg.buf, s->jpeg.cap);
+        memset(s, 0, sizeof(*s));
+    }
+    r->quiescing = 0;
+    pthread_cond_broadcast(&r->cond);
+}
+
 int frame_ring_quiesce_wait(frame_ring_t *r, int timeout_ms)
 {
     struct timespec ts;
@@ -373,20 +389,16 @@ int frame_ring_quiesce_wait(frame_ring_t *r, int timeout_ms)
             return -1;   /* 超时：调用方记 ERROR 后仍须执行 STREAMOFF/munmap */
         }
     }
-    /* 清空槽：mmap 指针直接摘除（STREAMOFF 后驱动自收，不能 QBUF），
-       非 mmap raw 释放，阶段缓冲回池。seq 保持单调不重置 */
-    for (int i = 0; i < FRAME_RING_N; i++) {
-        frame_slot_t *s = &r->slots[i];
-        if (s->raw_present && !s->raw_is_mmap) free(s->raw.buf);
-        if (s->rgb.buf)  frame_ring_buf_put_locked(r, FRAME_RING_POOL_RGB,  s->rgb.buf,  s->rgb.cap);
-        if (s->nv12.buf) frame_ring_buf_put_locked(r, FRAME_RING_POOL_NV12, s->nv12.buf, s->nv12.cap);
-        if (s->jpeg.buf) frame_ring_buf_put_locked(r, FRAME_RING_POOL_JPEG, s->jpeg.buf, s->jpeg.cap);
-        memset(s, 0, sizeof(*s));
-    }
-    r->quiescing = 0;
-    pthread_cond_broadcast(&r->cond);
+    quiesce_clear_all_locked(r);
     frame_ring_unlock(r);
     return 0;
+}
+
+void frame_ring_quiesce_force_clear(frame_ring_t *r)
+{
+    frame_ring_lock(r);
+    quiesce_clear_all_locked(r);
+    frame_ring_unlock(r);
 }
 
 /* ---- 诊断 ---- */

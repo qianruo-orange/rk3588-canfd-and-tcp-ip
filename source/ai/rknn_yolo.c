@@ -335,7 +335,10 @@ static void *yolo_worker_task(void *arg)
         if (yolo_queue_pop(&job) < 0) break;      /* 停池/退出且队列空 */
         if (!g_ai.running || !g_ai.pool_running) { yolo_job_abandon(&job); break; }
 
-        yolo_rgb_resize_fast(job.rgb, job.w, job.h, wk->in_buf, g_ai.in_w, g_ai.in_h);
+        /* letterbox+padding 预处理（等比例 + 114 灰边）；几何参数供后处理逆映射 */
+        float lb_scale; int lb_pad_x, lb_pad_y;
+        yolo_rgb_letterbox(job.rgb, job.w, job.h, wk->in_buf, g_ai.in_w, g_ai.in_h,
+                           &lb_scale, &lb_pad_x, &lb_pad_y);
 
         rknn_input in;
         memset(&in, 0, sizeof(in));
@@ -362,7 +365,7 @@ static void *yolo_worker_task(void *arg)
         res.w   = job.w;
         res.h   = job.h;
         res.count = yolo_postprocess(out_buf, &wk->out_attr, 1,
-                                     g_ai.in_w, g_ai.in_h, job.w, job.h,
+                                     lb_scale, lb_pad_x, lb_pad_y, job.w, job.h,
                                      res.dets, YOLO_MAX_DETS, g_ai.conf, g_ai.nms, NULL);
         rknn_outputs_release(wk->ctx, 1, &output);
 

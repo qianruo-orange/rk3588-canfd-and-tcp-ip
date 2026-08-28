@@ -195,7 +195,7 @@ rk3588-edge-gateway/
 │   ├── ai/
 │   │   ├── rknn_yolo.h               # RKNN YOLO 框架入口
 │   │   ├── yolo_types.h              # 检测结果结构定义
-│   │   ├── yolo_image.h              # 图像处理接口（JPEG / YUYV / 缩放）
+│   │   ├── yolo_image.h              # 图像处理接口（JPEG / YUYV / letterbox）
 │   │   ├── yolo_postprocess.h        # 单输出后处理接口
 │   │   ├── yolo_draw.h               # 画框接口
 │   │   └── rknn_api.h                # RKNN 运行时头文件（rknn-toolkit2 提供）
@@ -234,8 +234,8 @@ rk3588-edge-gateway/
 │   │   └── rec_mp4.c                 # MP4(avc1) 封装器实现
 │   ├── ai/
 │   │   ├── rknn_yolo.c               # 模型加载 + 多线程推理池 + 事件驱动取环槽 + 结果队列（NMS 结果）+ 渲染 composer
-│   │   ├── yolo_image.c              # 图像处理实现（libjpeg / 格式转换 / 缩放）
-│   │   ├── yolo_postprocess.c        # YOLO26 单输出后处理（框已解码，阈值 + NMS）
+│   │   ├── yolo_image.c              # 图像处理实现（libjpeg / 格式转换 / letterbox+padding）
+│   │   ├── yolo_postprocess.c        # YOLO26 单输出后处理（框已解码，阈值 + NMS，letterbox 逆映射）
 │   │   └── yolo_draw.cpp             # 画框实现（OpenCV cv::rectangle / cv::putText）
 │   └── watchdog/
 │       └── watchdog.c                # 看门狗实现

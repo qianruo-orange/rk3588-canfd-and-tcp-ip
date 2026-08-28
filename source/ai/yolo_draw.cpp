@@ -89,15 +89,28 @@ void yolo_draw_box(unsigned char *rgb, int w, int h,
     cv::rectangle(img, cv::Point(x1, y1), cv::Point(x2, y2), col, 3, cv::LINE_AA);
 }
 
-/* ---- OpenCV SIMD 缩放：推理预处理热路径（替代浮点逐像素实现） ---- */
+/* ---- OpenCV SIMD letterbox：推理预处理热路径（等比例 + 114 灰边，替代拉伸缩放） ---- */
 
-void yolo_rgb_resize_fast(const unsigned char *src, int sw, int sh,
-                          unsigned char *dst, int dw, int dh)
+void yolo_rgb_letterbox(const unsigned char *src, int sw, int sh,
+                        unsigned char *dst, int dw, int dh,
+                        float *scale_out, int *pad_x_out, int *pad_y_out)
 {
-    /* 逐通道双线性，通道顺序无关；NEON 加速 */
-    cv::Mat s(sh, sw, CV_8UC3, (void *)src);
-    cv::Mat d(dh, dw, CV_8UC3, dst);
-    cv::resize(s, d, cv::Size(dw, dh), 0, 0, cv::INTER_LINEAR);
+    /* 等比例缩放并取整，scale 用实际尺寸比（与画布几何一致，逆映射才精确） */
+    float s = (float)dw / sw < (float)dh / sh ? (float)dw / sw : (float)dh / sh;
+    int nw = (int)(sw * s + 0.5f), nh = (int)(sh * s + 0.5f);
+    if (nw < 1) nw = 1;
+    if (nh < 1) nh = 1;
+    int px = (dw - nw) / 2, py = (dh - nh) / 2;
+    if (scale_out) *scale_out = (float)nw / (float)sw;
+    if (pad_x_out) *pad_x_out = px;
+    if (pad_y_out) *pad_y_out = py;
+
+    /* 整画布填灰边，内容 resize 进居中 ROI（NEON 加速，逐通道无关） */
+    cv::Mat canvas(dh, dw, CV_8UC3, dst);
+    canvas.setTo(cv::Scalar(114, 114, 114));
+    cv::Mat s_(sh, sw, CV_8UC3, (void *)src);
+    cv::Mat roi = canvas(cv::Rect(px, py, nw, nh));
+    cv::resize(s_, roi, cv::Size(nw, nh), 0, 0, cv::INTER_LINEAR);
 }
 
 /* ---- OpenCV SIMD NV12 转换：录像编码链路热路径 ---- */
@@ -158,7 +171,7 @@ static void yolo_draw_label(cv::Mat &img, int x1, int y1,
     }
     if (lx < 0) lx = 0;
     if (ly + bh > h) ly = h - bh;
-    if (ly < 0) { ly = 0; bh = h; }
+    if (ly < 0) ly = 0;                 /* 仅钳位位置，保持文本高度（bug：曾设 bh=h 画全高红条） */
 
     /* 实色填充底块 + 白色粗体字（putText 原点即首字符基线） */
     cv::rectangle(img, cv::Rect(lx, ly, bw, bh), col, cv::FILLED);

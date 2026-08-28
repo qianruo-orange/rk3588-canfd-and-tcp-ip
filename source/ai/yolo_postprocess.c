@@ -5,6 +5,7 @@
  * 模型输出 (1, 4+nc, A) NCHW 或 (1, A, 4+nc) NHWC，A 为全部锚点数（640 输入时 8400）：
  *   框通道已是像素坐标 cx,cy,w,h（模型内完成解码），
  *   分数通道已 sigmoid，板端只需阈值过滤 + 类别内 NMS。
+ * 预处理为 letterbox+padding，输出框按 (x - pad) / scale 逆映射回原图坐标。
  * 纯函数，线程安全。
  */
 
@@ -15,6 +16,17 @@
 
 /* NCHW 快速路径的逐锚点临时缓冲容量（覆盖 640 输入的 8400 锚点） */
 #define YOLO_MAX_ANCHORS 16384
+
+/* 超大框抑制：检测框面积超过画面 85% 视为整幅误检（典型：摄像头正对
+   监视器时模型把整个画面识别成 "monitor"），不进 NMS 与结果队列 */
+#define YOLO_MAX_BOX_AREA_RATIO 0.85f
+
+static int yolo_box_oversize(float x1, float y1, float x2, float y2,
+                             int frame_w, int frame_h)
+{
+    return (x2 - x1) * (y2 - y1)
+           > YOLO_MAX_BOX_AREA_RATIO * (float)frame_w * (float)frame_h;
+}
 
 /* 解析单输出扁平格式：dims 中应恰好有两个 >1 的维度（batch 维为 1），
    较小者为通道数 ch（4+nc），较大者为锚点数 A。
@@ -90,7 +102,8 @@ static int yolo_nms_finish(float *cand, int ncand, yolo_det_t *dets,
 }
 
 int yolo_postprocess(const float *const *out_buf, const rknn_tensor_attr *attrs,
-                     uint32_t n_output, int in_w, int in_h,
+                     uint32_t n_output,
+                     float lb_scale, int lb_pad_x, int lb_pad_y,
                      int frame_w, int frame_h,
                      yolo_det_t *dets, int max_dets,
                      float conf, float nms, int *nc_out)
@@ -99,8 +112,17 @@ int yolo_postprocess(const float *const *out_buf, const rknn_tensor_attr *attrs,
         if (nc_out) *nc_out = 0;
         return 0;   /* 模型不匹配：上层已记录日志 */
     }
-    float sx = (float)frame_w / (float)in_w;
-    float sy = (float)frame_h / (float)in_h;
+    /* letterbox 逆映射：模型坐标 → 原图坐标（x = (x_m - pad) / scale）。
+       lb_scale ≤ 0 视为无效几何（防御）：直接按原值输出 */
+    float sx, sy, ox, oy;
+    if (lb_scale > 0.0f) {
+        sx = 1.0f / lb_scale;
+        sy = sx;                                /* letterbox 等比例：sx == sy */
+        ox = -(float)lb_pad_x * sx;
+        oy = -(float)lb_pad_y * sy;
+    } else {
+        sx = sy = 1.0f; ox = oy = 0.0f;
+    }
     /* 候选上限即数组容量：YOLO_MAX_DETS（勿用 sizeof(cand)/6，那是字节数） */
     float cand[YOLO_MAX_DETS * 6];   /* x1,y1,x2,y2,score,cls */
     int cand_cap = YOLO_MAX_DETS;
@@ -135,10 +157,15 @@ int yolo_postprocess(const float *const *out_buf, const rknn_tensor_attr *attrs,
                 if (bests < conf) continue;
                 float cx = buf[(size_t)0 * A + a_i], cy = buf[(size_t)1 * A + a_i];
                 float bw = buf[(size_t)2 * A + a_i], bh = buf[(size_t)3 * A + a_i];
-                cand[ncand * 6 + 0] = (cx - bw * 0.5f) * sx;
-                cand[ncand * 6 + 1] = (cy - bh * 0.5f) * sy;
-                cand[ncand * 6 + 2] = (cx + bw * 0.5f) * sx;
-                cand[ncand * 6 + 3] = (cy + bh * 0.5f) * sy;
+                float bx1 = (cx - bw * 0.5f) * sx + ox;
+                float by1 = (cy - bh * 0.5f) * sy + oy;
+                float bx2 = (cx + bw * 0.5f) * sx + ox;
+                float by2 = (cy + bh * 0.5f) * sy + oy;
+                if (yolo_box_oversize(bx1, by1, bx2, by2, frame_w, frame_h)) continue;
+                cand[ncand * 6 + 0] = bx1;
+                cand[ncand * 6 + 1] = by1;
+                cand[ncand * 6 + 2] = bx2;
+                cand[ncand * 6 + 3] = by2;
                 cand[ncand * 6 + 4] = bests;
                 cand[ncand * 6 + 5] = (float)bi;
                 ncand++;
@@ -157,10 +184,15 @@ int yolo_postprocess(const float *const *out_buf, const rknn_tensor_attr *attrs,
             if (best[a_i] < conf) continue;
             float cx = buf[(size_t)0 * A + a_i], cy = buf[(size_t)1 * A + a_i];
             float bw = buf[(size_t)2 * A + a_i], bh = buf[(size_t)3 * A + a_i];
-            cand[ncand * 6 + 0] = (cx - bw * 0.5f) * sx;
-            cand[ncand * 6 + 1] = (cy - bh * 0.5f) * sy;
-            cand[ncand * 6 + 2] = (cx + bw * 0.5f) * sx;
-            cand[ncand * 6 + 3] = (cy + bh * 0.5f) * sy;
+            float bx1 = (cx - bw * 0.5f) * sx + ox;
+            float by1 = (cy - bh * 0.5f) * sy + oy;
+            float bx2 = (cx + bw * 0.5f) * sx + ox;
+            float by2 = (cy + bh * 0.5f) * sy + oy;
+            if (yolo_box_oversize(bx1, by1, bx2, by2, frame_w, frame_h)) continue;
+            cand[ncand * 6 + 0] = bx1;
+            cand[ncand * 6 + 1] = by1;
+            cand[ncand * 6 + 2] = bx2;
+            cand[ncand * 6 + 3] = by2;
             cand[ncand * 6 + 4] = best[a_i];
             cand[ncand * 6 + 5] = (float)bestc[a_i];
             ncand++;
@@ -180,10 +212,15 @@ int yolo_postprocess(const float *const *out_buf, const rknn_tensor_attr *attrs,
         }
         if (bests < conf) continue;
         float cx = row[0], cy = row[1], bw = row[2], bh = row[3];
-        cand[ncand * 6 + 0] = (cx - bw * 0.5f) * sx;
-        cand[ncand * 6 + 1] = (cy - bh * 0.5f) * sy;
-        cand[ncand * 6 + 2] = (cx + bw * 0.5f) * sx;
-        cand[ncand * 6 + 3] = (cy + bh * 0.5f) * sy;
+        float bx1 = (cx - bw * 0.5f) * sx + ox;
+        float by1 = (cy - bh * 0.5f) * sy + oy;
+        float bx2 = (cx + bw * 0.5f) * sx + ox;
+        float by2 = (cy + bh * 0.5f) * sy + oy;
+        if (yolo_box_oversize(bx1, by1, bx2, by2, frame_w, frame_h)) continue;
+        cand[ncand * 6 + 0] = bx1;
+        cand[ncand * 6 + 1] = by1;
+        cand[ncand * 6 + 2] = bx2;
+        cand[ncand * 6 + 3] = by2;
         cand[ncand * 6 + 4] = bests;
         cand[ncand * 6 + 5] = (float)bi;
         ncand++;

@@ -37,10 +37,12 @@ void yolo_yuyv_to_rgb(const unsigned char *src, int w, int h, unsigned char *dst
    dst 需 w*h*3/2 字节。供录像硬件编码链路复用画框帧，免去二次 JPEG 解码 */
 void yolo_rgb_to_nv12(const unsigned char *rgb, int w, int h, unsigned char *nv12);
 
-/* RGB24 双线性缩放（OpenCV SIMD 实现，cv::resize INTER_LINEAR，NEON 加速）。
-   用于 1080p→640 等大图缩小热路径（推理预处理）。 */
-void yolo_rgb_resize_fast(const unsigned char *src, int sw, int sh,
-                          unsigned char *dst, int dw, int dh);
+/* RGB24 letterbox+padding（OpenCV SIMD）：等比例缩放到 dw×dh 内后居中，
+   四周填 114 灰边（ultralytics 训练惯例）。输出实际缩放系数与左上偏移，
+   供后处理把模型坐标逆映射回原图坐标系（x = (x_m - pad) / scale） */
+void yolo_rgb_letterbox(const unsigned char *src, int sw, int sh,
+                        unsigned char *dst, int dw, int dh,
+                        float *scale_out, int *pad_x_out, int *pad_y_out);
 
 /* RGB24 → NV12（OpenCV SIMD：cvtColor I420 + U/V 平面交错，NEON 加速）。
    替代 yolo_rgb_to_nv12 用于 1080p 渲染热路径（录像编码零拷贝快照）。 */

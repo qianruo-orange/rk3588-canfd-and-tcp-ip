@@ -16,12 +16,14 @@
    @out_buf  输出的 float 数据（rknn_outputs_get 的 buf）
    @attrs    输出张量属性（决定布局 NCHW/NHWC 与尺寸）
    @n_output 必须为 1（官方 rknn 单输出），否则视为模型不匹配返回 0
-   @in_w/@in_h 模型输入尺寸（用于坐标缩放）
-   @frame_w/@frame_h 原图尺寸（检测框坐标缩放回原图坐标系）
+   @lb_scale/@lb_pad_x/@lb_pad_y 预处理 letterbox 几何：模型坐标经
+              (x - pad) / scale 逆映射回原图坐标系
+   @frame_w/@frame_h 原图尺寸（结果坐标所属坐标系）
    @nc_out   可选：输出推断出的类别数
-   @return 检测数（已按 conf 过滤、NMS 抑制并缩放回原图坐标） */
+   @return 检测数（已按 conf 过滤、NMS 抑制并映射回原图坐标） */
 int yolo_postprocess(const float *const *out_buf, const rknn_tensor_attr *attrs,
-                     uint32_t n_output, int in_w, int in_h,
+                     uint32_t n_output,
+                     float lb_scale, int lb_pad_x, int lb_pad_y,
                      int frame_w, int frame_h,
                      yolo_det_t *dets, int max_dets,
                      float conf, float nms, int *nc_out);

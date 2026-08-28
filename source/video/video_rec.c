@@ -32,6 +32,7 @@
 #include "ai/rknn_yolo.h"
 #include "ai/yolo_image.h"
 #include "core/common.h"
+#include "core/cpu_affinity.h"
 #include "core/log.h"
 #include "watchdog/watchdog.h"
 
@@ -206,6 +207,7 @@ static int rec_measure_fps(app_ctx_t *app)
 void *video_rec_task(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;
+    cpu_bind_big();
     int auto_rec = 1;                    /* 默认自动开启录制 */
     int init_fail_cnt = 0;               /* 编码器连续初始化失败计数（日志退避） */
 

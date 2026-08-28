@@ -16,6 +16,7 @@
 #include "video/video_stream.h"
 #include "core/log.h"
 #include "core/common.h"
+#include "core/cpu_affinity.h"
 #include "core/epoll_util.h"
 #include "watchdog/watchdog.h"
 #include "ai/rknn_yolo.h"
@@ -240,6 +241,7 @@ void video_stream_shutdown(void *arg)
 void *video_stream_task(void *arg)
 {
     (void)arg;
+    cpu_bind_big();
     video_ctx_t *vs = g_ctx;
     if (!vs) return NULL;
 

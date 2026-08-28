@@ -43,6 +43,7 @@
 #include "ai/yolo_postprocess.h"
 #include "ai/yolo_draw.h"
 #include "core/common.h"
+#include "core/cpu_affinity.h"
 #include "core/log.h"
 #include "core/config.h"
 #include "watchdog/watchdog.h"
@@ -238,6 +239,7 @@ static void yolo_smooth(const yolo_result_t *prev, yolo_result_t *cur)
 static void *yolo_worker_task(void *arg)
 {
     int idx = (int)(intptr_t)arg;
+    cpu_bind_big();
     yolo_worker_t *wk = &g_ai.workers[idx];
 
     while (g_ai.running && g_ai.pool_running) {
@@ -306,6 +308,7 @@ static void *yolo_worker_task(void *arg)
 static void *yolo_render_task(void *arg)
 {
     (void)arg;
+    cpu_bind_big();
     struct timespec last_render = { 0, 0 };
     while (g_ai.running && g_ai.pool_running) {
         yolo_result_t res;
@@ -800,6 +803,8 @@ void *rknn_ai_task(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;
     if (!app) return NULL;
+
+    cpu_bind_big();
 
     while (app->running && g_ai.running) {
         watchdog_feed_self("ai");

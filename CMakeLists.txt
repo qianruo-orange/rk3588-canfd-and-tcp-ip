@@ -122,3 +122,8 @@ if(AVCODEC_FOUND)
 else()
     message(STATUS "FFmpeg not found: fallback to V4L2 rkvenc backend")
 endif()
+
+# 视频帧环形队列单元测试（tests/ 独立 target，不入主程序 GLOB）
+add_executable(frame_ring_test tests/frame_ring_test.c source/video/frame_ring.c)
+target_include_directories(frame_ring_test PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(frame_ring_test PRIVATE pthread)

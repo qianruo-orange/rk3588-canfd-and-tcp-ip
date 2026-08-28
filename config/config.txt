@@ -8,8 +8,8 @@ max_clients 16
 
 # --- 视频 ---
 video_device /dev/video0
-video_width 1280
-video_height 720
+video_width 1920
+video_height 1080
 video_fps 30
 
 # --- AI 检测 (YOLO26, RKNN) ---

@@ -59,7 +59,10 @@ do_install() {
     cp "$BINARY" "$DEPLOY_DIR/bin/$APP_NAME"
     chmod 755 "$DEPLOY_DIR/bin/$APP_NAME"
 
-    echo "[INSTALL] config/ (整目录覆盖)"
+    echo "[INSTALL] config/ (先回拉设备端 config.txt，网页修改不丢失；再整目录覆盖)"
+    if [ -f "$DEPLOY_DIR/config/config.txt" ]; then
+        cp "$DEPLOY_DIR/config/config.txt" "$PROJECT_DIR/config/config.txt"
+    fi
     rm -rf "$DEPLOY_DIR/config"
     cp -r "$PROJECT_DIR/config" "$DEPLOY_DIR/config"
 

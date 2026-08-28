@@ -12,7 +12,7 @@
 
 #include "ai/yolo_image.h"
 
-#define YOLO_JPEG_QUALITY 75   /* 与相机原生帧同级（~54KB vs 48KB @720p），浏览器拉流压力减半；粗体标签字仍清晰 */
+#define YOLO_JPEG_QUALITY 95   /* 高画质档（~101KB @720p）；单连接拉流后码流压力已减半，卡顿根因不在体积 */
 
 int yolo_jpeg_to_rgb(const unsigned char *jpeg, size_t jpeg_len,
                      unsigned char **rgb_out, int *w_out, int *h_out)

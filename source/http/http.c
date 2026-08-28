@@ -661,6 +661,7 @@ static void http_process_request(http_conn_t *c)
         { "/api/can/toggle",0, "POST", http_can_toggle_wrap, http_check_auth_root },
         { "/api/config",    0, "POST", http_config_post,  http_check_auth_root },
         { "/api/config",    0, NULL,   http_config_get,   NULL },
+        { "/api/config/export", 0, NULL, http_config_export, http_check_auth_root },
         { "/api/reboot",    0, NULL,   http_reboot_wrap,       http_check_auth_root },
         { "/api/shutdown",  0, NULL,   http_shutdown_wrap,     http_check_auth_root },
         { "/api/network",   0, NULL,   http_network_api_wrap,  NULL },

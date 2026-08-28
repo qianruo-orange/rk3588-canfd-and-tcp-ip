@@ -403,7 +403,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
   - AI 卡：推理参数 2×2 网格排列（无启用开关——AI 为必要流程），与模型文件上传左右分栏（1:1），上传热生效
   - CAN 卡：波特率 / DBC 上传 / CAN FD / FD 波特率一行配置，通道下拉框标注 FD 能力
   - 网络卡：IP 模式（关闭 / 静态 / DHCP），仅「静态」模式显示 IP / 掩码 / 网关输入框
-  - 顶部「导出配置表」：一键导出全部配置为可读文本（含原始 JSON），便于备份与移植
+  - 顶部「导出配置」：一键打包下载整个 config 目录（config.txt / DBC / 标签 / RKNN 模型），便于备份与移植
 - `/logs`：文件下载（日志 / 录像双 TAB）
 
 ### REST API
@@ -422,6 +422,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | POST | `/api/ai/upload?type=model` | root | 上传 YOLO26 `.rknn` 模型（≤64MB，校验 RKNN magic），原子替换后热重载推理池 |
 | POST | `/api/ai/upload?type=names` | root | 上传类别标签文件（≤256KB，1~128 行，每行 ≤23 字符），原子替换后热重载 |
 | GET/POST | `/api/config` | root | 读取 / 写入配置 |
+| GET | `/api/config/export` | root | 打包下载整个 config 目录（config.txt / DBC / 标签 / RKNN 模型，tar.gz） |
 | GET | `/api/network` | 无 | 网络统计 |
 | GET | `/api/network/ifaces` | 无 | 网络接口信息 |
 | GET | `/api/video/devices` | 无 | 摄像头设备列表 |

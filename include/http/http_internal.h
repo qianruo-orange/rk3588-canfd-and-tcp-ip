@@ -43,6 +43,7 @@ void http_can_dbc_upload(app_ctx_t *app, int fd, const char *method, const char 
 void http_ai_upload(app_ctx_t *app, int fd, const char *uri, const char *tmp_path);
 void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req);
 void http_config_post(app_ctx_t *app, int fd, const char *method, const char *uri, const char *body);
+void http_config_export(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf);
 void http_reboot(app_ctx_t *app, int fd);
 void http_shutdown(app_ctx_t *app, int fd);
 void http_network_api(app_ctx_t *app, int fd);

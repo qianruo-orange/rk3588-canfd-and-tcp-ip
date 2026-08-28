@@ -10,6 +10,9 @@
 #include "tcp/net_ip.h"
 #include "ai/rknn_yolo.h"
 #include <sys/epoll.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <ctype.h>
 
@@ -397,4 +400,83 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
     if (ai_changed) rknn_yolo_reload();
 
     pthread_mutex_unlock(&app->can_mutex);
+}
+
+/* ---- 配置目录打包下载（/api/config/export） ---- */
+
+#define CONFIG_PACK_MAX (64UL * 1024 * 1024)  /* config 打包体积上限（含模型 ~7.5MB，留足余量） */
+
+/* config 目录 = PATH_CONFIG 的 dirname（如 config/config.txt → config） */
+static void config_dir_of(char *out, size_t out_size)
+{
+    safe_strncpy(out, out_size, PATH_CONFIG);
+    char *slash = strrchr(out, '/');
+    if (!slash) {                       /* 纯文件名：当前目录 */
+        safe_strncpy(out, out_size, ".");
+    } else if (slash == out) {          /* 根目录下 */
+        safe_strncpy(out, out_size, "/");
+    } else {
+        *slash = '\0';
+    }
+}
+
+/* config 目录总体积（仅顶层常规文件；config 目录为扁平结构，无子目录） */
+static int64_t config_dir_size(const char *dir)
+{
+    int64_t total = 0;
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+        struct stat st;
+        if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) total += (int64_t)st.st_size;
+    }
+    closedir(d);
+    return total;
+}
+
+/* 打包下载整个 config 目录（tar.gz）：与日志打包相同模式——
+   先打成临时文件，再复用 http_serve_stream 流式发送（发送后自动清理） */
+static void serve_config_pack(int fd, const char *config_dir)
+{
+    if (config_dir_size(config_dir) > (int64_t)CONFIG_PACK_MAX) {
+        LOG_INFO("config pack: total size exceeds %lld bytes, rejected", (long long)CONFIG_PACK_MAX);
+        http_err(fd, 413, "Payload Too Large", "config too large");
+        return;
+    }
+
+    char tmppath[512];
+    snprintf(tmppath, sizeof(tmppath), "/tmp/rk3588_config_pack_%d.tar.gz", (int)getpid());
+    char cmd[1400];
+    snprintf(cmd, sizeof(cmd), "tar -czf %s -C %s . 2>/dev/null", tmppath, config_dir);
+    if (system(cmd) != 0 || access(tmppath, F_OK) != 0) {
+        unlink(tmppath);
+        http_err(fd, 500, "Internal Error", NULL);
+        return;
+    }
+
+    FILE *fp = fopen(tmppath, "rb");
+    if (!fp) {
+        unlink(tmppath);
+        http_err(fd, 500, "Internal Error", NULL);
+        return;
+    }
+    size_t size = http_file_size(fp);
+
+    http_serve_stream(fd, "application/gzip",
+                      "Content-Disposition: attachment; filename=\"config_pack.tar.gz\"\r\n",
+                      fp, size, tmppath);
+}
+
+/* /api/config/export：打包下载整个 config 目录
+   （config.txt / DBC / 标签 / RKNN 模型一并导出） */
+void http_config_export(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf)
+{
+    (void)app; (void)method; (void)uri; (void)req_buf;
+    char config_dir[256];
+    config_dir_of(config_dir, sizeof(config_dir));
+    serve_config_pack(fd, config_dir);
 }

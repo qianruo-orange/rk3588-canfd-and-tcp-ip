@@ -69,6 +69,7 @@ V4L2 摄像头（MJPEG / YUYV）
 | `GET /video/mjpeg` | 原始 MJPEG 视频流（浏览器 `<img src>` 或 ffplay 播放） |
 | `GET /video/mjpeg_ai` | AI 画框视频流（检测结果实时叠加） |
 | `GET /api/video/caps` | 摄像头能力（分辨率 / 格式） |
+| `GET /api/video/stats` | 环形队列分阶段计数器（produce_seq / 各阶段丢帧 / 缓冲池占用），回答"摄像头 vs 推理"丢帧问题 |
 | `GET /api/video/devices` | 可用视频设备列表 |
 
 ### CAN 数据流向

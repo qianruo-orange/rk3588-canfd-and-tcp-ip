@@ -666,6 +666,7 @@ static void http_process_request(http_conn_t *c)
         { "/api/network",   0, NULL,   http_network_api_wrap,  NULL },
         { "/api/network/ifaces",0,NULL,http_network_ifaces, NULL },
         { "/api/video/caps",1, NULL,  http_video_caps,   NULL },
+        { "/api/video/stats",0,NULL,  http_video_stats,  NULL },
         { "/api/video/devices",0,NULL, http_video_devices,NULL },
         { "/api/rec/start",0, "POST", http_rec_handler,  http_check_auth_root },
         { "/api/rec/stop", 0, "POST", http_rec_handler,  http_check_auth_root },

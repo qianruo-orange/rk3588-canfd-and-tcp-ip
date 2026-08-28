@@ -1,5 +1,5 @@
 /**
- * http_api_video.c — V4L2 设备列表 & 格式/分辨率查询
+ * http_api_video.c — V4L2 设备列表 & 格式/分辨率查询 + 环形队列运行统计
  */
 
 #include <fcntl.h>
@@ -11,6 +11,8 @@
 #include <sys/ioctl.h>
 #include <linux/videodev2.h>
 #include "http/http_internal.h"
+#include "video/frame_ring.h"
+#include "video/video_stream.h"
 
 /* ---- /api/video/devices —— 枚举可用的摄像头 ---- */
 void http_video_devices(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf)
@@ -255,4 +257,27 @@ void http_video_caps(app_ctx_t *app, int fd, const char *method, const char *uri
     JSON_ADD(json, off, "]}]}");
     http_ok_json(fd, json, (size_t)off);
 #undef NP
+}
+
+/* ---- /api/video/stats —— 环形队列分阶段计数器（回答"摄像头 vs 推理"丢帧问题） ---- */
+void http_video_stats(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf)
+{
+    (void)app; (void)method; (void)uri; (void)req_buf;
+    frame_ring_t *ring = video_stream_get_ring();
+    if (!ring) {
+        http_ok_json(fd, "{\"error\":\"video not running\"}", 28);
+        return;
+    }
+    frame_ring_stats_t st;
+    frame_ring_stats(ring, &st);
+    char json[512];
+    int off = 0;
+    JSON_ADD(json, off, "{\"produce_seq\":%llu,\"capture_dropped\":%llu,"
+        "\"driver_dropped\":%llu,\"capture_stall_ms\":%llu,\"infer_dropped\":%llu,"
+        "\"render_skipped\":%llu,\"encode_skipped\":%llu,\"raw_pinned\":%d,"
+        "\"pool_rgb\":%d,\"pool_nv12\":%d,\"pool_jpeg\":%d}",
+        st.produce_seq, st.capture_dropped, st.driver_dropped, st.capture_stall_ms,
+        st.infer_dropped, st.render_skipped, st.encode_skipped,
+        st.raw_pinned, st.pool_rgb, st.pool_nv12, st.pool_jpeg);
+    http_ok_json(fd, json, (size_t)off);
 }

@@ -298,12 +298,29 @@ void *video_stream_task(void *arg)
 
         unsigned int last_vseq = 0;
         int have_vseq = 0;   /* 驱动侧丢帧统计（buf.sequence 缺口；会话级状态） */
+        time_t last_summary = 0;   /* 环形队列分阶段计数器 60s 定期汇总 */
         while (vs->app->running && !__atomic_load_n(&vs->restart_req, __ATOMIC_ACQUIRE)) {
             struct epoll_event out;
             /* epoll_wait_feed：EINTR 重试并喂狗；无论是否有帧都保持喂狗
                （相机空闲/无数据时线程仍存活，避免误判卡死） */
             int ret = epoll_wait_feed(epfd, &out, 1, 500, "video");
             if (ret < 0) break;
+            /* 60s 汇总必须放在每次循环都执行的位置：相机持续送帧时
+               epoll 从不超时，放在 ret==0 分支会导致汇总永不打印 */
+            time_t now = time(NULL);
+            if (now - last_summary >= 60) {
+                last_summary = now;
+                frame_ring_stats_t st;
+                frame_ring_stats(&vs->ring, &st);
+                LOG_INFO("video_stream: ring 60s — produce %llu, capture_dropped %llu, "
+                         "driver_dropped %llu, stall %llums, infer_dropped %llu, "
+                         "render_skipped %llu, encode_skipped %llu, raw_pinned %d, "
+                         "pools rgb/nv12/jpeg %d/%d/%d",
+                         st.produce_seq, st.capture_dropped, st.driver_dropped,
+                         st.capture_stall_ms, st.infer_dropped, st.render_skipped,
+                         st.encode_skipped, st.raw_pinned,
+                         st.pool_rgb, st.pool_nv12, st.pool_jpeg);
+            }
             if (ret == 0) continue;
             if (!(out.events & EPOLLIN)) continue;
 
@@ -420,47 +437,6 @@ static int video_stream_wait_next(int last_seq, unsigned char **out, size_t *out
     }
     frame_ring_unlock(&vs->ring);
     return (int)(unsigned int)seq;   /* 客户端 pacing 兼容 32 位序号 */
-}
-
-/* 拷贝当前最新采集帧（AI 推理线程消费用：取快照，不等待新帧） */
-int video_stream_get_frame(unsigned char **out, size_t *out_len, int *fmt,
-                           int *w, int *h, unsigned long long *seq)
-{
-    video_ctx_t *vs = g_ctx;
-    if (!vs || !out || !out_len || !fmt || !w || !h || !seq) return -1;
-    frame_ring_lock(&vs->ring);
-    frame_slot_t *s = frame_ring_raw_newest_locked(&vs->ring);
-    if (!s || !s->raw.buf) {
-        frame_ring_unlock(&vs->ring);
-        return -1;   /* 尚无采集帧 */
-    }
-    unsigned char *copy = malloc(s->raw.len);
-    if (!copy) {
-        frame_ring_unlock(&vs->ring);
-        return -1;
-    }
-    memcpy(copy, s->raw.buf, s->raw.len);
-    size_t len = s->raw.len;
-    unsigned long long sseq = s->seq;
-    frame_ring_unlock(&vs->ring);
-    *out     = copy;
-    *out_len = len;
-    *fmt     = (vs->pixfmt == V4L2_PIX_FMT_MJPEG) ? VIDEO_FMT_MJPEG : VIDEO_FMT_YUYV;
-    *w       = vs->width;
-    *h       = vs->height;
-    *seq     = sseq;
-    return 0;
-}
-
-/* 无拷贝窥探最新帧序号：轮询方先判新帧，有新帧才整帧拷贝（见 video_stream.h） */
-unsigned long long video_stream_get_frame_seq(void)
-{
-    video_ctx_t *vs = g_ctx;
-    if (!vs) return 0;
-    frame_ring_lock(&vs->ring);
-    unsigned long long seq = vs->ring.produce_seq;
-    frame_ring_unlock(&vs->ring);
-    return seq;
 }
 
 /* 环形队列句柄：AI/录像消费方直接操作槽位（零拷贝路径），模块未初始化返回 NULL */

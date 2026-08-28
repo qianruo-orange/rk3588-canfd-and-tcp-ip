@@ -110,28 +110,7 @@ static int rec_take_raw_frame(unsigned char **out, size_t *len, int *w, int *h)
 }
 
 /* ---- 色彩转换：统一转 NV12（编码器输入） ---- */
-
-/* RGB24 → NV12（BT.601 limited，整数定点） */
-static void rgb_to_nv12(const unsigned char *rgb, int w, int h,
-                        unsigned char *nv12)
-{
-    unsigned char *Y = nv12;
-    unsigned char *UV = nv12 + (size_t)w * h;
-    for (int y = 0; y < h; y++) {
-        const unsigned char *row = rgb + (size_t)y * w * 3;
-        unsigned char *Yrow = Y + (size_t)y * w;
-        for (int x = 0; x < w; x++) {
-            const unsigned char *p = row + x * 3;
-            int r = p[0], g = p[1], b = p[2];
-            Yrow[x] = (unsigned char)((66 * r + 129 * g + 25 * b + 128) / 256 + 16);
-            if ((y & 1) == 0 && (x & 1) == 0) {
-                unsigned char *uv = UV + (size_t)(y / 2) * w + x;
-                uv[0] = (unsigned char)((-38 * r - 74 * g + 112 * b + 128) / 256 + 128);
-                uv[1] = (unsigned char)((112 * r - 94 * g - 18 * b + 128) / 256 + 128);
-            }
-        }
-    }
-}
+/* RGB24 → NV12 直接复用 yolo_image.c 的 yolo_rgb_to_nv12（同一实现，勿重复维护） */
 
 /* YUYV → NV12（4:2:2 → 4:2:0，垂直抽样偶数行） */
 static void yuyv_to_nv12(const unsigned char *src, int w, int h,
@@ -167,7 +146,7 @@ static int rec_to_nv12(const unsigned char *data, size_t len, int fmt,
             return -1;
         unsigned char *out = malloc((size_t)rw * rh * 3 / 2);
         if (!out) { free(rgb); return -1; }
-        rgb_to_nv12(rgb, rw, rh, out);
+        yolo_rgb_to_nv12(rgb, rw, rh, out);
         free(rgb);
         *nv12 = out;
         *nv12_len = (size_t)rw * rh * 3 / 2;

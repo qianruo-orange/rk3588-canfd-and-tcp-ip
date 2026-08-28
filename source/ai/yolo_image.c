@@ -32,18 +32,12 @@ int yolo_jpeg_to_rgb(const unsigned char *jpeg, size_t jpeg_len,
         jpeg_destroy_decompress(&cinfo);
         return -1;
     }
-    unsigned char *row = malloc((size_t)w * 3);
-    if (!row) {
-        free(rgb);
-        jpeg_destroy_decompress(&cinfo);
-        return -1;
-    }
+    /* 行指针直接指向目标缓冲：免去行缓冲 malloc 与每行 w*3 的 memcpy */
     while (cinfo.output_scanline < cinfo.output_height) {
         unsigned int y = cinfo.output_scanline;   /* 读前保存：read_scanlines 返回后 output_scanline 已 +1 */
-        if (jpeg_read_scanlines(&cinfo, &row, 1) != 1) break;
-        memcpy(rgb + (size_t)y * w * 3, row, (size_t)w * 3);
+        JSAMPROW row_ptr = rgb + (size_t)y * w * 3;
+        if (jpeg_read_scanlines(&cinfo, &row_ptr, 1) != 1) break;
     }
-    free(row);
     jpeg_finish_decompress(&cinfo);
     jpeg_destroy_decompress(&cinfo);
     *rgb_out = rgb;
@@ -72,17 +66,12 @@ int yolo_rgb_to_jpeg(const unsigned char *rgb, int w, int h,
     jpeg_set_quality(&cinfo, YOLO_JPEG_QUALITY, TRUE);
     jpeg_start_compress(&cinfo, TRUE);
 
-    unsigned char *row = malloc((size_t)w * 3);
-    if (!row) {
-        jpeg_destroy_compress(&cinfo);
-        if (mem) free(mem);
-        return -1;
-    }
+    /* 行指针直接指向源缓冲（jpeg_write_scanlines 只读该行）：
+       免去行缓冲 malloc 与每行 w*3 的 memcpy */
     while (cinfo.next_scanline < cinfo.image_height) {
-        memcpy(row, rgb + (size_t)cinfo.next_scanline * w * 3, (size_t)w * 3);
-        jpeg_write_scanlines(&cinfo, &row, 1);
+        JSAMPROW row_ptr = (JSAMPROW)(rgb + (size_t)cinfo.next_scanline * w * 3);
+        jpeg_write_scanlines(&cinfo, &row_ptr, 1);
     }
-    free(row);
     jpeg_finish_compress(&cinfo);
     jpeg_destroy_compress(&cinfo);
     *out = mem;

@@ -133,6 +133,13 @@ static struct {
     yolo_result_t   result;
     pthread_mutex_t frame_mutex;
     yolo_frame_t   *frame;
+
+    /* NV12 缓冲复用池（仅 composer 线程访问）：替换快照时回收未被录像线程
+       取走的旧 NV12 缓冲，下一帧转换直接复用，消除每帧 w*h*3/2 malloc/free
+       （1080p 30fps ≈ 90MB/s 堆churn）。被录像线程取走所有权的缓冲由其释放，
+       不进池，无跨线程复用风险 */
+    unsigned char  *nv12_spare;
+    size_t          nv12_spare_len;
 } g_ai;
 
 static pthread_mutex_t g_reload_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -363,22 +370,35 @@ static void *yolo_render_task(void *arg)
         unsigned char *jpeg = NULL;
         size_t jlen = 0;
         if (yolo_render_annotated(rgb, w, h, &disp, &g_ai.classes, &jpeg, &jlen) == 0) {
-            unsigned char *nv12 = malloc((size_t)w * h * 3 / 2);
+            /* NV12 目标缓冲：优先复用 spare（上一帧替换时回收） */
+            size_t nv12_len = (size_t)w * h * 3 / 2;
+            unsigned char *nv12 = NULL;
+            if (g_ai.nv12_spare && g_ai.nv12_spare_len >= nv12_len) {
+                nv12 = g_ai.nv12_spare;
+                g_ai.nv12_spare = NULL;
+            } else {
+                free(g_ai.nv12_spare);
+                g_ai.nv12_spare = NULL;
+                nv12 = malloc(nv12_len);
+            }
             if (nv12) yolo_rgb_to_nv12_fast(rgb, w, h, nv12);
             g_ai.prev = disp;
             snap_result(&disp);
             pthread_mutex_lock(&g_ai.frame_mutex);
+            if (!g_ai.frame) g_ai.frame = calloc(1, sizeof(*g_ai.frame));
             if (g_ai.frame) {
+                /* 旧 JPEG 所有权一直在快照（客户端只拷贝）；旧 NV12 若未被
+                   录像线程取走则回收进 spare，结构体本身原地复用 */
                 free(g_ai.frame->data);
-                free(g_ai.frame->nv12);
-                free(g_ai.frame);
-            }
-            g_ai.frame = malloc(sizeof(*g_ai.frame));
-            if (g_ai.frame) {
+                if (g_ai.frame->nv12) {
+                    free(g_ai.nv12_spare);
+                    g_ai.nv12_spare = g_ai.frame->nv12;
+                    g_ai.nv12_spare_len = g_ai.frame->nv12_len;
+                }
                 g_ai.frame->data = jpeg; jpeg = NULL;   /* 所有权移交快照 */
                 g_ai.frame->len  = jlen;
                 g_ai.frame->nv12 = nv12; nv12 = NULL;
-                g_ai.frame->nv12_len = (size_t)w * h * 3 / 2;
+                g_ai.frame->nv12_len = nv12_len;
                 g_ai.frame->seq  = disp.seq;
                 g_ai.frame->w    = w;
                 g_ai.frame->h    = h;
@@ -508,6 +528,9 @@ static void ai_stop_pool(void)
         g_ai.frame = NULL;
     }
     pthread_mutex_unlock(&g_ai.frame_mutex);
+    free(g_ai.nv12_spare);        /* 渲染线程已 join，spare 无并发访问 */
+    g_ai.nv12_spare = NULL;
+    g_ai.nv12_spare_len = 0;
     pthread_mutex_lock(&g_ai.result_mutex);
     memset(&g_ai.result, 0, sizeof(g_ai.result));
     pthread_mutex_unlock(&g_ai.result_mutex);

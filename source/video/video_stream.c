@@ -20,7 +20,8 @@
 #include "watchdog/watchdog.h"
 #include "ai/rknn_yolo.h"
 
-typedef struct { unsigned char *data; size_t len; } frame_t;
+/* 采集帧：cap 记录 data 分配容量（复用旧分配时 len 可小于 cap） */
+typedef struct { unsigned char *data; size_t len, cap; } frame_t;
 
 /* 推流客户端空闲超时（秒）：客户端不读 / 网络黑洞时释放连接与线程 */
 #define VIDEO_CLIENT_IDLE_TIMEOUT 30
@@ -33,6 +34,7 @@ typedef struct {
     int                running;
     pthread_mutex_t    cfg_mutex;    /* 保护 device / width / height */
     pthread_mutex_t    frame_mutex;  /* 保护 frame_obj 指针生命周期（防 use-after-free） */
+    frame_t           *spare;        /* 备用帧（仅采集 worker 访问；shutdown 在其退出后运行） */
     char               device[128];
     int                width, height;
     int                pixfmt;   /* 实际像素格式（V4L2_PIX_FMT_*） */
@@ -230,6 +232,7 @@ void video_stream_shutdown(void *arg)
     pthread_mutex_lock(&vs->frame_mutex);
     frame_t *old = __atomic_exchange_n(&vs->frame_obj, NULL, __ATOMIC_SEQ_CST);
     if (old) { free(old->data); free(old); }
+    if (vs->spare) { free(vs->spare->data); free(vs->spare); vs->spare = NULL; }
     pthread_mutex_unlock(&vs->frame_mutex);
     __atomic_store_n(&vs->seq, 0, __ATOMIC_SEQ_CST);
 }
@@ -304,19 +307,31 @@ void *video_stream_task(void *arg)
             }
 
             if (buf.bytesused > 0 && buf.index < vs->nbuffers) {
-                frame_t *f = malloc(sizeof(frame_t));
+                /* 复用备用帧的分配：消除每帧 frame_t + data 两次 malloc/free
+                   （MJPEG 帧数百 KB @30fps，堆churn 显著）；spare 仅本线程访问 */
+                frame_t *f = vs->spare;
+                vs->spare = NULL;
+                if (!f) f = calloc(1, sizeof(frame_t));
                 if (f) {
-                    f->len  = buf.bytesused;
-                    f->data = malloc(f->len);
+                    if (f->cap < buf.bytesused) {
+                        free(f->data);
+                        f->data = malloc(buf.bytesused);
+                        f->cap = f->data ? buf.bytesused : 0;
+                    }
+                    f->len = buf.bytesused;
                     if (f->data)
                         memcpy(f->data, vs->buffers[buf.index].start, f->len);
                     else { free(f); f = NULL; }
                 }
                 if (f) {
-                    /* 持锁替换旧帧：防止推流线程正在复制时旧帧被释放 */
+                    /* 持锁替换旧帧：防止推流线程正在复制时旧帧被释放；
+                       被替换的旧帧退居 spare，下一帧复用其结构+缓冲分配 */
                     pthread_mutex_lock(&vs->frame_mutex);
                     frame_t *old = __atomic_exchange_n(&vs->frame_obj, f, __ATOMIC_SEQ_CST);
-                    if (old) { free(old->data); free(old); }
+                    if (old) {
+                        if (vs->spare) { free(vs->spare->data); free(vs->spare); }
+                        vs->spare = old;
+                    }
                     pthread_mutex_unlock(&vs->frame_mutex);
                     __atomic_fetch_add(&vs->seq, 1, __ATOMIC_SEQ_CST);
                     watchdog_feed_self("video");

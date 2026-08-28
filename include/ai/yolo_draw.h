@@ -19,10 +19,11 @@ int yolo_classes_load(const char *path, yolo_classes_t *out);
 void yolo_draw_box(unsigned char *rgb, int w, int h,
                    int x1, int y1, int x2, int y2, unsigned int color);
 
-/* 拷贝原帧 → 按 res 画框 + 类别名/置信度标签 → 编码 JPEG。
+/* 原地在 rgb 帧上按 res 画框 + 类别名/置信度标签 → 编码 JPEG。
+   rgb 缓冲会被原地修改（调用方必须独占所有权；composer 的推理帧满足此条件）。
    classes 为类别名表（可为 NULL，此时标签显示 "obj"）。
    成功返回 0 并输出 *jpeg_out（调用方 free）；失败返回 -1 */
-int yolo_render_annotated(const unsigned char *rgb, int w, int h,
+int yolo_render_annotated(unsigned char *rgb, int w, int h,
                           const yolo_result_t *res,
                           const yolo_classes_t *classes,
                           unsigned char **jpeg_out, size_t *jpeg_len);

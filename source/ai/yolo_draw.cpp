@@ -166,7 +166,7 @@ static void yolo_draw_label(cv::Mat &img, int x1, int y1,
                 2, cv::LINE_AA);
 }
 
-int yolo_render_annotated(const unsigned char *rgb, int w, int h,
+int yolo_render_annotated(unsigned char *rgb, int w, int h,
                           const yolo_result_t *res,
                           const yolo_classes_t *classes,
                           unsigned char **jpeg_out, size_t *jpeg_len)
@@ -177,15 +177,14 @@ int yolo_render_annotated(const unsigned char *rgb, int w, int h,
         0x00C7BE, 0x8E8E93,
     };
     int ncolors = (int)(sizeof(kColors) / sizeof(kColors[0]));
-    unsigned char *img = (unsigned char *)malloc((size_t)w * h * 3);
-    if (!img) return -1;
-    memcpy(img, rgb, (size_t)w * h * 3);
 
-    cv::Mat mat(h, w, CV_8UC3, img);    /* 包装 RGB 缓冲，不拷贝 */
+    /* 原地绘制：调用方（composer）独占 rgb 所有权，无需拷贝整帧
+       （1080p 每帧省 6MB 拷贝带宽 + malloc/free） */
+    cv::Mat mat(h, w, CV_8UC3, rgb);    /* 包装 RGB 缓冲，不拷贝 */
     for (int i = 0; i < res->count; i++) {
         const yolo_det_t *d = &res->dets[i];
         unsigned int color = kColors[d->cls % ncolors];
-        yolo_draw_box(img, w, h, (int)d->x1, (int)d->y1, (int)d->x2, (int)d->y2, color);
+        yolo_draw_box(rgb, w, h, (int)d->x1, (int)d->y1, (int)d->x2, (int)d->y2, color);
 
         /* 标签：类别名 + 置信度（cv2 风格：实色底块 + 白色粗体字） */
         const char *name = "obj";
@@ -198,11 +197,8 @@ int yolo_render_annotated(const unsigned char *rgb, int w, int h,
 
     unsigned char *jpeg = NULL;
     size_t jlen = 0;
-    if (yolo_rgb_to_jpeg(img, w, h, &jpeg, &jlen) != 0 || !jpeg) {
-        free(img);
+    if (yolo_rgb_to_jpeg(rgb, w, h, &jpeg, &jlen) != 0 || !jpeg)
         return -1;
-    }
-    free(img);
     *jpeg_out = jpeg;
     *jpeg_len = jlen;
     return 0;

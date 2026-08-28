@@ -497,10 +497,12 @@ static void nv12_copy(h264_encoder_t *e, const unsigned char *nv12, int idx)
     }
 }
 
-/* 从 Annex-B 码流提取 SPS/PPS，判断关键帧（含 IDR） */
+/* 从 Annex-B 码流单遍提取 SPS/PPS、判断关键帧（含 IDR）与 VCL 存在性
+   （type 1 非 IDR slice / type 5 IDR）。@has_vcl 可为 NULL（不关心时） */
 static void h264_scan(h264_encoder_t *e, const unsigned char *d, size_t len,
-                      int *keyframe)
+                      int *keyframe, int *has_vcl)
 {
+    if (has_vcl) *has_vcl = 0;
     long pos = nal_find(d, len, 0);
     while (pos >= 0 && (size_t)pos < len) {
         unsigned char type = d[pos] & 0x1F;
@@ -522,6 +524,9 @@ static void h264_scan(h264_encoder_t *e, const unsigned char *d, size_t len,
             e->pps_len = (unsigned int)nlen;
         } else if (type == 5) {
             *keyframe = 1;
+            if (has_vcl) *has_vcl = 1;
+        } else if (type == 1 && has_vcl) {
+            *has_vcl = 1;
         }
         pos = next;
     }
@@ -567,7 +572,7 @@ int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
             return -1;
         }
         /* 与 V4L2 后端一致：从输出码流补扫内嵌 SPS/PPS 与 IDR */
-        h264_scan(e, copy, alen, &kf);
+        h264_scan(e, copy, alen, &kf, NULL);
         *out = copy;
         *out_len = alen;
         if (keyframe) *keyframe = kf;
@@ -618,29 +623,18 @@ int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
             return -1;
         }
 
-        /* 先扫描/拷贝再归还缓冲：归还后驱动可能立即填充覆盖 */
+        /* 先扫描/拷贝再归还缓冲：归还后驱动可能立即填充覆盖。
+           单遍扫描：提取 SPS/PPS、识别 IDR、检测 VCL（type 1/5）。
+           纯 SPS/PPS 配置帧（无 VCL）丢弃并继续等 VCL 帧；
+           含非 IDR slice 的帧接受，但不算关键帧 */
         unsigned char *data = e->buf_out[cb.index];
         size_t len = (size_t)cp.bytesused;
 
-        int kf = 0;
-        h264_scan(e, data, len, &kf);
-        if (!kf) {
-            /* 无 IDR：可能是纯 SPS/PPS 配置帧（无 VCL），丢弃并继续等 VCL 帧；
-               含非 IDR slice（type 1）的帧要接受，但不算关键帧 */
-            int has_vcl = 0;
-            long pos = nal_find(data, len, 0);
-            while (pos >= 0 && (size_t)pos < len) {
-                unsigned char t = data[pos] & 0x1F;
-                if (t == 5) { kf = 1; has_vcl = 1; break; }
-                if (t == 1) has_vcl = 1;
-                long next = nal_find(data, len, pos + 1);
-                if (next <= pos) break;
-                pos = next;
-            }
-            if (!has_vcl) {
-                ioctl(e->fd, VIDIOC_QBUF, &cb);   /* 纯配置帧：归还后丢弃 */
-                continue;
-            }
+        int kf = 0, has_vcl = 0;
+        h264_scan(e, data, len, &kf, &has_vcl);
+        if (!has_vcl) {
+            ioctl(e->fd, VIDIOC_QBUF, &cb);   /* 纯配置帧：归还后丢弃 */
+            continue;
         }
 
         unsigned char *copy = malloc(len);

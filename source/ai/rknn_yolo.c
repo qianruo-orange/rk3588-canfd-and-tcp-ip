@@ -56,6 +56,7 @@
 typedef struct {
     unsigned char    *data;        /* 画框 JPEG（推流客户端按需拷贝） */
     size_t            len;
+    size_t            cap;         /* data 分配容量（退役进 spare 复用时记录） */
     unsigned char    *nv12;        /* 渲染时同步转换的 NV12（录像编码链路零拷贝取用） */
     size_t            nv12_len;
     unsigned long long seq;
@@ -140,6 +141,13 @@ static struct {
        不进池，无跨线程复用风险 */
     unsigned char  *nv12_spare;
     size_t          nv12_spare_len;
+
+    /* JPEG 编码缓冲复用池（仅 composer 线程访问）：替换快照时把旧 JPEG 缓冲
+       退役进 spare，下一帧编码直接复用（yolo_rgb_to_jpeg_reuse realloc 增长），
+       消除每帧 ~100-200KB malloc/free（该尺寸常走 mmap，30fps 下开销明显）。
+       与 nv12_spare 同模式：缓冲从未跨线程共享，无并发风险 */
+    unsigned char  *jpeg_spare;
+    size_t          jpeg_spare_cap;
 } g_ai;
 
 static pthread_mutex_t g_reload_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -367,9 +375,15 @@ static void *yolo_render_task(void *arg)
         yolo_result_t disp = res;
         yolo_smooth(&g_ai.prev, &disp);
 
-        unsigned char *jpeg = NULL;
+        /* JPEG 编码缓冲：优先复用 spare（上一帧替换时退役的旧快照缓冲，
+           编码器 realloc 增长） */
+        unsigned char *jpeg = g_ai.jpeg_spare;
+        size_t jcap = g_ai.jpeg_spare_cap;
+        g_ai.jpeg_spare = NULL;
+        g_ai.jpeg_spare_cap = 0;
         size_t jlen = 0;
-        if (yolo_render_annotated(rgb, w, h, &disp, &g_ai.classes, &jpeg, &jlen) == 0) {
+        if (yolo_render_annotated(rgb, w, h, &disp, &g_ai.classes,
+                                  &jpeg, &jcap, &jlen) == 0) {
             /* NV12 目标缓冲：优先复用 spare（上一帧替换时回收） */
             size_t nv12_len = (size_t)w * h * 3 / 2;
             unsigned char *nv12 = NULL;
@@ -387,15 +401,19 @@ static void *yolo_render_task(void *arg)
             pthread_mutex_lock(&g_ai.frame_mutex);
             if (!g_ai.frame) g_ai.frame = calloc(1, sizeof(*g_ai.frame));
             if (g_ai.frame) {
-                /* 旧 JPEG 所有权一直在快照（客户端只拷贝）；旧 NV12 若未被
-                   录像线程取走则回收进 spare，结构体本身原地复用 */
-                free(g_ai.frame->data);
+                /* 旧 JPEG 所有权一直在快照（客户端只拷贝）：退役进 spare 供
+                   下一帧编码复用（spare 空槽 = 本帧编码前刚取走）；旧 NV12
+                   若未被录像线程取走则回收进 spare，结构体本身原地复用 */
+                free(g_ai.jpeg_spare);
+                g_ai.jpeg_spare = g_ai.frame->data;
+                g_ai.jpeg_spare_cap = g_ai.frame->cap;
                 if (g_ai.frame->nv12) {
                     free(g_ai.nv12_spare);
                     g_ai.nv12_spare = g_ai.frame->nv12;
                     g_ai.nv12_spare_len = g_ai.frame->nv12_len;
                 }
                 g_ai.frame->data = jpeg; jpeg = NULL;   /* 所有权移交快照 */
+                g_ai.frame->cap  = jcap;
                 g_ai.frame->len  = jlen;
                 g_ai.frame->nv12 = nv12; nv12 = NULL;
                 g_ai.frame->nv12_len = nv12_len;
@@ -406,7 +424,7 @@ static void *yolo_render_task(void *arg)
             pthread_mutex_unlock(&g_ai.frame_mutex);
             free(nv12);
         }
-        free(jpeg);
+        free(jpeg);   /* 编码失败/快照 calloc 失败时释放本次取走的缓冲 */
         free(rgb);
 
         /* 渲染节拍 ~30fps：超出部分在下一次渲染前补眠，平滑帧间隔 */
@@ -531,6 +549,9 @@ static void ai_stop_pool(void)
     free(g_ai.nv12_spare);        /* 渲染线程已 join，spare 无并发访问 */
     g_ai.nv12_spare = NULL;
     g_ai.nv12_spare_len = 0;
+    free(g_ai.jpeg_spare);
+    g_ai.jpeg_spare = NULL;
+    g_ai.jpeg_spare_cap = 0;
     pthread_mutex_lock(&g_ai.result_mutex);
     memset(&g_ai.result, 0, sizeof(g_ai.result));
     pthread_mutex_unlock(&g_ai.result_mutex);
@@ -787,14 +808,23 @@ void *rknn_ai_task(void *arg)
            重载后 enabled 恢复时自动继续采集 */
         if (!g_ai.enabled || !g_ai.pool_running) { usleep(200000); continue; }
 
+        /* 先无拷贝窥探帧序号：10ms 轮询大多时刻无新帧（30fps 相机约 70% 轮询
+           落空），直接跳过整帧 malloc+memcpy（720p MJPEG ~100-200KB/次） */
+        unsigned long long seq = video_stream_get_frame_seq();
+        if (seq == 0 || seq == g_ai.last_seq) {
+            usleep(g_ai.interval_ms * 1000);
+            continue;
+        }
+
         unsigned char *raw = NULL;
         size_t raw_len = 0;
         int fmt = 0, w = 0, h = 0;
-        unsigned long long seq = 0;
         if (video_stream_get_frame(&raw, &raw_len, &fmt, &w, &h, &seq) != 0) {
             usleep(g_ai.interval_ms * 1000);
             continue;
         }
+        /* 窥探与拷贝间隙恰有新帧发布时，返回帧可能新于返回的 seq：
+           拷贝后仍按 seq 去重，防止同一帧被重复解码 */
         if (seq == g_ai.last_seq || raw_len == 0 || w <= 0 || h <= 0) {
             free(raw);
             usleep(g_ai.interval_ms * 1000);

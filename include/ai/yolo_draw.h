@@ -22,10 +22,13 @@ void yolo_draw_box(unsigned char *rgb, int w, int h,
 /* 原地在 rgb 帧上按 res 画框 + 类别名/置信度标签 → 编码 JPEG。
    rgb 缓冲会被原地修改（调用方必须独占所有权；composer 的推理帧满足此条件）。
    classes 为类别名表（可为 NULL，此时标签显示 "obj"）。
-   成功返回 0 并输出 *jpeg_out（调用方 free）；失败返回 -1 */
+   JPEG 编码复用 *jpeg_buf 缓冲（容量 *jpeg_cap，不足 realloc 增长；可为 NULL），
+   成功后回写新的 *jpeg_buf/*jpeg_cap 并输出 *jpeg_len；
+   失败返回 -1（*jpeg_buf 可能已被 realloc，由调用方持有释放）。 */
 int yolo_render_annotated(unsigned char *rgb, int w, int h,
                           const yolo_result_t *res,
                           const yolo_classes_t *classes,
-                          unsigned char **jpeg_out, size_t *jpeg_len);
+                          unsigned char **jpeg_buf, size_t *jpeg_cap,
+                          size_t *jpeg_len);
 
 #endif /* YOLO_DRAW_H */

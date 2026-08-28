@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <jpeglib.h>
+#include <jerror.h>   /* ERREXIT 宏（自定义输出管理器报错用） */
 
 #include "ai/yolo_image.h"
 
@@ -46,17 +47,65 @@ int yolo_jpeg_to_rgb(const unsigned char *jpeg, size_t jpeg_len,
     return 0;
 }
 
-int yolo_rgb_to_jpeg(const unsigned char *rgb, int w, int h,
-                     unsigned char **out, size_t *out_len)
+/* 自定义 JPEG 输出管理器：写入调用方提供的缓冲，容量不足时 realloc 增长。
+   渲染热路径（30fps）复用上一帧退役的 JPEG 缓冲，消除每帧 ~100-200KB
+   malloc/free（该尺寸常走 mmap/munmap，syscall 与页表开销明显）。 */
+typedef struct {
+    struct jpeg_destination_mgr pub;
+    unsigned char *buf;
+    size_t cap;
+} jpeg_reuse_dest_t;
+
+static void reuse_init_dest(j_compress_ptr cinfo)
+{
+    jpeg_reuse_dest_t *d = (jpeg_reuse_dest_t *)cinfo->dest;
+    /* libjpeg-turbo 的 marker 写入是"先写后查"（free_in_buffer 为 0 也直接
+       落笔再回调 empty_output_buffer），init 阶段必须保证缓冲非空：
+       无缓冲时先分配 64KB 起步容量，后续不足再由 empty_output 翻倍增长 */
+    if (!d->buf) {
+        d->cap = 65536;
+        d->buf = (unsigned char *)malloc(d->cap);
+        if (!d->buf) ERREXIT(cinfo, JERR_OUT_OF_MEMORY);
+    }
+    d->pub.next_output_byte = d->buf;
+    d->pub.free_in_buffer = d->cap;
+}
+
+static boolean reuse_empty_output(j_compress_ptr cinfo)
+{
+    jpeg_reuse_dest_t *d = (jpeg_reuse_dest_t *)cinfo->dest;
+    size_t used = (size_t)(d->pub.next_output_byte - d->buf);
+    size_t ncap = d->cap ? d->cap * 2 : 65536;   /* 首帧无缓冲时给 64KB 起步 */
+    unsigned char *nb = (unsigned char *)realloc(d->buf, ncap);
+    if (!nb) ERREXIT(cinfo, JERR_OUT_OF_MEMORY);
+    d->buf = nb;
+    d->pub.next_output_byte = nb + used;
+    d->pub.free_in_buffer = ncap - used;
+    d->cap = ncap;
+    return TRUE;
+}
+
+static void reuse_term_dest(j_compress_ptr cinfo)
+{
+    (void)cinfo;   /* 最终长度由调用方从 next_output_byte - buf 计算 */
+}
+
+int yolo_rgb_to_jpeg_reuse(const unsigned char *rgb, int w, int h,
+                           unsigned char **buf, size_t *cap, size_t *out_len)
 {
     struct jpeg_compress_struct cinfo;
     struct jpeg_error_mgr jerr;
     cinfo.err = jpeg_std_error(&jerr);
     jpeg_create_compress(&cinfo);
 
-    unsigned char *mem = NULL;
-    unsigned long memlen = 0;
-    jpeg_mem_dest(&cinfo, &mem, &memlen);
+    jpeg_reuse_dest_t dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.buf = buf ? *buf : NULL;
+    dest.cap = cap ? *cap : 0;
+    dest.pub.init_destination    = reuse_init_dest;
+    dest.pub.empty_output_buffer = reuse_empty_output;
+    dest.pub.term_destination    = reuse_term_dest;
+    cinfo.dest = &dest.pub;
 
     cinfo.image_width      = (JDIMENSION)w;
     cinfo.image_height     = (JDIMENSION)h;
@@ -73,9 +122,24 @@ int yolo_rgb_to_jpeg(const unsigned char *rgb, int w, int h,
         jpeg_write_scanlines(&cinfo, &row_ptr, 1);
     }
     jpeg_finish_compress(&cinfo);
+    size_t len = (size_t)(dest.pub.next_output_byte - dest.buf);
     jpeg_destroy_compress(&cinfo);
-    *out = mem;
-    *out_len = (size_t)memlen;
+    if (buf) *buf = dest.buf;
+    if (cap) *cap = dest.cap;
+    if (out_len) *out_len = len;
+    return 0;
+}
+
+/* RGB24 → JPEG（malloc 输出）；成功返回 0，调用方 free *out。
+   热路径（渲染任务 30fps）请用 yolo_rgb_to_jpeg_reuse 复用缓冲 */
+int yolo_rgb_to_jpeg(const unsigned char *rgb, int w, int h,
+                     unsigned char **out, size_t *out_len)
+{
+    unsigned char *buf = NULL;
+    size_t cap = 0;
+    if (yolo_rgb_to_jpeg_reuse(rgb, w, h, &buf, &cap, out_len) != 0)
+        return -1;
+    *out = buf;
     return 0;
 }
 
@@ -87,9 +151,10 @@ void yolo_yuyv_to_rgb(const unsigned char *src, int w, int h, unsigned char *dst
         src += 4;
         for (int k = 0; k < 2; k++) {
             int y = k ? y1 : y0;
-            int r = (int)(y + 1.402f * v);
-            int g = (int)(y - 0.344f * u - 0.714f * v);
-            int b = (int)(y + 1.772f * u);
+            /* BT.601 定点系数（×1/1024 ≈ 1.402/0.344/0.714/1.772）：免浮点 */
+            int r = y + ((1436 * v) >> 10);
+            int g = y - ((352 * u + 731 * v) >> 10);
+            int b = y + ((1815 * u) >> 10);
             if (r < 0) r = 0; else if (r > 255) r = 255;
             if (g < 0) g = 0; else if (g > 255) g = 255;
             if (b < 0) b = 0; else if (b > 255) b = 255;
@@ -115,34 +180,6 @@ void yolo_rgb_to_nv12(const unsigned char *rgb, int w, int h, unsigned char *nv1
                 unsigned char *uv = UV + (size_t)(y / 2) * w + x;
                 uv[0] = (unsigned char)((-38 * r - 74 * g + 112 * b + 128) / 256 + 128);
                 uv[1] = (unsigned char)((112 * r - 94 * g - 18 * b + 128) / 256 + 128);
-            }
-        }
-    }
-}
-
-void yolo_rgb_resize(const unsigned char *src, int sw, int sh,
-                     unsigned char *dst, int dw, int dh)
-{
-    for (int y = 0; y < dh; y++) {
-        float sy = (y + 0.5f) * sh / dh - 0.5f;
-        if (sy < 0) sy = 0;
-        int y0 = (int)sy;
-        int y1 = y0 + 1 < sh ? y0 + 1 : y0;
-        float fy = sy - y0;
-        for (int x = 0; x < dw; x++) {
-            float sx = (x + 0.5f) * sw / dw - 0.5f;
-            if (sx < 0) sx = 0;
-            int x0 = (int)sx;
-            int x1 = x0 + 1 < sw ? x0 + 1 : x0;
-            float fx = sx - x0;
-            const unsigned char *p00 = src + ((size_t)y0 * sw + x0) * 3;
-            const unsigned char *p01 = src + ((size_t)y0 * sw + x1) * 3;
-            const unsigned char *p10 = src + ((size_t)y1 * sw + x0) * 3;
-            const unsigned char *p11 = src + ((size_t)y1 * sw + x1) * 3;
-            for (int c = 0; c < 3; c++) {
-                float v = p00[c] * (1 - fx) * (1 - fy) + p01[c] * fx * (1 - fy) +
-                          p10[c] * (1 - fx) * fy + p11[c] * fx * fy;
-                *dst++ = (unsigned char)(v + 0.5f);
             }
         }
     }

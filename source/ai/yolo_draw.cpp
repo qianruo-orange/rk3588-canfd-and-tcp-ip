@@ -169,7 +169,8 @@ static void yolo_draw_label(cv::Mat &img, int x1, int y1,
 int yolo_render_annotated(unsigned char *rgb, int w, int h,
                           const yolo_result_t *res,
                           const yolo_classes_t *classes,
-                          unsigned char **jpeg_out, size_t *jpeg_len)
+                          unsigned char **jpeg_buf, size_t *jpeg_cap,
+                          size_t *jpeg_len)
 {
     static const unsigned int kColors[] = {
         0xFF3B30, 0x34C759, 0x007AFF, 0xFFCC00,
@@ -195,11 +196,9 @@ int yolo_render_annotated(unsigned char *rgb, int w, int h,
         yolo_draw_label(mat, (int)d->x1, (int)d->y1, label, color);
     }
 
-    unsigned char *jpeg = NULL;
     size_t jlen = 0;
-    if (yolo_rgb_to_jpeg(rgb, w, h, &jpeg, &jlen) != 0 || !jpeg)
+    if (yolo_rgb_to_jpeg_reuse(rgb, w, h, jpeg_buf, jpeg_cap, &jlen) != 0)
         return -1;
-    *jpeg_out = jpeg;
     *jpeg_len = jlen;
     return 0;
 }

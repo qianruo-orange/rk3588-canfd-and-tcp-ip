@@ -419,6 +419,14 @@ int video_stream_get_frame(unsigned char **out, size_t *out_len, int *fmt,
     return 0;
 }
 
+/* 无拷贝窥探最新帧序号：轮询方先判新帧，有新帧才整帧拷贝（见 video_stream.h） */
+unsigned long long video_stream_get_frame_seq(void)
+{
+    video_ctx_t *vs = g_ctx;
+    if (!vs) return 0;
+    return (unsigned long long)__atomic_load_n(&vs->seq, __ATOMIC_SEQ_CST);
+}
+
 /* 运行时重启视频流（切换设备/分辨率，不重启进程） */
 void video_stream_restart(void)
 {

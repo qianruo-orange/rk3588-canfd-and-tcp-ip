@@ -81,12 +81,17 @@ static int rec_take_ai_frame(unsigned char **out, size_t *len, int *w, int *h)
 /* 尝试取原始帧并转 JPEG；无新帧返回 -1 */
 static int rec_take_raw_frame(unsigned char **out, size_t *len, int *w, int *h)
 {
+    /* 先无拷贝窥探序号：录像线程 10-20ms 轮询，多数时刻无新帧，
+       跳过整帧 malloc+memcpy */
+    unsigned long long seq = video_stream_get_frame_seq();
+    if (seq == 0 || seq == g_raw_seq) return -1;
+
     unsigned char *raw = NULL;
     size_t raw_len = 0;
     int fmt = 0, fw = 0, fh = 0;
-    unsigned long long seq = 0;
     if (video_stream_get_frame(&raw, &raw_len, &fmt, &fw, &fh, &seq) != 0)
         return -1;
+    /* 窥探与拷贝间隙恰有新帧发布：拷贝后仍按 seq 去重 */
     if (seq == 0 || seq == g_raw_seq) { free(raw); return -1; }
     g_raw_seq = seq;
 

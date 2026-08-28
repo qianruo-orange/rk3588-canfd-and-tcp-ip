@@ -16,14 +16,14 @@
  *                       claim 随任务移交 worker（任务在途期间槽位被钉住不可复用）
  *   推理(worker)        resize 读 job rgb，结果与 rgb 一起写槽，置 rgb_done，unclaim
  *   显示(composer)      最新 rgb_done 槽原地画框 → nv12/jpeg 写槽，置 display_done
- *   编码(rec)           窃取槽内 nv12（所有权转移），置 encode_done；AI 停摆/停用时
- *                       锁内拷贝最新 raw（回退），同样置 encode_done
+ *   编码(rec)           窃取槽内 nv12（所有权转移），置 encode_done（AI 必要流程，
+ *                       停摆直接宕机，无原始帧回退）
  *   HTTP 推流            锁内拷贝最新显示槽 jpeg / 最新 raw（多读者，不钉槽）
  *
  * 槽位回收（采集复用条件）：raw/rgb/nv12/jpeg 四个缓冲全部释放。
  * 释放规则在 frame_ring_maintain_locked 统一维护（各提交点触发，遍历 32 槽开销可忽略）：
  *   raw  → QBUF(mmap)/free：非最新帧(raw 客户端钉最新) && claims==0 &&
- *          (ai_active&&!infer_stalled ? infer_done : encode_done||!rec_active)
+ *          (ai_active ? infer_done : encode_done||!rec_active)
  *   rgb  → 池：seq <= 最新已渲染 seq（含被跳过的槽）
  *   jpeg → 池：seq != 最新已渲染 seq
  *   nv12 → 池：seq != display_seq 且（encode_done || !rec_active）；
@@ -83,7 +83,7 @@ typedef struct {
     int display_done;         /* composer 渲染完成 */
 
     /* ---- 编码阶段 ---- */
-    int encode_done;          /* rec 已消费（窃取/回退拷贝/尺寸不符跳过） */
+    int encode_done;          /* rec 已消费（窃取/尺寸不符跳过） */
 } frame_slot_t;
 
 typedef struct frame_ring {
@@ -94,8 +94,6 @@ typedef struct frame_ring {
     /* 运行模式（消费者侧在锁内更新，维护释放规则用） */
     int ai_active;            /* AI 池运行中（停用时 infer_done 不再推进） */
     int rec_active;           /* 录像进行中 */
-    int infer_stalled;        /* rec 检测到 AI 停摆 >1s 置位：raw 释放改走编码路径，
-                                 ai_task 成功取帧时自动清除 */
     int quiescing;            /* 相机重启退让：禁止新 claim，等待 claims 归零 */
 
     /* 丢帧/停摆计数器（暴露 /api/video/caps 与定期日志） */
@@ -170,10 +168,8 @@ void frame_ring_encode_advance_locked(frame_ring_t *r, frame_slot_t *s);
 /* 尺寸不符等丢弃：与 advance 相同的消费标记，另计 encode_skipped++
    （槽内 nv12 留待显示推进后按维护规则回池） */
 void frame_ring_encode_skip_locked(frame_ring_t *r, frame_slot_t *s);
-/* raw 回退（AI 停摆/停用）：返回最新 raw 槽，锁内 memcpy 后调 encode_mark。
-   AI 停摆时顺带置 infer_stalled（ai_task 恢复取帧后自动清除） */
+/* 最新 raw 槽（仅供录像会话开始前的分辨率探测/帧率实测锁内拷贝读取） */
 frame_slot_t *frame_ring_raw_newest_locked(frame_ring_t *r);
-void frame_ring_encode_mark_locked(frame_ring_t *r, frame_slot_t *s, int ai_stalled);
 
 /* ---- 模式标志 ---- */
 void frame_ring_set_ai_active(frame_ring_t *r, int on);

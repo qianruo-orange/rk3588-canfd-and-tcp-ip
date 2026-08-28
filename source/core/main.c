@@ -324,9 +324,10 @@ int main(void)
     }
     watchdog_unregister_self("main");
 
-    /* 通知各模块停止，让工作线程尽快退出 */
+    /* 通知各模块停止，让工作线程尽快退出。
+       运行期致命错误（如 AI 停摆）以退出码 1 结束：systemd Restart=on-failure 自动拉起 */
     shutdown_modules_safe();
-    log_close(); return 0;
+    log_close(); return g_app.fatal ? 1 : 0;
 
 fail:
     watchdog_unregister_self("main");

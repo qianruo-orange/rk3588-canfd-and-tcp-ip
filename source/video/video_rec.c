@@ -1,5 +1,5 @@
 /**
- * video_rec.c — 网络录像模块：AI 画框帧优先（回退原始帧）+ H.264 硬件编码。
+ * video_rec.c — 网络录像模块：AI 画框帧（必要流程，无原始帧回退）+ H.264 硬件编码。
  *
  * 编码链路：帧（JPEG/YUYV）→ NV12 → /dev/video-enc0（rkvenc）→ H.264
  *   Annex-B → MP4(avc1) 封装（详见 video/rec_mp4.c）。
@@ -12,8 +12,9 @@
  * 帧率/码率不写死：会话开始前实测帧间隔，码率按分辨率动态计算。
  *
  * 帧来源为视频帧环形队列（video/frame_ring.h）编码游标：
- *   AI 画框帧 → encode_pick 锁内窃取槽内 nv12（零拷贝，用毕回池）；
- *   原始帧（AI 停摆/不可用回退）→ 锁内拷贝最新 raw + encode_mark。
+ *   AI 画框帧 → encode_pick 锁内窃取槽内 nv12（零拷贝，用毕回池）。
+ * AI 为必要流程：停摆（>1s 无标注帧）不回退原始帧，直接置 app->fatal、
+ * 停 running 整体宕机（main 退出码 1 → systemd Restart=on-failure 拉起）。
  * 会话期间置 rec_active（槽位释放规则改走编码路径），结束即清除。
  */
 
@@ -36,7 +37,6 @@
 #include "video/video_stream.h"
 #include "video/frame_ring.h"
 #include "ai/rknn_yolo.h"
-#include "ai/yolo_image.h"
 #include "core/common.h"
 #include "core/cpu_affinity.h"
 #include "core/log.h"
@@ -67,11 +67,11 @@ static uint64_t now_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
 }
 
-/* ---- 帧获取：AI 画框帧优先（环形队列编码游标），回退原始帧 ---- */
+/* ---- 帧获取：AI 画框帧（环形队列编码游标，必要流程无回退） ---- */
 
 static unsigned long long g_ai_seq = 0;   /* 已消费画框帧序号 */
-static unsigned long long g_raw_seq = 0;  /* 已消费原始帧序号 */
-static uint64_t g_last_ai_ms = 0;         /* 最近取到标注帧时刻（原始帧回退的退避计时） */
+static unsigned long long g_raw_seq = 0;  /* 已读取原始帧序号（仅探测/测帧率用） */
+static uint64_t g_last_ai_ms = 0;         /* 最近取到标注帧时刻（停摆宕机计时） */
 
 /* 尝试从环形队列窃取 AI 画框帧的 NV12（渲染时已转换，免去二次 JPEG 解码）。
    成功后 *out 为池内缓冲，用毕 frame_ring_buf_put_locked 回池（勿 free）；
@@ -101,11 +101,10 @@ static int rec_take_ai_frame(frame_ring_t *ring, unsigned char **out, size_t *le
     return 0;
 }
 
-/* 尝试从环形队列取原始帧（锁内拷贝最新 raw，*out 为 malloc，调用方 free）。
-   ai_stalled=1（AI 启用但停摆 >1s）时顺带置 infer_stalled，AI 恢复取帧后自动清除。
-   编码消费标记：≤ s->seq 的旧槽一并 encode_done（AI 停摆时防耗尽 32 槽） */
+/* 读取最新原始帧（锁内拷贝，*out 为 malloc，调用方 free）。
+   仅供录制会话开始前的分辨率探测与帧率实测使用——录像本身不回退原始帧 */
 static int rec_take_raw_frame(frame_ring_t *ring, unsigned char **out, size_t *len,
-                              int *fmt, int *w, int *h, int ai_stalled)
+                              int *fmt, int *w, int *h)
 {
     if (!ring) return -1;
     frame_ring_lock(ring);
@@ -114,7 +113,6 @@ static int rec_take_raw_frame(frame_ring_t *ring, unsigned char **out, size_t *l
     unsigned char *raw = malloc(s->raw.len ? s->raw.len : 1);
     if (!raw) { frame_ring_unlock(ring); return -1; }
     memcpy(raw, s->raw.buf, s->raw.len);
-    frame_ring_encode_mark_locked(ring, s, ai_stalled);
     frame_ring_unlock(ring);
     g_raw_seq = s->seq;
     *out = raw;
@@ -122,62 +120,6 @@ static int rec_take_raw_frame(frame_ring_t *ring, unsigned char **out, size_t *l
     if (fmt) *fmt = s->fmt;
     if (w) *w = s->w;
     if (h) *h = s->h;
-    return 0;
-}
-
-/* ---- 色彩转换：统一转 NV12（编码器输入） ---- */
-/* RGB24 → NV12 直接复用 yolo_image.c 的 yolo_rgb_to_nv12（同一实现，勿重复维护） */
-
-/* YUYV → NV12（4:2:2 → 4:2:0，垂直抽样偶数行） */
-static void yuyv_to_nv12(const unsigned char *src, int w, int h,
-                         unsigned char *nv12)
-{
-    unsigned char *Y = nv12;
-    unsigned char *UV = nv12 + (size_t)w * h;
-    for (int y = 0; y < h; y++) {
-        const unsigned char *row = src + (size_t)y * w * 2;
-        unsigned char *Yrow = Y + (size_t)y * w;
-        for (int x = 0; x < w; x++)
-            Yrow[x] = row[x * 2];
-        if ((y & 1) == 0) {
-            unsigned char *uv = UV + (size_t)(y / 2) * w;
-            for (int x = 0; x < w; x += 2) {
-                uv[x]     = row[x * 2 + 1];   /* U */
-                uv[x + 1] = row[x * 2 + 3];   /* V */
-            }
-        }
-    }
-}
-
-/* 把一帧（JPEG / YUYV）转为 NV12；成功返回 0，*nv12 为 malloc（调用方 free），
-   输出实际宽高（JPEG 以解码尺寸为准；YUYV 即输入 w/h）。 */
-static int rec_to_nv12(const unsigned char *data, size_t len, int fmt,
-                       int w, int h, unsigned char **nv12, size_t *nv12_len,
-                       int *out_w, int *out_h)
-{
-    if (fmt == VIDEO_FMT_MJPEG) {
-        unsigned char *rgb = NULL;
-        int rw = 0, rh = 0;
-        if (yolo_jpeg_to_rgb(data, len, &rgb, &rw, &rh) != 0 || !rgb)
-            return -1;
-        unsigned char *out = malloc((size_t)rw * rh * 3 / 2);
-        if (!out) { free(rgb); return -1; }
-        yolo_rgb_to_nv12(rgb, rw, rh, out);
-        free(rgb);
-        *nv12 = out;
-        *nv12_len = (size_t)rw * rh * 3 / 2;
-        if (out_w) *out_w = rw;
-        if (out_h) *out_h = rh;
-        return 0;
-    }
-    /* YUYV */
-    unsigned char *out = malloc((size_t)w * h * 3 / 2);
-    if (!out) return -1;
-    yuyv_to_nv12(data, w, h, out);
-    *nv12 = out;
-    *nv12_len = (size_t)w * h * 3 / 2;
-    if (out_w) *out_w = w;
-    if (out_h) *out_h = h;
     return 0;
 }
 
@@ -194,7 +136,7 @@ static int rec_measure_fps(app_ctx_t *app, frame_ring_t *ring)
         watchdog_feed_self("rec");
         unsigned char *f = NULL; size_t flen = 0;
         int fmt = 0;
-        if (rec_take_raw_frame(ring, &f, &flen, &fmt, NULL, NULL, 0) == 0) {
+        if (rec_take_raw_frame(ring, &f, &flen, &fmt, NULL, NULL) == 0) {
             uint64_t t = now_ms();
             if (t != last) { ts[n++] = t; last = t; }
             free(f);
@@ -247,7 +189,7 @@ void *video_rec_task(void *arg)
             if (pw <= 0 || ph <= 0) {    /* 配置未设分辨率：首帧探测 */
                 unsigned char *probe = NULL; size_t plen = 0;
                 int fmt = 0;
-                if (rec_take_raw_frame(ring, &probe, &plen, &fmt, &pw, &ph, 0) != 0 ||
+                if (rec_take_raw_frame(ring, &probe, &plen, &fmt, &pw, &ph) != 0 ||
                     pw <= 0 || ph <= 0) {
                     if (probe) free(probe);
                     pthread_mutex_lock(&g_rec.lock);
@@ -322,6 +264,7 @@ void *video_rec_task(void *arg)
 
             /* ---- 录制内层循环：快照轮询 20ms ---- */
             if (ring) frame_ring_set_rec_active(ring, 1);   /* 会话开始：释放规则走编码路径 */
+            g_last_ai_ms = now_ms();   /* 会话起点计时，避免启动初期误判停摆 */
             int done = 0;
             while (app->running && !done) {
                 watchdog_feed_self("rec");
@@ -330,61 +273,43 @@ void *video_rec_task(void *arg)
                 pthread_mutex_unlock(&g_rec.lock);
                 if (!still) break;
 
-                /* 取帧：AI 画框帧（渲染时已转 NV12，锁内窃取零拷贝）优先，
-                   回退原始帧（JPEG/YUYV，锁内拷贝）。took: 0=AI 窃取（用毕回池），
-                   1=raw 拷贝（free），-1=本 tick 无帧 */
+                /* 取帧：AI 画框帧（渲染时已转 NV12，锁内窃取零拷贝），无原始帧回退 */
                 unsigned char *nv12 = NULL;
                 size_t nlen = 0, ncap = 0;
-                int fw = 0, fh = 0, took = -1;
+                int fw = 0, fh = 0;
                 if (rec_take_ai_frame(ring, &nv12, &nlen, &ncap, &fw, &fh,
                                       pw, ph) == 0) {
-                    took = 0;
                     g_last_ai_ms = now_ms();
-                }
-                if (took < 0) {
-                    /* AI 可用时优先等下一帧标注帧，不逐 tick 回退原始帧：
-                       回退会使录像混入未标注帧，且原始帧 JPEG 解码白白烧 CPU
-                       （rec 线程实测 ~75%）。仅当标注帧 >1s 未更新（推理卡死
-                       降级）才回退原始帧保证录像不断流 */
-                    if (rknn_yolo_enabled() && now_ms() - g_last_ai_ms < 1000) {
-                        usleep(10000);
-                        continue;
+                } else {
+                    /* AI 必要流程：停摆 >1s（无新标注帧）直接宕机——置 fatal
+                       使 main 以退出码 1 结束，systemd Restart=on-failure 拉起 */
+                    if (now_ms() - g_last_ai_ms >= 1000) {
+                        LOG_ERROR("rec: AI inference stalled >1s (mandatory AI, "
+                                  "no raw fallback) — aborting service");
+                        app->fatal = 1;
+                        app->running = 0;
+                        sync();
+                        done = 1;
+                        break;
                     }
-                    int fmt = 0;
-                    unsigned char *raw = NULL; size_t raw_len = 0;
-                    int ai_stalled = rknn_yolo_enabled();   /* 走到这里：AI 不可用或停摆 >1s */
-                    if (rec_take_raw_frame(ring, &raw, &raw_len, &fmt, &fw, &fh,
-                                           ai_stalled) == 0) {
-                        if (fw == pw && fh == ph &&
-                            rec_to_nv12(raw, raw_len, fmt, fw, fh,
-                                        &nv12, &nlen, NULL, NULL) == 0)
-                            took = 1;
-                        free(raw);
-                    }
+                    usleep(10000);
+                    continue;
                 }
-                if (took < 0) { usleep(20000); continue; }
 
                 /* H.264 编码 */
                 unsigned char *h264 = NULL; size_t hlen = 0;
                 int keyframe = 0;
                 if (h264_encoder_encode(enc, nv12, &h264, &hlen, &keyframe) != 0) {
-                    if (took == 0) {
-                        frame_ring_lock(ring);
-                        frame_ring_buf_put_locked(ring, FRAME_RING_POOL_NV12, nv12, ncap);
-                        frame_ring_unlock(ring);
-                    } else {
-                        free(nv12);
-                    }
-                    done = 1;   /* 编码失败：结束本段（自动续录下一段） */
-                    break;
-                }
-                if (took == 0) {   /* AI 窃取的池内缓冲：用毕回池复用 */
                     frame_ring_lock(ring);
                     frame_ring_buf_put_locked(ring, FRAME_RING_POOL_NV12, nv12, ncap);
                     frame_ring_unlock(ring);
-                } else {
-                    free(nv12);
+                    done = 1;   /* 编码失败：结束本段（自动续录下一段） */
+                    break;
                 }
+                /* AI 窃取的池内缓冲：用毕回池复用 */
+                frame_ring_lock(ring);
+                frame_ring_buf_put_locked(ring, FRAME_RING_POOL_NV12, nv12, ncap);
+                frame_ring_unlock(ring);
 
                 uint64_t ts = now_ms();
                 if (rec_mp4_write_frame(s, h264, hlen, keyframe, ts) != 0) {

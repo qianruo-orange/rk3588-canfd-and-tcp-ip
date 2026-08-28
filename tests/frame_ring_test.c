@@ -271,7 +271,7 @@ static void test_full_pipeline(void)
     frame_ring_destroy(&r);
 }
 
-/* ---- 测试 6：AI 停用 + 录像激活（raw 回退拷贝 + 跳过即消费） ---- */
+/* ---- 测试 6：AI 停用 + 录像激活（raw 读取不回退；AI 停用等 encode_done 释放） ---- */
 static void test_raw_fallback(void)
 {
     frame_ring_t r;
@@ -283,28 +283,25 @@ static void test_raw_fallback(void)
 
     for (int i = 0; i < 3; i++) capture_one(&r, NULL);
 
-    /* rec 回退：锁内拷贝最新帧 → 标记消费（旧槽一并跳过） */
+    /* raw_newest 仅用于探测/测帧率锁内拷贝：最新帧不被钉住之外无副作用 */
     frame_ring_lock(&r);
     frame_slot_t *s = frame_ring_raw_newest_locked(&r);
     CHECK(s && s->seq == 3, "raw newest seq3");
     CHECK(s->raw.buf != NULL, "raw present for copy");
-    frame_ring_encode_mark_locked(&r, s, 1);   /* ai_stalled=1 */
-    CHECK(r.infer_stalled == 1, "infer_stalled set");
     frame_ring_unlock(&r);
-    /* 帧 1、2 已被跳过标记 → 释放；帧 3 最新钉住 */
+    /* 无回退标记：帧 1、2 未被消费，仍钉住 */
+    CHECK(g_qbuf_count == 0, "no raw released without consume, qbuf=0 got %d", g_qbuf_count);
+
+    /* 模拟 rec 消费帧 1~3（encode_advance 标记消费）→ 帧 1、2 释放；
+       帧 3 最新钉住，帧 4 到达后释放 */
+    frame_ring_lock(&r);
+    frame_ring_encode_advance_locked(&r, &r.slots[3]);
+    frame_ring_unlock(&r);
     CHECK(g_qbuf_count == 2, "frames 1-2 released, qbuf=2 got %d", g_qbuf_count);
 
     /* 帧 4：帧 3 释放 */
     capture_one(&r, NULL);
     CHECK(g_qbuf_count == 3, "frame3 released, qbuf=3 got %d", g_qbuf_count);
-
-    /* AI 恢复：成功取帧自动清除 infer_stalled */
-    frame_ring_lock(&r);
-    frame_slot_t *c = frame_ring_infer_claim_locked(&r, 4);
-    CHECK(c != NULL, "claim seq4 after recovery");
-    CHECK(r.infer_stalled == 0, "infer_stalled cleared on claim");
-    frame_ring_infer_unclaim_locked(&r, c, 1);
-    frame_ring_unlock(&r);
 
     /* 停录：nv12/raw 立即回收 */
     frame_ring_set_rec_active(&r, 0);
@@ -448,38 +445,29 @@ static void test_pool_reuse(void)
     frame_ring_destroy(&r);
 }
 
-/* ---- 测试 10：推理停摆时旧槽由编码路径释放（防 32 槽耗尽） ---- */
+/* ---- 测试 10：AI 激活时 raw 仅由推理消费释放（无编码回退释放路径） ---- */
 static void test_ai_stall_release(void)
 {
     frame_ring_t r;
     frame_ring_init(&r);
     frame_ring_set_raw_release_cb(&r, fake_release_cb, NULL);
     g_qbuf_count = 0;
-    frame_ring_set_ai_active(&r, 1);   /* AI 激活但停摆：无人 claim */
+    frame_ring_set_ai_active(&r, 1);   /* AI 激活：raw 释放只看 infer_done */
     frame_ring_set_rec_active(&r, 1);
 
     for (int i = 0; i < 4; i++) capture_one(&r, NULL);
-    /* rec 检测停摆 → 回退拷贝最新帧并置 stalled */
-    frame_ring_lock(&r);
-    frame_slot_t *s = frame_ring_raw_newest_locked(&r);
-    CHECK(s && s->seq == 4, "raw newest seq4");
-    frame_ring_encode_mark_locked(&r, s, 1);
-    frame_ring_unlock(&r);
-    /* 帧 1-3 经 stalled 路径释放（encode_done 跳过标记），帧 4 钉住 */
-    CHECK(g_qbuf_count == 3, "stalled path releases frames 1-3, got %d", g_qbuf_count);
-    capture_one(&r, NULL);   /* 帧 5 → 帧 4 释放 */
-    CHECK(g_qbuf_count == 4, "frame4 released, got %d", g_qbuf_count);
+    /* 无人 claim：旧槽钉住（停摆由 rec 线程宕机处理，环不再兜底释放） */
+    CHECK(g_qbuf_count == 0, "no release without infer consume, got %d", g_qbuf_count);
 
-    /* AI 恢复：帧 1-4 槽已被编码路径释放 → claim 全部失败（跳过），
-       最新帧 5 仍钉住 → claim 成功并自动清除 infer_stalled */
+    /* AI 消费帧 1 → infer_done → 释放（非最新） */
     frame_ring_lock(&r);
-    CHECK(frame_ring_infer_claim_locked(&r, 1) == NULL, "released slot claim fails");
-    CHECK(frame_ring_infer_claim_locked(&r, 4) == NULL, "stalled-consumed slot claim fails");
-    frame_slot_t *c = frame_ring_infer_claim_locked(&r, 5);
-    CHECK(c != NULL, "claim seq5 ok");
-    CHECK(r.infer_stalled == 0, "infer_stalled cleared on claim");
+    frame_slot_t *c = frame_ring_infer_claim_locked(&r, 1);
+    CHECK(c != NULL, "claim seq1");
     frame_ring_infer_unclaim_locked(&r, c, 1);
     frame_ring_unlock(&r);
+    CHECK(g_qbuf_count == 1, "frame1 released after infer_done, got %d", g_qbuf_count);
+
+    frame_ring_set_rec_active(&r, 0);
     frame_ring_destroy(&r);
 }
 

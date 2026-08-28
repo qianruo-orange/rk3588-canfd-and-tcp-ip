@@ -117,7 +117,7 @@ static void release_raw_locked(frame_ring_t *r, frame_slot_t *s)
 
 /* 统一维护各阶段缓冲释放（遍历 32 槽，每帧若干次，开销可忽略）：
  *   raw  非最新钉住（原始流客户端锁内拷贝最新帧） + 无锁外读引用 +
- *        消费完成（AI 激活时等 infer_done；AI 停用/停摆时等编码消费或录像未激活）
+ *        消费完成（AI 激活时等 infer_done；AI 停用时等编码消费或录像未激活）
  *   rgb  worker 结果入槽后，seq 已越过最新渲染即回池（含跳帧与迟到 worker）
  *   jpeg 最新显示帧钉住（推流客户端锁内拷贝），其余回池
  *   nv12 当前显示帧钉住（rec 窃取目标），其余 encode_done 或录像未激活即回池 */
@@ -128,9 +128,8 @@ static void frame_ring_maintain_locked(frame_ring_t *r)
         if (!s->seq) continue;
 
         if (s->raw_present && s->seq != r->produce_seq && s->raw_claims == 0) {
-            int consumed = (r->ai_active && !r->infer_stalled)
-                               ? s->infer_done
-                               : (s->encode_done || !r->rec_active);
+            int consumed = r->ai_active ? s->infer_done
+                                        : (s->encode_done || !r->rec_active);
             if (consumed) release_raw_locked(r, s);
         }
         if (s->rgb.buf && s->rgb_done && s->seq <= r->display_seq) {
@@ -191,10 +190,9 @@ frame_slot_t *frame_ring_infer_claim_locked(frame_ring_t *r, unsigned long long 
 {
     if (r->quiescing || seq == 0 || seq > r->produce_seq) return NULL;
     frame_slot_t *s = slot_of(r, seq);
-    /* 槽可能已被释放（AI 停摆期间编码侧消费）或被新帧复用：跳过由调用方推进游标 */
+    /* 槽可能已被释放（旧帧已被新帧复用）或采集已回收：跳过由调用方推进游标 */
     if (s->seq != seq || !s->raw_present) return NULL;
     s->raw_claims++;
-    r->infer_stalled = 0;   /* 取帧成功即表明 AI 已恢复消费 */
     return s;
 }
 
@@ -275,18 +273,6 @@ frame_slot_t *frame_ring_raw_newest_locked(frame_ring_t *r)
     frame_slot_t *s = slot_of(r, r->produce_seq);
     if (s->seq != r->produce_seq || !s->raw_present) return NULL;
     return s;
-}
-
-void frame_ring_encode_mark_locked(frame_ring_t *r, frame_slot_t *s, int ai_stalled)
-{
-    /* 回退拷贝只读最新帧：更早的槽等同被编码跳过，一并标记
-       （AI 停用时旧槽不会再有 infer_done，不标记将耗尽 32 槽导致采集卡死） */
-    for (int i = 0; i < FRAME_RING_N; i++) {
-        frame_slot_t *t = &r->slots[i];
-        if (t->seq && t->seq <= s->seq && !t->encode_done) t->encode_done = 1;
-    }
-    if (ai_stalled) r->infer_stalled = 1;   /* ai_task 成功取帧时自动清除 */
-    frame_ring_maintain_locked(r);
 }
 
 /* ---- 模式标志 ---- */

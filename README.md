@@ -28,7 +28,7 @@
         ├─► http_task     ──► Web 管理 + REST API + MJPEG 推流
         ├─► video_task    ──► V4L2 采集（mmap 零拷贝入环形队列）
         ├─► ai_task       ──► 事件驱动消费环槽 → 推理队列（多线程池并行推理）→ 结果写回环槽
-        ├─► rec_task      ──► 网络录像（零拷贝取显示帧 NV12，AI 停摆回退原始帧）→ H.264 硬件编码 → MP4(avc1)
+        ├─► rec_task      ──► 网络录像（零拷贝取显示帧 NV12，AI 停摆直接宕机）→ H.264 硬件编码 → MP4(avc1)
         └─► watchdog_task ──► 心跳监控 + sd_notify
 ```
 
@@ -41,7 +41,7 @@
 | `http` | HTTP 管理服务主循环、REST API、MJPEG 推流 |
 | `video` | V4L2 采集：mmap 指针零拷贝入环形队列，推进 produce 游标 |
 | `ai` | 事件驱动消费环槽（infer 游标）、推理任务投递；模型加载与多线程推理池（每线程独立 rknn context） |
-| `rec` | 网络录像：从环取显示帧 NV12 直接编码（encode 游标，AI 停摆回退原始帧）→ H.264 硬件编码 → MP4(avc1) 封装落盘 |
+| `rec` | 网络录像：从环取显示帧 NV12 直接编码（encode 游标；AI 停摆 >1s 置 fatal 整体宕机）→ H.264 硬件编码 → MP4(avc1) 封装落盘 |
 | `watchdog` | 线程心跳监控与 `sd_notify` |
 
 > 注：`signal` 模块仅注册信号处理（`init`），`task` 为空，不创建线程。
@@ -64,8 +64,8 @@ V4L2 摄像头（MJPEG / YUYV）
 - 采集：`video_task` V4L2 mmap 缓冲 DQBUF 后指针直接进槽（延迟 QBUF 至消费完成，真正零拷贝），环满才丢弃（capture_dropped）；优先 MJPEG，失败回退 YUYV；分辨率取 `video_width` / `video_height`
 - 推理：`ai_task` 阻塞等待 produce 游标（事件驱动，不再按固定间隔采样），取槽随任务投递 worker（任务存续期间钉住 raw 槽，采集不回收），解码 RGB 写入槽
 - 显示：composer 最新完成槽优先（跳过旧结果计 render_skipped），画框写 nv12 / jpeg 进槽；每个 `/video/mjpeg*` 连接一个独立线程各自拷贝最新 JPEG 推流（multipart/x-mixed-replace），慢客户端不钉槽、不阻塞其他连接
-- 编码：`rec_task` 从 encode 游标零拷贝窃取显示帧 NV12（用毕归还缓冲池）；AI 停摆超时回退拷贝原始帧转 NV12；与编码器分辨率不符时跳过（encode_skipped）
-- AI 必要流程：模型缺失 / NPU 不可用时启动直接失败退出（systemd failed），`/video/mjpeg_ai` 返回 503，不回退原始帧
+- 编码：`rec_task` 从 encode 游标零拷贝窃取显示帧 NV12（用毕归还缓冲池）；与编码器分辨率不符时跳过（encode_skipped）
+- AI 必要流程：模型缺失 / NPU 不可用时启动直接失败退出（systemd failed），`/video/mjpeg_ai` 返回 503，不回退原始帧；运行期 AI 停摆 >1s（无新标注帧）不回退原始帧，直接整体宕机（退出码 1 → systemd Restart=on-failure 拉起）
 
 视频数据提取接口：
 
@@ -471,7 +471,7 @@ RKNN + YOLO26（官方 ultralytics 单输出格式 `(1, 84, 8400)`，fp16，官�
 - 按天分目录：录制文件存于 `recordings/YYYYMMDD/`，每天一个子目录，自动跨天切换；文件名规范化只保留时间（`rec_HHMMSS.mp4`，同秒冲突自动追加序号），日志文件同理为 `rk3588-canfd-and-tcp-ip_info.log` / `_error.log`
 - 分辨率：录制分辨率取摄像头配置 `video_width` / `video_height` 的选定值（任意分辨率），未配置时退回首帧探测
 - 帧率：开录前连续抓帧实测（不写死），钳制在 1~120 fps
-- 编码链路：零拷贝取环形队列显示帧 NV12（AI 停摆超时回退拷贝原始帧转 NV12）→ `/dev/video-enc0` 硬件编码 H.264（CBR，码率 `宽×高×2`，钳制 300k~16M，GOP = fps×2）→ 封装
+- 编码链路：零拷贝取环形队列显示帧 NV12（AI 必要流程，停摆直接宕机，无原始帧回退）→ `/dev/video-enc0` 硬件编码 H.264（CBR，码率 `宽×高×2`，钳制 300k~16M，GOP = fps×2）→ 封装
 - 封装格式：标准 ISO BMFF MP4（avc1 track，SPS/PPS 取自编码器，stss 记录 IDR 关键帧），`ftyp + mdat + moov`，moov 末尾回写记录每帧偏移与时长，Chrome / VLC / ffplay 均可播放
 - 下载管理：与日志下载界面合并为「文件下载」页（`/logs`），TAB 切换日志 / 录像列表，支持下载、删除、打包下载（日志 `/logs/pack`、录像 `/api/rec/pack`，录像打包上限 2GB；文件名白名单 + 两段式路径校验防穿越）
 - 上限保护：单次录制帧数与 mdat 体积上限（防止 32 位 size 溢出），达到上限自动收尾并续录下一段

@@ -39,6 +39,8 @@ struct app_config_t;
 /* 应用运行时上下文：唯一的共享状态容器，通过指针传递给各线程 / 各模块 */
 typedef struct app_ctx {
     atomic_int            running;    /* 运行标志（C11 原子，信号处理器与各线程安全读写） */
+    volatile int          fatal;      /* 运行期致命错误（如 AI 停摆）：置 1 并停 running，
+                                         main 以退出码 1 结束 → systemd Restart=on-failure 拉起 */
     pthread_mutex_t        can_mutex; /* CAN sock_fd 并发修改互斥锁 */
     struct can_ctx        *can;
     struct tcp_ctx        *tcp;

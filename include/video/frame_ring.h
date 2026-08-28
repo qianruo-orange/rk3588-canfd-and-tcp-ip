@@ -167,6 +167,9 @@ void frame_ring_display_commit_locked(frame_ring_t *r, frame_slot_t *s);
 frame_slot_t *frame_ring_encode_pick_locked(frame_ring_t *r, unsigned long long next_seq);
 /* rec 已消费（窃取或尺寸不符跳过）：encode_done=1 */
 void frame_ring_encode_advance_locked(frame_ring_t *r, frame_slot_t *s);
+/* 尺寸不符等丢弃：与 advance 相同的消费标记，另计 encode_skipped++
+   （槽内 nv12 留待显示推进后按维护规则回池） */
+void frame_ring_encode_skip_locked(frame_ring_t *r, frame_slot_t *s);
 /* raw 回退（AI 停摆/停用）：返回最新 raw 槽，锁内 memcpy 后调 encode_mark。
    AI 停摆时顺带置 infer_stalled（ai_task 恢复取帧后自动清除） */
 frame_slot_t *frame_ring_raw_newest_locked(frame_ring_t *r);

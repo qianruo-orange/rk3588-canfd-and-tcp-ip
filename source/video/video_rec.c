@@ -10,6 +10,11 @@
  *   video_rec_start/stop 手动控制，手动停止后不再自动续录。
  * 录制分辨率取摄像头配置（cfg->video_width/height），未配置时退回首帧探测；
  * 帧率/码率不写死：会话开始前实测帧间隔，码率按分辨率动态计算。
+ *
+ * 帧来源为视频帧环形队列（video/frame_ring.h）编码游标：
+ *   AI 画框帧 → encode_pick 锁内窃取槽内 nv12（零拷贝，用毕回池）；
+ *   原始帧（AI 停摆/不可用回退）→ 锁内拷贝最新 raw + encode_mark。
+ * 会话期间置 rec_active（槽位释放规则改走编码路径），结束即清除。
  */
 
 #define _GNU_SOURCE
@@ -29,6 +34,7 @@
 #include "video/rec_mp4.h"
 #include "video/h264_encoder.h"
 #include "video/video_stream.h"
+#include "video/frame_ring.h"
 #include "ai/rknn_yolo.h"
 #include "ai/yolo_image.h"
 #include "core/common.h"
@@ -61,57 +67,61 @@ static uint64_t now_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
 }
 
-/* ---- 帧获取：AI 画框帧优先，回退原始帧（返回 malloc 的 JPEG，调用方 free） ---- */
+/* ---- 帧获取：AI 画框帧优先（环形队列编码游标），回退原始帧 ---- */
 
 static unsigned long long g_ai_seq = 0;   /* 已消费画框帧序号 */
 static unsigned long long g_raw_seq = 0;  /* 已消费原始帧序号 */
 static uint64_t g_last_ai_ms = 0;         /* 最近取到标注帧时刻（原始帧回退的退避计时） */
 
-/* 尝试取 AI 画框帧的 NV12（渲染时已转换，免去二次 JPEG 解码）；无新帧返回 -1 */
-static int rec_take_ai_frame(unsigned char **out, size_t *len, int *w, int *h)
+/* 尝试从环形队列窃取 AI 画框帧的 NV12（渲染时已转换，免去二次 JPEG 解码）。
+   成功后 *out 为池内缓冲，用毕 frame_ring_buf_put_locked 回池（勿 free）；
+   无新帧或与编码器分辨率不符返回 -1（尺寸不符走 encode_skip，encode_skipped++） */
+static int rec_take_ai_frame(frame_ring_t *ring, unsigned char **out, size_t *len,
+                             size_t *cap, int *w, int *h, int pw, int ph)
 {
-    if (!rknn_yolo_enabled()) return -1;
-    unsigned long long seq = rknn_yolo_get_frame_seq();
-    if (seq == 0 || seq == g_ai_seq) return -1;
-    unsigned long long aseq = 0;
-    if (rknn_yolo_get_frame_nv12(out, len, &aseq, w, h) != 0) return -1;
-    g_ai_seq = aseq;
+    if (!ring || !rknn_yolo_enabled()) return -1;
+    frame_ring_lock(ring);
+    frame_slot_t *s = frame_ring_encode_pick_locked(ring, g_ai_seq);
+    if (!s) { frame_ring_unlock(ring); return -1; }
+    g_ai_seq = s->seq;
+    if (s->w != pw || s->h != ph) {   /* 与编码器分辨率不符：跳过该帧 */
+        frame_ring_encode_skip_locked(ring, s);
+        frame_ring_unlock(ring);
+        return -1;
+    }
+    *out = s->nv12.buf;   /* 锁内窃取：所有权移交 rec（槽内指针摘除，免每帧拷贝） */
+    *len = s->nv12.len;
+    *cap = s->nv12.cap;
+    if (w) *w = s->w;
+    if (h) *h = s->h;
+    s->nv12.buf = NULL;
+    s->nv12.len = s->nv12.cap = 0;
+    frame_ring_encode_advance_locked(ring, s);
+    frame_ring_unlock(ring);
     return 0;
 }
 
-/* 尝试取原始帧并转 JPEG；无新帧返回 -1 */
-static int rec_take_raw_frame(unsigned char **out, size_t *len, int *w, int *h)
+/* 尝试从环形队列取原始帧（锁内拷贝最新 raw，*out 为 malloc，调用方 free）。
+   ai_stalled=1（AI 启用但停摆 >1s）时顺带置 infer_stalled，AI 恢复取帧后自动清除。
+   编码消费标记：≤ s->seq 的旧槽一并 encode_done（AI 停摆时防耗尽 32 槽） */
+static int rec_take_raw_frame(frame_ring_t *ring, unsigned char **out, size_t *len,
+                              int *fmt, int *w, int *h, int ai_stalled)
 {
-    /* 先无拷贝窥探序号：录像线程 10-20ms 轮询，多数时刻无新帧，
-       跳过整帧 malloc+memcpy */
-    unsigned long long seq = video_stream_get_frame_seq();
-    if (seq == 0 || seq == g_raw_seq) return -1;
-
-    unsigned char *raw = NULL;
-    size_t raw_len = 0;
-    int fmt = 0, fw = 0, fh = 0;
-    if (video_stream_get_frame(&raw, &raw_len, &fmt, &fw, &fh, &seq) != 0)
-        return -1;
-    /* 窥探与拷贝间隙恰有新帧发布：拷贝后仍按 seq 去重 */
-    if (seq == 0 || seq == g_raw_seq) { free(raw); return -1; }
-    g_raw_seq = seq;
-
-    if (fmt == VIDEO_FMT_MJPEG) {
-        *out = raw;               /* 直接复用 */
-        *len = raw_len;
-    } else {                      /* YUYV → RGB → JPEG */
-        unsigned char *rgb = malloc((size_t)fw * fh * 3);
-        if (!rgb) { free(raw); return -1; }
-        yolo_yuyv_to_rgb(raw, fw, fh, rgb);
-        free(raw);
-        if (yolo_rgb_to_jpeg(rgb, fw, fh, out, len) != 0) {
-            free(rgb);
-            return -1;
-        }
-        free(rgb);
-    }
-    if (w) *w = fw;
-    if (h) *h = fh;
+    if (!ring) return -1;
+    frame_ring_lock(ring);
+    frame_slot_t *s = frame_ring_raw_newest_locked(ring);
+    if (!s || s->seq == g_raw_seq) { frame_ring_unlock(ring); return -1; }
+    unsigned char *raw = malloc(s->raw.len ? s->raw.len : 1);
+    if (!raw) { frame_ring_unlock(ring); return -1; }
+    memcpy(raw, s->raw.buf, s->raw.len);
+    frame_ring_encode_mark_locked(ring, s, ai_stalled);
+    frame_ring_unlock(ring);
+    g_raw_seq = s->seq;
+    *out = raw;
+    *len = s->raw.len;
+    if (fmt) *fmt = s->fmt;
+    if (w) *w = s->w;
+    if (h) *h = s->h;
     return 0;
 }
 
@@ -173,7 +183,7 @@ static int rec_to_nv12(const unsigned char *data, size_t len, int fmt,
 
 /* 实测帧率（不写死）：连续抓若干新帧取平均间隔，fps = 1000/avg_ms。
    失败返回 0（无视频帧）。 */
-static int rec_measure_fps(app_ctx_t *app)
+static int rec_measure_fps(app_ctx_t *app, frame_ring_t *ring)
 {
     enum { N = 8 };
     uint64_t ts[N];
@@ -183,7 +193,8 @@ static int rec_measure_fps(app_ctx_t *app)
     while (n < N && app->running) {
         watchdog_feed_self("rec");
         unsigned char *f = NULL; size_t flen = 0;
-        if (rec_take_raw_frame(&f, &flen, NULL, NULL) == 0) {
+        int fmt = 0;
+        if (rec_take_raw_frame(ring, &f, &flen, &fmt, NULL, NULL, 0) == 0) {
             uint64_t t = now_ms();
             if (t != last) { ts[n++] = t; last = t; }
             free(f);
@@ -208,6 +219,7 @@ void *video_rec_task(void *arg)
 {
     app_ctx_t *app = (app_ctx_t *)arg;
     cpu_bind_big();
+    frame_ring_t *ring = video_stream_get_ring();
     int auto_rec = 1;                    /* 默认自动开启录制 */
     int init_fail_cnt = 0;               /* 编码器连续初始化失败计数（日志退避） */
 
@@ -234,7 +246,8 @@ void *video_rec_task(void *arg)
             int pw = app->cfg->video_width, ph = app->cfg->video_height;
             if (pw <= 0 || ph <= 0) {    /* 配置未设分辨率：首帧探测 */
                 unsigned char *probe = NULL; size_t plen = 0;
-                if (rec_take_raw_frame(&probe, &plen, &pw, &ph) != 0 ||
+                int fmt = 0;
+                if (rec_take_raw_frame(ring, &probe, &plen, &fmt, &pw, &ph, 0) != 0 ||
                     pw <= 0 || ph <= 0) {
                     if (probe) free(probe);
                     pthread_mutex_lock(&g_rec.lock);
@@ -247,7 +260,7 @@ void *video_rec_task(void *arg)
             }
 
             /* 实测帧率（不写死）→ 按分辨率动态码率 → 创建 H.264 编码器 */
-            int fps = rec_measure_fps(app);
+            int fps = rec_measure_fps(app, ring);
             if (fps <= 0) {
                 pthread_mutex_lock(&g_rec.lock);
                 g_rec.start_fail = 1;   /* 无视频帧 */
@@ -308,6 +321,7 @@ void *video_rec_task(void *arg)
             pthread_mutex_unlock(&g_rec.lock);
 
             /* ---- 录制内层循环：快照轮询 20ms ---- */
+            if (ring) frame_ring_set_rec_active(ring, 1);   /* 会话开始：释放规则走编码路径 */
             int done = 0;
             while (app->running && !done) {
                 watchdog_feed_self("rec");
@@ -316,18 +330,16 @@ void *video_rec_task(void *arg)
                 pthread_mutex_unlock(&g_rec.lock);
                 if (!still) break;
 
-                /* 取帧：AI 画框帧（渲染时已转 NV12）优先，回退原始帧（JPEG/YUYV） */
+                /* 取帧：AI 画框帧（渲染时已转 NV12，锁内窃取零拷贝）优先，
+                   回退原始帧（JPEG/YUYV，锁内拷贝）。took: 0=AI 窃取（用毕回池），
+                   1=raw 拷贝（free），-1=本 tick 无帧 */
                 unsigned char *nv12 = NULL;
-                size_t nlen = 0;
+                size_t nlen = 0, ncap = 0;
                 int fw = 0, fh = 0, took = -1;
-                if (rec_take_ai_frame(&nv12, &nlen, &fw, &fh) == 0) {
-                    if (fw == pw && fh == ph) {
-                        took = 0;
-                        g_last_ai_ms = now_ms();
-                    } else {   /* AI 帧分辨率与编码器不符：丢弃，走原始帧 */
-                        free(nv12);
-                        nv12 = NULL;
-                    }
+                if (rec_take_ai_frame(ring, &nv12, &nlen, &ncap, &fw, &fh,
+                                      pw, ph) == 0) {
+                    took = 0;
+                    g_last_ai_ms = now_ms();
                 }
                 if (took < 0) {
                     /* AI 可用时优先等下一帧标注帧，不逐 tick 回退原始帧：
@@ -338,17 +350,17 @@ void *video_rec_task(void *arg)
                         usleep(10000);
                         continue;
                     }
-                    int fmt = 0; unsigned long long seq = 0;
+                    int fmt = 0;
                     unsigned char *raw = NULL; size_t raw_len = 0;
-                    if (video_stream_get_frame(&raw, &raw_len, &fmt, &fw, &fh, &seq) == 0 &&
-                        seq != g_raw_seq) {
-                        g_raw_seq = seq;
+                    int ai_stalled = rknn_yolo_enabled();   /* 走到这里：AI 不可用或停摆 >1s */
+                    if (rec_take_raw_frame(ring, &raw, &raw_len, &fmt, &fw, &fh,
+                                           ai_stalled) == 0) {
                         if (fw == pw && fh == ph &&
                             rec_to_nv12(raw, raw_len, fmt, fw, fh,
                                         &nv12, &nlen, NULL, NULL) == 0)
-                            took = 0;
+                            took = 1;
+                        free(raw);
                     }
-                    if (raw) free(raw);
                 }
                 if (took < 0) { usleep(20000); continue; }
 
@@ -356,11 +368,23 @@ void *video_rec_task(void *arg)
                 unsigned char *h264 = NULL; size_t hlen = 0;
                 int keyframe = 0;
                 if (h264_encoder_encode(enc, nv12, &h264, &hlen, &keyframe) != 0) {
-                    free(nv12);
+                    if (took == 0) {
+                        frame_ring_lock(ring);
+                        frame_ring_buf_put_locked(ring, FRAME_RING_POOL_NV12, nv12, ncap);
+                        frame_ring_unlock(ring);
+                    } else {
+                        free(nv12);
+                    }
                     done = 1;   /* 编码失败：结束本段（自动续录下一段） */
                     break;
                 }
-                free(nv12);
+                if (took == 0) {   /* AI 窃取的池内缓冲：用毕回池复用 */
+                    frame_ring_lock(ring);
+                    frame_ring_buf_put_locked(ring, FRAME_RING_POOL_NV12, nv12, ncap);
+                    frame_ring_unlock(ring);
+                } else {
+                    free(nv12);
+                }
 
                 uint64_t ts = now_ms();
                 if (rec_mp4_write_frame(s, h264, hlen, keyframe, ts) != 0) {
@@ -378,6 +402,7 @@ void *video_rec_task(void *arg)
             }
 
             /* ---- 结束会话（finalize 内部释放对象） ---- */
+            if (ring) frame_ring_set_rec_active(ring, 0);   /* 会话结束：回池 nv12 等 */
             uint32_t n_frames = rec_mp4_frames(s);
             uint32_t n_bytes  = rec_mp4_bytes(s);
             rec_mp4_finalize(s);
@@ -466,5 +491,8 @@ void video_rec_destroy(void *arg)
     g_rec.recording = 0;
     g_rec.cmd = REC_CMD_NONE;
     pthread_mutex_unlock(&g_rec.lock);
+    /* 兜底：异常退出未走会话收尾时也解除 rec_active（rec 先于 video 析构，环仍有效） */
+    frame_ring_t *ring = video_stream_get_ring();
+    if (ring) frame_ring_set_rec_active(ring, 0);
     pthread_mutex_destroy(&g_rec.lock);
 }

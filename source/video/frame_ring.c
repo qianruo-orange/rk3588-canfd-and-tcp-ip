@@ -247,15 +247,26 @@ frame_slot_t *frame_ring_encode_pick_locked(frame_ring_t *r,
     return best;
 }
 
-void frame_ring_encode_advance_locked(frame_ring_t *r, frame_slot_t *s)
+/* rec 消费到 s：被跳过（seq ≤ s->seq 未消费）的槽一并标记，
+   其 nv12/raw 由 maintain 回池/释放 */
+static void encode_mark_consumed_locked(frame_ring_t *r, frame_slot_t *s)
 {
-    /* rec 消费了 s：被跳过（seq ≤ s->seq 未消费）的槽一并标记，
-       其 nv12/raw 由 maintain 回池/释放 */
     for (int i = 0; i < FRAME_RING_N; i++) {
         frame_slot_t *t = &r->slots[i];
         if (t->seq && t->seq <= s->seq && !t->encode_done) t->encode_done = 1;
     }
     frame_ring_maintain_locked(r);
+}
+
+void frame_ring_encode_advance_locked(frame_ring_t *r, frame_slot_t *s)
+{
+    encode_mark_consumed_locked(r, s);
+}
+
+void frame_ring_encode_skip_locked(frame_ring_t *r, frame_slot_t *s)
+{
+    encode_mark_consumed_locked(r, s);
+    r->encode_skipped++;
 }
 
 frame_slot_t *frame_ring_raw_newest_locked(frame_ring_t *r)

@@ -483,6 +483,53 @@ static void test_ai_stall_release(void)
     frame_ring_destroy(&r);
 }
 
+/* ---- 测试 11：编码跳过（尺寸不符丢弃：encode_skipped++、nv12 留槽待显示推进回池） ---- */
+static void test_encode_skip(void)
+{
+    frame_ring_t r;
+    frame_ring_init(&r);
+    frame_ring_set_raw_release_cb(&r, fake_release_cb, NULL);
+    g_qbuf_count = 0;
+    frame_ring_set_rec_active(&r, 1);
+
+    /* 1 帧完整流转：采集 → 推理解码 → worker 结果入槽 → 渲染（nv12/jpeg 入槽） */
+    unsigned long long seq = capture_one(&r, NULL);
+    CHECK(infer_one(&r, seq) == 0, "infer seq%llu", seq);
+    frame_ring_lock(&r);
+    frame_slot_t *s = &r.slots[seq & 31];
+    frame_ring_buf_take_locked(&r, FRAME_RING_POOL_RGB, 100, &s->rgb);
+    s->rgb_done = 1;
+    frame_ring_signal(&r);
+    frame_ring_unlock(&r);
+    frame_ring_lock(&r);
+    frame_slot_t *d = frame_ring_display_pick_locked(&r, 0);
+    CHECK(d && d->seq == seq, "display picks seq%llu", seq);
+    ring_buf_t nv, jp;
+    frame_ring_buf_take_locked(&r, FRAME_RING_POOL_NV12, 100, &nv);
+    frame_ring_buf_take_locked(&r, FRAME_RING_POOL_JPEG, 100, &jp);
+    d->nv12 = nv; d->nv12.len = 100;
+    d->jpeg = jp; d->jpeg.len = 100;
+    frame_ring_display_commit_locked(&r, d);
+    unsigned char *nv12_buf = d->nv12.buf;
+    frame_ring_unlock(&r);
+
+    /* rec 检出尺寸不符 → encode_skip：encode_done 置位 + encode_skipped++，
+       nv12 仍钉在当前显示槽（待显示推进后按维护规则回池），不会泄漏 */
+    frame_ring_lock(&r);
+    frame_slot_t *e = frame_ring_encode_pick_locked(&r, 0);
+    CHECK(e && e->seq == seq, "encode picks displayed slot");
+    frame_ring_encode_skip_locked(&r, e);
+    CHECK(e->encode_done == 1, "encode_done set on skip");
+    CHECK(r.encode_skipped == 1, "encode_skipped=1 got %llu", r.encode_skipped);
+    CHECK(e->nv12.buf == nv12_buf, "nv12 stays pinned in display slot");
+    frame_ring_unlock(&r);
+
+    frame_ring_stats_t st;
+    frame_ring_stats(&r, &st);
+    CHECK(st.encode_skipped == 1, "stats encode_skipped=1 got %llu", st.encode_skipped);
+    frame_ring_destroy(&r);
+}
+
 int main(void)
 {
     test_basic_flow();
@@ -495,6 +542,7 @@ int main(void)
     test_event_wait();
     test_pool_reuse();
     test_ai_stall_release();
+    test_encode_skip();
 
     printf("frame_ring_test: %d checks, %d failure(s)\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

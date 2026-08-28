@@ -715,31 +715,6 @@ unsigned long long rknn_yolo_get_frame_seq(void)
     return s;
 }
 
-int rknn_yolo_get_frame_nv12(unsigned char **data, size_t *len,
-                             unsigned long long *seq, int *w, int *h)
-{
-    if (!g_ai.enabled || !data || !len || !seq) return -1;
-    frame_ring_t *ring = ai_ring();
-    if (!ring) return -1;
-    frame_ring_lock(ring);
-    frame_slot_t *s = ai_slot(ring, ring->display_seq);
-    if (s->seq != ring->display_seq || !s->nv12.buf || s->nv12.len == 0) {
-        frame_ring_unlock(ring);
-        return -1;
-    }
-    /* 所有权移交（单消费者：录像编码线程）：槽内指针摘除，免每帧 3MB 拷贝。
-       缓冲为池内 malloc 内存，free 合法（第 4 阶段改为用毕回池） */
-    *data = s->nv12.buf;
-    *len  = s->nv12.len;
-    *seq  = s->seq;
-    if (w) *w = s->w;
-    if (h) *h = s->h;
-    s->nv12.buf = NULL;
-    s->nv12.len = s->nv12.cap = 0;
-    frame_ring_unlock(ring);
-    return 0;
-}
-
 /* ---- AI 采集线程（main 模块框架 task）：等新帧 → claim → 解码 → 投递队列 ---- */
 void *rknn_ai_task(void *arg)
 {

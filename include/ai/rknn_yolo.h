@@ -21,12 +21,13 @@
  *
  * 热重载：rknn_yolo_reload() 停池 → 重读配置（模型/标签/线程数/阈值等）→ 重建。
  *
- * 优雅降级：无模型 / NPU 驱动未加载 / 推理失败 → enabled=0，原视频流照常，
- * 画框流客户端回退到原始帧。所有失败路径只记日志不崩溃。
+ * 必要流程：AI 推理不可停用。无模型 / NPU 驱动未加载 / 推理失败 → 直接报错：
+ * 启动路径整体失败退出；运行期热重载失败由 HTTP 接口报告，画框流返回 503。
+ * 所有失败路径只记日志不崩溃。
  */
 
-/* 初始化：读配置加载模型并创建推理线程池；返回 0 成功（含"未启用"成功态）。
-   模型缺失/NPU 不可用只置 enabled=0 并记日志，不阻断程序启动 */
+/* 初始化：读配置加载模型并创建推理线程池；返回 0 成功。
+   模型缺失/NPU 不可用返回 -1（无 AI 直接报错，服务启动失败） */
 int rknn_yolo_init(void *arg);
 void rknn_yolo_destroy(void *arg);
 int rknn_yolo_enabled(void);
@@ -45,10 +46,5 @@ int rknn_yolo_get_frame(unsigned char **data, size_t *len, unsigned long long *s
 
 /* 轻量查询最新画框帧序号（无新帧拷贝开销）；@return 帧序号，0 表示尚无画框帧 */
 unsigned long long rknn_yolo_get_frame_seq(void);
-
-/* 取最新画框帧的 NV12（渲染时已转换，供录像编码链路复用，免二次 JPEG 解码）。
-   所有权移交调用方（free *data；单消费者语义）；@return 0 成功，-1 无可用帧 */
-int rknn_yolo_get_frame_nv12(unsigned char **data, size_t *len,
-                             unsigned long long *seq, int *w, int *h);
 
 #endif /* RKNN_YOLO_H */

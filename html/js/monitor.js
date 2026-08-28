@@ -9,43 +9,66 @@
   var lastNet = {eth0:{rx:0,tx:0,ts:0},wlan0:{rx:0,tx:0,ts:0}};
   var netInited = false;
 
-  /* 视频流 FPS：独立 fetch 读取 MJPEG 字节流，扫描 JPEG 帧头（SOI FF D8）计数。
-     与 img 显示解耦，不依赖浏览器 multipart 解析逐帧触发 load 事件 */
+  /* 视频流：单条 fetch 连接同时喂 <img>（blob URL 逐帧）并扫描 SOI(FF D8) 计数。
+     旧方案是 <img src> 显示 + 独立 fetch 计数双路下载同一流（流量×2），
+     浏览器/无线吃紧时会间歇掉速；单路方案显示与计数天然一致 */
   var fpsCnt = 0, fpsWin = Date.now(), fpsVal = 0;
-  var fpsUrl = '', fpsAbort = null, fpsLastByte = -1;
+  var streamUrl = '', streamAbort = null, streamRunning = false;
+  var imgEl = null, lastBlobUrl = null;
 
   function resetFps() { fpsCnt = 0; fpsWin = Date.now(); fpsVal = 0; }
 
-  function fpsStart(url) {
-    if (fpsUrl === url && fpsAbort) return;   /* 同一流已在计数 */
-    fpsStop();
-    fpsUrl = url;
-    fpsLastByte = -1;
+  function streamStop() {
+    if (streamAbort) { streamAbort.abort(); streamAbort = null; }
+    streamRunning = false;
+    if (lastBlobUrl) { URL.revokeObjectURL(lastBlobUrl); lastBlobUrl = null; }
+  }
+
+  function streamStart(url) {
+    if (streamUrl === url && streamRunning) return;   /* 同一流已在播放 */
+    streamStop();
+    streamUrl = url;
+    streamRunning = true;
     resetFps();
     var ac = new AbortController();
-    fpsAbort = ac;
+    streamAbort = ac;
+    var buf = new Uint8Array(0);
+
     fetch(url, {signal: ac.signal}).then(function(r) {
-      if (!r.ok || !r.body) return;
+      if (!r.ok || !r.body) { streamRunning = false; return; }
       var rd = r.body.getReader();
       (function pump() {
         rd.read().then(function(c) {
-          if (c.done) return;
-          var b = new Uint8Array(c.value);
-          for (var i = 0; i < b.length - 1; i++)
-            if (b[i] === 0xFF && b[i + 1] === 0xD8) fpsCnt++;
-          if (fpsLastByte === 0xFF && b.length && b[0] === 0xD8) fpsCnt++;  /* 帧头跨块 */
-          if (b.length) fpsLastByte = b[b.length - 1];
+          if (c.done) { streamRunning = false; streamAbort = null; return; }
+          var b = c.value;
+          var nb = new Uint8Array(buf.length + b.length);
+          nb.set(buf, 0); nb.set(b, buf.length);
+          buf = nb;
+          /* 扫 SOI(FF D8)…EOI(FF D9) 成帧（multipart 头被自然跳过；跨块帧头尾由缓冲续接） */
+          var p = 0;
+          while (p < buf.length - 1) {
+            if (buf[p] === 0xFF && buf[p + 1] === 0xD8) {
+              var q = p + 2;
+              while (q < buf.length - 1 && !(buf[q] === 0xFF && buf[q + 1] === 0xD9)) q++;
+              if (q >= buf.length - 1) break;          /* 帧未收全：等下一块 */
+              if (imgEl) {
+                var blob = new Blob([buf.subarray(p, q + 2)], {type: 'image/jpeg'});
+                var u = URL.createObjectURL(blob);
+                imgEl.src = u;
+                if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+                lastBlobUrl = u;
+                fpsCnt++;
+              }
+              p = q + 2;
+            } else p++;
+          }
+          /* 丢弃已消费数据，仅保留未完成帧的尾部 */
+          if (p > 0) buf = buf.subarray(p);
+          else if (buf.length > 65536) buf = buf.subarray(buf.length - 65536);  /* 无帧头垃圾上限 */
           pump();
-        }).catch(function() {});
+        }).catch(function() { streamRunning = false; streamAbort = null; });  /* 流中断：下次 update 自动重连 */
       })();
-    }).catch(function() {
-      if (fpsAbort === ac) fpsAbort = null;   /* 流中断：下次 update 自动重连 */
-    });
-  }
-
-  function fpsStop() {
-    if (fpsAbort) { fpsAbort.abort(); fpsAbort = null; }
-    fpsUrl = '';
+    }).catch(function() { streamRunning = false; streamAbort = null; });
   }
 
   function barColor(p) { return p < 60 ? 'green' : p < 85 ? 'yellow' : 'red'; }
@@ -214,16 +237,13 @@
           var useImg = streamUrl.indexOf('/video/mjpeg') === 0
                      || streamUrl.match(/\.mjpeg$|\.jpg$|\.jpeg$/i);
           if (useImg) {
-            fpsStart(streamUrl);   /* 每次轮询都调用：内部幂等，流中断时自动重连 */
-            if (!img.src || img.getAttribute('data-src') !== streamUrl) {
-              img.setAttribute('data-src', streamUrl);
-              img.src = streamUrl;
-              img.style.display = '';
-              vid.style.display = 'none';
-              resetFps();
-            }
+            imgEl = img;                    /* 播放器逐帧喂 blob URL，显示与计数同一条连接 */
+            img.style.display = '';
+            vid.style.display = 'none';
+            streamStart(streamUrl);         /* 每次轮询都调用：内部幂等，流中断时自动重连 */
           } else {
-            fpsStop();
+            imgEl = null;
+            streamStop();
             if (!vid.src || vid.getAttribute('data-src') !== streamUrl) {
               vid.setAttribute('data-src', streamUrl);
               vid.src = streamUrl;

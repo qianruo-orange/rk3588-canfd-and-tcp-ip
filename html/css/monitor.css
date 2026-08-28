@@ -1,8 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* monitor.css — 仪表盘页面样式 毛玻璃水滴风（主题变量化） */
-.top-bar{display:flex;align-items:center;margin-bottom:4px;flex-wrap:wrap}
-#datetime{color:var(--muted);font-size:16px;margin-left:16px}
-.top-bar .nav{margin:0 0 0 auto}
+/* 顶栏与下方 .monitor-grid 同栅格（minmax(0,1fr) 16px 420px）：
+   文件下载右缘对齐视频卡右缘，datetime 左缘对齐 CPU 卡左缘 */
+.top-bar{display:grid;grid-template-columns:minmax(0,1fr) 16px 420px;align-items:center;margin-bottom:4px}
+.tb-left{display:flex;align-items:center;min-width:0;flex-wrap:wrap}
+.tb-left .nav{margin:0 0 0 auto}
+.tb-right{display:flex;align-items:center;min-width:0}
+#datetime{color:var(--muted);font-size:16px}
 .top-bar .nav a{padding:5px 12px;font-size:12px}
 .top-bar .theme-btn{position:static;margin-left:16px;flex:none}
 .pwr{padding:5px 12px;border-radius:10px;text-decoration:none;font-size:12px;margin-left:10px;border:1px solid rgba(255,255,255,.12)}
@@ -12,11 +16,12 @@
 .pair{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
 .pair .card{min-width:0;display:flex;flex-direction:column}
 
-/* 新的主界面布局：视频在左，状态框在右 */
-.monitor-grid{display:flex;gap:16px;align-items:stretch}
+/* 新的主界面布局：视频在左，状态框在右。
+   margin-top 12px：卡片上缘距顶栏按钮约 12px（原 6px 视觉上过近） */
+.monitor-grid{display:flex;gap:16px;align-items:stretch;margin-top:12px}
 .video-column{flex:1;display:flex;flex-direction:column;min-width:0}
 .status-column{width:420px;display:flex;flex-direction:column;gap:12px}
-.video-card{flex:1 1 0%;min-height:0;display:flex;flex-direction:column;padding:18px;position:relative;overflow:hidden;background:var(--card-bg);border:1px solid var(--card-border);border-radius:18px;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);box-shadow:var(--shadow),inset 0 1px 0 var(--card-highlight)}
+.video-card{flex:1 1 0%;min-height:0;display:flex;flex-direction:column;padding:6px 10px;position:relative;overflow:hidden;background:var(--card-bg);border:1px solid var(--card-border);border-radius:18px;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);box-shadow:var(--shadow),inset 0 1px 0 var(--card-highlight)}
 .video-card h3{position:absolute;top:18px;left:18px;z-index:10;color:var(--text-strong);font-size:14px;margin:0;text-shadow:0 0 8px rgba(0,0,0,.7);pointer-events:none}
 .video-wrapper{flex:1;min-height:0;background:#000;border-radius:12px;overflow:hidden}
 .video-fps{position:absolute;top:18px;right:18px;z-index:10;padding:3px 10px;border-radius:10px;background:rgba(0,0,0,.45);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--card-border);color:var(--text-strong);font-size:12px;font-weight:600;text-shadow:0 0 8px rgba(0,0,0,.7);pointer-events:none}
@@ -56,14 +61,14 @@
 .net-dir{width:24px;color:var(--muted);font-size:11px;text-align:right}
 .net-val{font-family:monospace;min-width:80px}
 .net-unit{color:var(--muted);font-size:10px}
-@media(max-width:900px){.pair{grid-template-columns:repeat(2,1fr)} .monitor-grid{flex-direction:column} .status-column{width:100%}}
+@media(max-width:900px){.pair{grid-template-columns:repeat(2,1fr)} .monitor-grid{flex-direction:column} .status-column{width:100%} .top-bar{display:flex;flex-wrap:wrap} .tb-left{flex:1 1 100%;margin-bottom:6px} .tb-gap{display:none} .tb-right{display:flex;align-items:center;margin-left:auto}}
 @media(max-width:540px){
   .pair{grid-template-columns:1fr}
   body{padding:12px}
   .val{font-size:24px}
   .temp{font-size:26px}
   h1{font-size:17px}
-  #datetime{font-size:13px;margin-left:8px}
+  #datetime{font-size:13px}
 }
 
 /* ---- 网络录像 ---- */

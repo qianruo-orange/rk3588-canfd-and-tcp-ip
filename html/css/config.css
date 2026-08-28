@@ -26,9 +26,9 @@ h1{font-size:24px;margin-bottom:16px}
 .can-basic .row input{min-width:0}
 /* AI 卡：推理参数（左）与模型文件（右）左右分布 1:1，窄屏上下折行 */
 .ai-split{display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;align-items:start}
-/* 推理参数固定 3 列 × 2 行；标签定宽 80px（.cfg-grid 基准）保证输入框对齐 */
-.ai-basic{grid-template-columns:repeat(3,1fr)}
-.ai-basic .row input,.ai-basic .row select{max-width:150px}
+/* 推理参数固定 2 列 × 2 行（2×2 排列）；标签定宽 80px（.cfg-grid 基准）保证输入框对齐 */
+.ai-basic{grid-template-columns:repeat(2,1fr)}
+.ai-basic .row input,.ai-basic .row select{max-width:none;width:100%}
 .ai-upload{grid-template-columns:1fr}
 @media(max-width:1200px){.ai-split{grid-template-columns:1fr}}
 /* 网络卡：每行两个参数；按钮与输入框留间距 */

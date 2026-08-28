@@ -25,8 +25,7 @@ video_height 480
 # can_dbc can0 config/can0.dbc
 # can_dbc can1 config/can1.dbc
 
-# --- AI（RKNN / YOLO26 官方单输出模型，画框流 /video/mjpeg_ai） ---
-ai_enable 1
+# --- AI（RKNN / YOLO26 官方单输出模型，画框流 /video/mjpeg_ai；必要流程，始终启用） ---
 ai_model config/yolo26.rknn
 ai_names config/coco.names
 ai_threads 3

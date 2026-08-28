@@ -29,7 +29,6 @@ static void config_defaults(struct app_config_t *cfg)
     cfg->video_height = 480;
     cfg->video_fps    = 0;    /* 0 = 驱动默认帧率 */
 
-    cfg->ai_enable      = 1;   /* 默认开启（无模型/NPU 时优雅降级，不影响其它功能） */
     safe_strncpy(cfg->ai_model, sizeof(cfg->ai_model), "config/yolo26.rknn");
     safe_strncpy(cfg->ai_names, sizeof(cfg->ai_names), "config/coco.names");
     cfg->ai_input_size  = 640;
@@ -64,7 +63,6 @@ int config_load(struct app_config_t *cfg)
     memset(cfg, 0, sizeof(*cfg));
     safe_strncpy(cfg->log_dir, sizeof(cfg->log_dir), PATH_LOGS);
     cfg->video_width = 640; cfg->video_height = 480;
-    cfg->ai_enable = 1;   /* 默认开启（无模型/NPU 时优雅降级） */
     safe_strncpy(cfg->ai_model, sizeof(cfg->ai_model), "config/yolo26.rknn");
     safe_strncpy(cfg->ai_names, sizeof(cfg->ai_names), "config/coco.names");
     cfg->ai_input_size = 640; cfg->ai_conf = 0.25f; cfg->ai_nms = 0.45f;
@@ -126,8 +124,6 @@ int config_load(struct app_config_t *cfg)
         else if (strcmp(key, "video_width") == 0) cfg->video_width = parse_int_clamped(val, 1, 4096, 640);
         else if (strcmp(key, "video_height") == 0) cfg->video_height = parse_int_clamped(val, 1, 4096, 480);
         else if (strcmp(key, "video_fps") == 0) cfg->video_fps = parse_int_clamped(val, 0, 120, 0);
-        else if (strcmp(key, "ai_enable") == 0)
-            cfg->ai_enable = !strcmp(val, "on") || !strcmp(val, "1") || !strcmp(val, "true");
         else if (strcmp(key, "ai_model") == 0) safe_strncpy(cfg->ai_model, sizeof(cfg->ai_model), val);
         else if (strcmp(key, "ai_names") == 0) safe_strncpy(cfg->ai_names, sizeof(cfg->ai_names), val);
         else if (strcmp(key, "ai_input_size") == 0) cfg->ai_input_size = parse_int_clamped(val, 32, 2048, 640);
@@ -207,7 +203,6 @@ void config_save(app_ctx_t *app)
     fprintf(fp, "video_height %d\n", cfg->video_height);
     fprintf(fp, "video_fps %d\n", cfg->video_fps);
     fprintf(fp, "\n# --- AI 检测 (YOLO26, RKNN) ---\n");
-    fprintf(fp, "ai_enable %s\n", cfg->ai_enable ? "on" : "off");
     fprintf(fp, "ai_model %s\n", cfg->ai_model[0] ? cfg->ai_model : "config/yolo26.rknn");
     fprintf(fp, "ai_names %s\n", cfg->ai_names[0] ? cfg->ai_names : "config/coco.names");
     fprintf(fp, "ai_input_size %d\n", cfg->ai_input_size > 0 ? cfg->ai_input_size : 640);

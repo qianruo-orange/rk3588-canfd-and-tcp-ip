@@ -342,8 +342,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | `video_width` / `video_height` | `<n>` | 分辨率，默认 640×480 |
 | `video_fps` | `<n>` | 期望帧率（1~120，V4L2 S_PARM 设置驱动帧间隔）；0 = 驱动默认 |
 | `can_dbc` | `<name> <path>` | 按 CAN 通道配置 DBC 数据库文件路径，留空则不启用该通道信号解码 |
-| `ai_enable` | `on\|off` | 启用 NPU 推理画框流，默认 `off` |
-| `ai_model` | `<path>` | YOLO26 官方单输出 `.rknn` 模型路径，默认 `config/yolo26.rknn` |
+| `ai_model` | `<path>` | YOLO26 官方单输出 `.rknn` 模型路径，默认 `config/yolo26.rknn`（AI 推理为必要流程，始终启用；无模型/NPU 失败时优雅降级为原始流） |
 | `ai_names` | `<path>` | 类别标签文件路径（COCO 格式，每行一个类名），默认 `config/coco.names` |
 | `ai_input_size` | `<n>` | 模型输入边长（32~2048），默认 640 |
 | `ai_conf` | `<n>` | 置信度阈值百分比（1~100），默认 25（0.25） |
@@ -417,8 +416,8 @@ RKNN + YOLO26（官方 ultralytics 单输出格式 `(1, 84, 8400)`，fp16，官�
 - 模型加载：`ai_model` 指向 `.rknn` 文件，校验输出必须为单个检测头 `(1, 84, 8400)`；类别名由 `ai_names` 加载（COCO 格式，每行一个类名，缺失回退内置 COCO 80 类）
 - 流水线：`ai_task` 按 `ai_interval_ms` 采样采集帧（seq 去重）→ 有界任务队列（容量 4）→ N 个推理 worker（独立 rknn context，worker i 绑定 NPU 核 i%3，RK3588 三核等量分配）→ 单 composer 线程严格按 seq 顺序消费结果（乱序重排、100ms 超时跳缺口、seq 回绕回退游标）→ EMA 平滑（α=0.4，同类 IoU≥0.3 匹配）→ 渲染 → 快照
 - 画框渲染：直接调用 OpenCV（`cv::rectangle` 3px 实色 + LINE_AA 抗锯齿；`cv::putText` Hershey Simplex 白色粗体字 + 实色底块，默认挂在框顶外侧，顶部不足落框内），每一帧都输出标注帧，不混入未推理的原始帧
-- 热更新：`ai_enable` / `ai_threads` / `ai_conf` / `ai_nms` / `ai_interval_ms` 保存后立即重建推理池生效，无需重启进程；`ai_model` / `ai_names` 可通过 Web 配置页或 API 上传（校验 RKNN magic / 标签格式后原子替换文件并热重载）
-- 优雅降级：模型缺失 / NPU 驱动未加载 / 推理失败时 `enabled=0`，原视频流照常，画框流回退原始帧，不崩溃不阻断启动
+- 热更新：`ai_threads` / `ai_conf` / `ai_nms` / `ai_interval_ms` 保存后立即重建推理池生效，无需重启进程；`ai_model` / `ai_names` 可通过 Web 配置页或 API 上传（校验 RKNN magic / 标签格式后原子替换文件并热重载）
+- 必要流程：AI 推理不可停用；模型缺失 / NPU 驱动未加载 / 推理失败时直接报错——启动路径整体失败退出（systemd 进入 failed），运行期热重载失败由 API 返回 `saved_reload_failed`，画框流 `/video/mjpeg_ai` 返回 503（不回退原始帧）
 
 ### RKNN 转换工作流
 

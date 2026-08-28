@@ -243,10 +243,8 @@
       document.getElementById('vh').value = cfg.video_height > 0 ? cfg.video_height : '';
       cfgVideoFps = cfg.video_fps || 0;
 
-      /* AI 检测配置（线程数下拉框为 3 的倍数；置信度/NMS 显示为百分比） */
-      var el = document.getElementById('ai_en');
-      if (el) el.value = cfg.ai_enable ? 'on' : 'off';
-      el = document.getElementById('ai_th');
+      /* AI 检测配置（必要流程；线程数下拉框为 3 的倍数；置信度/NMS 显示为百分比） */
+      var el = document.getElementById('ai_th');
       if (el) el.value = String(cfg.ai_threads || 3);
       document.getElementById('ai_cf').value = Math.round((cfg.ai_conf || 0.25) * 100);
       document.getElementById('ai_nm').value = Math.round((cfg.ai_nms || 0.45) * 100);
@@ -402,7 +400,6 @@
     if (!th || th % 3 !== 0) th = 3;
     await postConfig({
       target: 'ai',
-      ai_enable: document.getElementById('ai_en').value === 'on' ? 'on' : 'off',
       ai_threads: th,
       ai_conf: document.getElementById('ai_cf').value,
       ai_nms: document.getElementById('ai_nm').value,
@@ -447,7 +444,6 @@
     L.push('导出时间: ' + new Date().toLocaleString());
     L.push('');
     L.push('[AI 检测]');
-    L.push('启用: ' + (cfg.ai_enable ? 'on' : 'off'));
     L.push('模型文件: ' + (cfg.ai_model || '-'));
     L.push('标签文件: ' + (cfg.ai_names || '-'));
     L.push('输入尺寸: ' + (cfg.ai_input_size || '-'));

@@ -56,10 +56,10 @@ void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri
     if (cfg->video_device[0]) JSON_ADD(json, off, ",\"video_device\":\"%s\"", cfg->video_device);
     JSON_ADD(json, off, ",\"video_width\":%d,\"video_height\":%d,\"video_fps\":%d",
              cfg->video_width, cfg->video_height, cfg->video_fps);
-    /* AI 检测配置（前端据此决定默认展示画框流 /video/mjpeg_ai 还是原始流） */
-    JSON_ADD(json, off, ",\"ai_enable\":%d,\"ai_model\":\"%s\",\"ai_names\":\"%s\",\"ai_input_size\":%d,"
+    /* AI 检测配置（必要流程：推理不可关停，前端默认展示画框流） */
+    JSON_ADD(json, off, ",\"ai_model\":\"%s\",\"ai_names\":\"%s\",\"ai_input_size\":%d,"
         "\"ai_conf\":%.2f,\"ai_nms\":%.2f,\"ai_interval_ms\":%d,\"ai_threads\":%d",
-        cfg->ai_enable, cfg->ai_model, cfg->ai_names, cfg->ai_input_size,
+        cfg->ai_model, cfg->ai_names, cfg->ai_input_size,
         cfg->ai_conf, cfg->ai_nms, cfg->ai_interval_ms, cfg->ai_threads);
     JSON_ADD(json, off, "}");
 
@@ -276,12 +276,7 @@ static int apply_ai(app_ctx_t *app, const http_form_field_t *fields, int count)
     struct app_config_t *cfg = app->cfg;
     int changed = 0;
 
-    const char *v = http_form_find(fields, count, "ai_enable");
-    if (v) {
-        int e = (!strcmp(v, "on") || !strcmp(v, "1") || !strcmp(v, "true"));
-        if (e != cfg->ai_enable) { cfg->ai_enable = e; changed = 1; }
-    }
-    v = http_form_find(fields, count, "ai_threads");
+    const char *v = http_form_find(fields, count, "ai_threads");
     if (v) {
         int t = parse_int_clamped(v, 3, 15, 3);
         t -= t % 3;   /* 必须是 3 的倍数（3~15）：每个 NPU 核等量 worker */

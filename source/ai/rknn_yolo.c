@@ -22,11 +22,12 @@
  *
  * 热重载：rknn_yolo_reload() 停止推理池（pool_running=0 → 线程退出/join，
  * 在途任务 rgb 回池 + 摘除槽 claim）→ 释放模型与 context → 重读配置
- * （ai_enable/ai_model/ai_names/ai_threads/ai_conf/ai_nms/ai_interval_ms）
+ * （ai_model/ai_names/ai_threads/ai_conf/ai_nms/ai_interval_ms）
  * → 重建池。由前端上传模型/标签文件与 AI 参数保存触发。
  *
- * 优雅降级：无模型 / NPU 驱动未加载 / 推理失败 → enabled=0，原视频流照常，
- * 画框流客户端回退到原始帧。所有失败路径只记日志不崩溃。
+ * 必要流程：AI 推理不可停用。无模型 / NPU 驱动未加载 / 推理失败 → 直接报错：
+ * 启动路径整体失败退出；运行期热重载失败由 HTTP 接口报告 saved_reload_failed，
+ * 画框流 /video/mjpeg_ai 返回 503（不回退原始帧）。所有失败路径只记日志不崩溃。
  *
  * 图像处理与后处理已拆分为独立模块（yolo_image / yolo_postprocess / yolo_draw），
  * 本文件仅保留：模型生命周期、推理线程池、任务队列、环形队列槽消费、快照与对外 API。
@@ -501,8 +502,9 @@ static void ai_stop_pool(void)
 }
 
 /* 启动推理池：重读配置 → 加载模型 → 建 worker → 启动线程。
-   失败/禁用时 enabled=0（画框流自动回退原始帧），不阻断调用方 */
-static void ai_start_pool(void)
+   AI 为必要流程：任一失败即返回 -1 直接报错（启动路径整体失败退出；
+   热重载路径由 HTTP 接口向调用方报告），enabled=0 仅供失败后运行态空转 */
+static int ai_start_pool(void)
 {
     app_ctx_t *app = g_ai.app;
     struct app_config_t *cfg = app->cfg;
@@ -516,11 +518,6 @@ static void ai_start_pool(void)
     if (t < 3) t = 3;
     g_ai.nthreads = t - (t % 3);   /* 必须是 3 的倍数：3~15，每核 1~5 个 worker */
 
-    if (!cfg->ai_enable) {
-        g_ai.enabled = 0;
-        LOG_INFO("ai: disabled by config");
-        return;
-    }
     safe_strncpy(g_ai.names_path, sizeof(g_ai.names_path),
                  cfg->ai_names[0] ? cfg->ai_names : "config/coco.names");
 
@@ -528,39 +525,39 @@ static void ai_start_pool(void)
     safe_strncpy(model_path, sizeof(model_path),
                  cfg->ai_model[0] ? cfg->ai_model : "config/yolo26.rknn");
     if (load_model_file(model_path, &g_ai.model, &g_ai.model_len) < 0) {
-        LOG_ERROR("ai: model '%s' not found, AI disabled (stream continues raw)", model_path);
+        LOG_ERROR("ai: model '%s' not found — AI unavailable (no AI)", model_path);
         g_ai.enabled = 0;
-        return;
+        return -1;
     }
 
     /* 用第一个上下文获取输入尺寸（静态模型）与输出数校验 */
     rknn_context probe = 0;
     if (rknn_init(&probe, g_ai.model, (uint32_t)g_ai.model_len, 0, NULL) != RKNN_SUCC) {
-        LOG_ERROR("ai: rknn_init failed: model incompatible or NPU unavailable, AI disabled");
+        LOG_ERROR("ai: rknn_init failed: model incompatible or NPU unavailable — AI unavailable");
         ai_free_workers();
         g_ai.enabled = 0;
-        return;
+        return -1;
     }
     rknn_input_output_num io_num;
     memset(&io_num, 0, sizeof(io_num));
     if (rknn_query(probe, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num)) != RKNN_SUCC ||
         io_num.n_input < 1 || io_num.n_output != 1) {
-        LOG_ERROR("ai: outputs=%u != 1, 需官方 rknn 单输出模型 (yolo export format=rknn), AI disabled",
+        LOG_ERROR("ai: outputs=%u != 1, 需官方 rknn 单输出模型 (yolo export format=rknn) — AI unavailable",
                   io_num.n_output);
         rknn_destroy(probe);
         ai_free_workers();
         g_ai.enabled = 0;
-        return;
+        return -1;
     }
     rknn_tensor_attr in_attr;
     memset(&in_attr, 0, sizeof(in_attr));
     in_attr.index = 0;
     if (rknn_query(probe, RKNN_QUERY_INPUT_ATTR, &in_attr, sizeof(in_attr)) != RKNN_SUCC) {
-        LOG_ERROR("ai: rknn_query INPUT_ATTR failed");
+        LOG_ERROR("ai: rknn_query INPUT_ATTR failed — AI unavailable");
         rknn_destroy(probe);
         ai_free_workers();
         g_ai.enabled = 0;
-        return;
+        return -1;
     }
     rknn_destroy(probe);
 
@@ -586,8 +583,8 @@ static void ai_start_pool(void)
         if (yolo_worker_setup(&g_ai.workers[i], i) < 0) {
             ai_free_workers();
             g_ai.enabled = 0;
-            LOG_ERROR("ai: pool start failed, AI disabled (stream continues raw)");
-            return;
+            LOG_ERROR("ai: pool start failed — AI unavailable (no AI)");
+            return -1;
         }
     }
 
@@ -612,9 +609,11 @@ static void ai_start_pool(void)
              "single output, threads %d (NPU core i%%3), conf %.2f nms %.2f",
              model_path, g_ai.names_path, ncls, g_ai.in_w, g_ai.in_h,
              g_ai.nthreads, g_ai.conf, g_ai.nms);
+    return 0;
 }
 
-/* 热重载：停止旧池 → 重读配置重建。由前端上传模型/标签文件、修改 AI 参数触发 */
+/* 热重载：停止旧池 → 重读配置重建。由前端上传模型/标签文件、修改 AI 参数触发。
+   失败返回 -1（enabled=0）：调用方（HTTP 接口）向客户端直接报告 reload 失败 */
 int rknn_yolo_reload(void)
 {
     pthread_mutex_lock(&g_reload_mutex);
@@ -642,9 +641,13 @@ int rknn_yolo_init(void *arg)
 
     if (!app || !app->cfg) {
         LOG_ERROR("ai: init without config");
-        return 0;
+        return -1;
     }
-    ai_start_pool();   /* ai_enable=0 或失败时 enabled=0，ai_task 空转喂狗 */
+    /* AI 为必要流程：无 AI（模型缺失/NPU 不可用）直接报错，服务启动失败 */
+    if (ai_start_pool() < 0) {
+        LOG_ERROR("ai: mandatory inference pool failed to start — no AI, aborting startup");
+        return -1;
+    }
     return 0;
 }
 

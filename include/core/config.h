@@ -69,8 +69,7 @@ struct app_config_t {
     int           video_height;
     int           video_fps;       /* 期望帧率；0 = 驱动默认 */
 
-    /* ---- RKNN AI 检测（YOLO26）---- */
-    int           ai_enable;        /* 0/1：是否启用 NPU 推理画框流 */
+    /* ---- RKNN AI 检测（YOLO26，必要流程）---- */
     char          ai_model[256];    /* .rknn 模型文件路径 */
     char          ai_names[256];    /* 类别名文件（coco.names 格式，每行一个类名） */
     int           ai_input_size;    /* 模型输入边长（动态模型用；静态模型以模型实际尺寸为准） */

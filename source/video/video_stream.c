@@ -501,7 +501,7 @@ void video_stream_restart(void)
 
 typedef struct {
     int fd;
-    int ai_mode;   /* 1: 画框流（AI 可用时优先画框帧，否则回退原始帧） */
+    int ai_mode;   /* 1: 画框流（AI 为必要流程：不可用时直接 503/断流，不回退原始帧） */
     video_stream_client_close_cb on_close;
 } video_client_ctx_t;
 
@@ -512,6 +512,17 @@ static void *video_stream_client_task(void *arg)
     int ai_mode = a->ai_mode;
     video_stream_client_close_cb on_close = a->on_close;
     free(a);
+
+    /* AI 为必要流程：画框流在 AI 不可用时直接报错（503），不回退原始帧 */
+    if (ai_mode && !rknn_yolo_enabled()) {
+        const char *err = "HTTP/1.1 503 Service Unavailable\r\n"
+                          "Content-Type: text/plain; charset=utf-8\r\n"
+                          "Connection: close\r\n\r\n"
+                          "AI 推理不可用（无 AI）\n";
+        fd_write_all_blocking(fd, err, strlen(err));
+        if (on_close) on_close(fd);
+        return NULL;
+    }
 
     const char *hdr = "HTTP/1.1 200 OK\r\n"
                       "Content-Type: multipart/x-mixed-replace; boundary=--frame\r\n"
@@ -533,14 +544,15 @@ static void *video_stream_client_task(void *arg)
 
         /* 推流线程基于非阻塞写 + 轮询，不会长期阻塞，无需独立看门狗监督 */
         unsigned char *frame = NULL; size_t flen = 0;
-        if (ai_mode && rknn_yolo_enabled()) {
+        if (ai_mode) {
+            /* AI 必要流程：运行期 AI 失效（热重载失败等）→ 直接断流报错，不回退原始帧 */
+            if (!rknn_yolo_enabled()) break;
             /* 画框流：推流的每一帧都必须是推理标注后的画面。
                新标注帧未就绪（推理进行中 / 首帧未生成）时短暂等待，绝不混入原始帧，
                否则画面会在标注帧与原始帧之间来回闪烁（抖动）。
                标注帧用独立的 last_ann 去重：不能与原始帧共用 last，
                否则标注帧 seq（推理时刻，必然滞后于最新原始帧）会把 last 拉回过去，
-               wait_next 永不阻塞，同一对帧被无限重复发送（死循环刷流）。
-               原始帧回退仅在 AI 完全降级（rknn_yolo_enabled()=0）时由下方分支承担 */
+               wait_next 永不阻塞，同一对帧被无限重复发送（死循环刷流）。 */
             unsigned long long aseq_now = rknn_yolo_get_frame_seq();
             if (aseq_now != last_ann) {
                 unsigned long long aseq = 0;
@@ -548,8 +560,7 @@ static void *video_stream_client_task(void *arg)
                     last_ann = aseq;
             }
             if (!frame) { usleep(10000); continue; }   /* 等标注帧，不回退原始帧 */
-        }
-        if (!frame) {
+        } else {
             int seq = video_stream_wait_next(last_raw, &frame, &flen);
             if (seq < 0) break;
             if (seq == last_raw) { usleep(20000); continue; }

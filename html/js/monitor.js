@@ -203,9 +203,8 @@
           var r2 = await fetch('/api/config');
           if (r2.ok) {
             var cfg = await r2.json();
-            /* AI 启用时默认展示画框流（AI 降级时服务端自动回退原始帧） */
-            streamUrl = cfg.stream_url || cfg.video_url ||
-                        (cfg.ai_enable ? '/video/mjpeg_ai' : '/video/mjpeg');
+            /* AI 为必要流程，默认展示画框流（AI 降级时服务端自动回退原始帧） */
+            streamUrl = cfg.stream_url || cfg.video_url || '/video/mjpeg_ai';
           }
         }
         if (streamUrl) {

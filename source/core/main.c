@@ -136,8 +136,8 @@ static module_t g_modules[] = {
         .wd   = { .timeout = 5, .max_miss = 3 },
         .thr  = { .stack_size = 0, .priority = 0, .cpu = -1 },
     },
-    /* ai —— RKNN YOLO26 检测（可选）：无模型/NPU 不可用时自动降级，
-       task 线程仍保持存活并喂狗（休眠空转），避免 watchdog 注册竞态 */
+    /* ai —— RKNN YOLO26 检测（必要流程）：无模型/NPU 不可用时 init 返回 -1，
+       服务启动直接失败（无 AI 直接报错），不进降级空转 */
     {
         .tid  = 0,
         .name = "ai",

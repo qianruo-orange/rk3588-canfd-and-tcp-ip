@@ -15,12 +15,34 @@
   var fpsCnt = 0, fpsWin = Date.now(), fpsVal = 0;
   var streamUrl = '', streamAbort = null, streamRunning = false;
   var imgEl = null, lastBlobUrl = null;
+  var imgBusy = false;      /* 上一帧还在解码：不覆盖 src（覆盖会取消其加载） */
+  var pendingBlob = null;   /* 解码期间收到的最新帧，仅保留最后一张，解码完立即补显 */
 
   function resetFps() { fpsCnt = 0; fpsWin = Date.now(); fpsVal = 0; }
+
+  /* 显示一帧：仅在上一次 onload/onerror 之后调用，上一帧 URL 此时已被完整消费，
+     可安全回收；onload 前就 revoke 会中断在途解码，弱设备上永远看不到画面 */
+  function showFrame(blob) {
+    var u = URL.createObjectURL(blob);
+    imgBusy = true;
+    imgEl.onload = imgEl.onerror = function() {
+      imgBusy = false;
+      if (pendingBlob) {          /* 解码慢于码流时丢弃中间帧，只补最新一帧 */
+        var pb = pendingBlob;
+        pendingBlob = null;
+        showFrame(pb);
+      }
+    };
+    imgEl.src = u;
+    if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+    lastBlobUrl = u;
+  }
 
   function streamStop() {
     if (streamAbort) { streamAbort.abort(); streamAbort = null; }
     streamRunning = false;
+    imgBusy = false;
+    pendingBlob = null;
     if (lastBlobUrl) { URL.revokeObjectURL(lastBlobUrl); lastBlobUrl = null; }
   }
 
@@ -52,12 +74,10 @@
               while (q < buf.length - 1 && !(buf[q] === 0xFF && buf[q + 1] === 0xD9)) q++;
               if (q >= buf.length - 1) break;          /* 帧未收全：等下一块 */
               if (imgEl) {
+                fpsCnt++;                              /* 计数含被丢弃的帧（真实码流速率） */
                 var blob = new Blob([buf.subarray(p, q + 2)], {type: 'image/jpeg'});
-                var u = URL.createObjectURL(blob);
-                imgEl.src = u;
-                if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
-                lastBlobUrl = u;
-                fpsCnt++;
+                if (imgBusy) pendingBlob = blob;       /* 解码忙：只留最新帧，防 src 覆盖风暴 */
+                else showFrame(blob);
               }
               p = q + 2;
             } else p++;

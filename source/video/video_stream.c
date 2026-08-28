@@ -14,6 +14,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include "video/video_stream.h"
+#include "video/frame_ring.h"
 #include "core/log.h"
 #include "core/common.h"
 #include "core/cpu_affinity.h"
@@ -21,21 +22,14 @@
 #include "watchdog/watchdog.h"
 #include "ai/rknn_yolo.h"
 
-/* 采集帧：cap 记录 data 分配容量（复用旧分配时 len 可小于 cap） */
-typedef struct { unsigned char *data; size_t len, cap; } frame_t;
-
 /* 推流客户端空闲超时（秒）：客户端不读 / 网络黑洞时释放连接与线程 */
 #define VIDEO_CLIENT_IDLE_TIMEOUT 30
 
 typedef struct {
-    _Atomic(frame_t *) frame_obj;
-    _Atomic(int)       seq;
-    _Atomic(int)       worker_done;  /* worker 退出标志 */
     _Atomic(int)       restart_req;  /* 请求 worker 用新参数重新初始化设备 */
     int                running;
     pthread_mutex_t    cfg_mutex;    /* 保护 device / width / height */
-    pthread_mutex_t    frame_mutex;  /* 保护 frame_obj 指针生命周期（防 use-after-free） */
-    frame_t           *spare;        /* 备用帧（仅采集 worker 访问；shutdown 在其退出后运行） */
+    frame_ring_t       ring;         /* 视频帧环形队列：采集侧零拷贝发布 */
     char               device[128];
     int                width, height;
     int                pixfmt;   /* 实际像素格式（V4L2_PIX_FMT_*） */
@@ -46,6 +40,20 @@ typedef struct {
 } video_ctx_t;
 
 static video_ctx_t *g_ctx = NULL;
+
+/* 延迟 QBUF 释放回调：环在 raw 消费完成后归还驱动缓冲（零拷贝采集核心）。
+   在环锁内调用（ioctl 微秒级），不得获取其他锁；持续失败时降频日志 */
+static void raw_release_cb(void *arg, int vbuf_index)
+{
+    video_ctx_t *vs = (video_ctx_t *)arg;
+    static int fail_cnt = 0;
+    struct v4l2_buffer buf = {0};
+    buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+    buf.index  = vbuf_index;
+    if (ioctl(vs->fd, VIDIOC_QBUF, &buf) < 0 && (fail_cnt++ % 100) == 0)
+        LOG_ERROR("video_stream: deferred QBUF failed: %s", strerror(errno));
+}
 
 /* ---- 内部函数 ---- */
 
@@ -123,7 +131,9 @@ static int init_video_device(video_ctx_t *vs, int verbose)
     }
 
     struct v4l2_requestbuffers req = {0};
-    req.count  = 4;
+    /* 8 个驱动缓冲：零拷贝延迟 QBUF 模式下，缓冲占用 = 推理解码在途 +
+       最新帧钉住 + 帧间隔，4 个缓冲不足会导致驱动侧静默丢帧 */
+    req.count  = 8;
     req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_MMAP;
     if (ioctl(vs->fd, VIDIOC_REQBUFS, &req) < 0 || req.count < 2) {
@@ -208,7 +218,8 @@ int video_stream_init(void *arg)
     video_ctx_t *vs = calloc(1, sizeof(*vs));
     if (!vs) return -1;
     pthread_mutex_init(&vs->cfg_mutex, NULL);
-    pthread_mutex_init(&vs->frame_mutex, NULL);
+    frame_ring_init(&vs->ring);
+    frame_ring_set_raw_release_cb(&vs->ring, raw_release_cb, vs);
     snprintf(vs->device, sizeof(vs->device), "%s", "/dev/video0");
     vs->width  = 640;
     vs->height = 480;
@@ -228,14 +239,9 @@ void video_stream_shutdown(void *arg)
 {
     (void)arg;
     if (!g_ctx) return;
-    video_ctx_t *vs = g_ctx;
-    vs->running = 0;
-    pthread_mutex_lock(&vs->frame_mutex);
-    frame_t *old = __atomic_exchange_n(&vs->frame_obj, NULL, __ATOMIC_SEQ_CST);
-    if (old) { free(old->data); free(old); }
-    if (vs->spare) { free(vs->spare->data); free(vs->spare); vs->spare = NULL; }
-    pthread_mutex_unlock(&vs->frame_mutex);
-    __atomic_store_n(&vs->seq, 0, __ATOMIC_SEQ_CST);
+    /* 仅置停止标志：环形队列随进程退出（推流客户端线程为 detached，
+       可能仍在退出检查前短暂访问环，不能在此销毁） */
+    g_ctx->running = 0;
 }
 
 void *video_stream_task(void *arg)
@@ -290,6 +296,8 @@ void *video_stream_task(void *arg)
         }
         LOG_INFO("video_stream: capturing from %s", vs->device);
 
+        unsigned int last_vseq = 0;
+        int have_vseq = 0;   /* 驱动侧丢帧统计（buf.sequence 缺口；会话级状态） */
         while (vs->app->running && !__atomic_load_n(&vs->restart_req, __ATOMIC_ACQUIRE)) {
             struct epoll_event out;
             /* epoll_wait_feed：EINTR 重试并喂狗；无论是否有帧都保持喂狗
@@ -308,43 +316,62 @@ void *video_stream_task(void *arg)
                 break;
             }
 
-            if (buf.bytesused > 0 && buf.index < vs->nbuffers) {
-                /* 复用备用帧的分配：消除每帧 frame_t + data 两次 malloc/free
-                   （MJPEG 帧数百 KB @30fps，堆churn 显著）；spare 仅本线程访问 */
-                frame_t *f = vs->spare;
-                vs->spare = NULL;
-                if (!f) f = calloc(1, sizeof(frame_t));
-                if (f) {
-                    if (f->cap < buf.bytesused) {
-                        free(f->data);
-                        f->data = malloc(buf.bytesused);
-                        f->cap = f->data ? buf.bytesused : 0;
-                    }
-                    f->len = buf.bytesused;
-                    if (f->data)
-                        memcpy(f->data, vs->buffers[buf.index].start, f->len);
-                    else { free(f); f = NULL; }
+            /* 驱动侧丢帧：相邻 buf.sequence 的缺口（u32 回绕安全）。
+               部分驱动不填 sequence（恒 0）时不计数 */
+            if (have_vseq) {
+                unsigned int gap = buf.sequence - last_vseq;
+                if (gap > 1) {
+                    frame_ring_lock(&vs->ring);
+                    frame_ring_add_driver_dropped_locked(&vs->ring, gap - 1);
+                    frame_ring_unlock(&vs->ring);
                 }
-                if (f) {
-                    /* 持锁替换旧帧：防止推流线程正在复制时旧帧被释放；
-                       被替换的旧帧退居 spare，下一帧复用其结构+缓冲分配 */
-                    pthread_mutex_lock(&vs->frame_mutex);
-                    frame_t *old = __atomic_exchange_n(&vs->frame_obj, f, __ATOMIC_SEQ_CST);
-                    if (old) {
-                        if (vs->spare) { free(vs->spare->data); free(vs->spare); }
-                        vs->spare = old;
-                    }
-                    pthread_mutex_unlock(&vs->frame_mutex);
-                    __atomic_fetch_add(&vs->seq, 1, __ATOMIC_SEQ_CST);
-                    watchdog_feed_self("video");
+            }
+            last_vseq = buf.sequence;
+            have_vseq = 1;
+
+            if (buf.bytesused == 0 || buf.index >= vs->nbuffers) {
+                /* 空帧：立即归还，不进环 */
+                if (ioctl(vs->fd, VIDIOC_QBUF, &buf) < 0) {
+                    LOG_ERROR("video_stream: VIDIOC_QBUF failed");
+                    break;
                 }
+                continue;
             }
 
-            if (ioctl(vs->fd, VIDIOC_QBUF, &buf) < 0) {
-                LOG_ERROR("video_stream: VIDIOC_QBUF failed");
-                break;
+            /* 零拷贝入环：mmap 指针直接进槽（不 memcpy），消费完成前不 QBUF。
+               环无空闲槽（消费严重滞后）时丢弃本帧并立即归还驱动缓冲 */
+            frame_ring_lock(&vs->ring);
+            frame_slot_t *s = frame_ring_produce_slot_locked(&vs->ring);
+            if (!s) {
+                frame_ring_produce_drop_locked(&vs->ring);
+                frame_ring_unlock(&vs->ring);
+                if (ioctl(vs->fd, VIDIOC_QBUF, &buf) < 0) {
+                    LOG_ERROR("video_stream: VIDIOC_QBUF failed");
+                    break;
+                }
+                continue;
             }
+            s->raw.buf        = vs->buffers[buf.index].start;
+            s->raw.len        = buf.bytesused;
+            s->raw.cap        = vs->buffers[buf.index].length;
+            s->raw_present    = 1;
+            s->raw_is_mmap    = 1;
+            s->raw_vbuf_index = buf.index;
+            s->w = vs->width;
+            s->h = vs->height;
+            s->fmt = (vs->pixfmt == V4L2_PIX_FMT_MJPEG) ? FRAME_RING_FMT_MJPEG
+                                                        : FRAME_RING_FMT_YUYV;
+            frame_ring_produce_commit_locked(&vs->ring);
+            frame_ring_unlock(&vs->ring);
+            watchdog_feed_self("video");
         }
+
+        /* 会话结束（重启/退出/错误）：退让等待锁外解码者释放引用（推理侧
+           锁外解码期间持有 claims），随后摘除全部 mmap 指针，
+           STREAMOFF/munmap 才安全 */
+        frame_ring_quiesce_begin(&vs->ring);
+        if (frame_ring_quiesce_wait(&vs->ring, 1000) != 0)
+            LOG_ERROR("video_stream: ring quiesce timeout (claims not drained)");
 
         close(epfd);
         deinit_video_device(vs);
@@ -359,35 +386,32 @@ static int video_stream_wait_next(int last_seq, unsigned char **out, size_t *out
 {
     video_ctx_t *vs = g_ctx;
     if (!vs) return -1;
+    unsigned long long last = (unsigned long long)(unsigned int)last_seq;
 
-    while (__atomic_load_n(&vs->seq, __ATOMIC_SEQ_CST) == last_seq) {
-        if (!vs->app->running || !vs->running) return -1;
-        usleep(20000);
+    /* 阻塞等新帧（环条件变量，帧到即醒；200ms 超时用于退出检查） */
+    while (vs->app->running && vs->running) {
+        if (frame_ring_wait_new(&vs->ring, last, 200)) break;
     }
-    int seq = __atomic_load_n(&vs->seq, __ATOMIC_SEQ_CST);
-    /* 持锁读取帧并复制：防止 worker 在复制期间释放该帧 */
-    pthread_mutex_lock(&vs->frame_mutex);
-    frame_t *f = __atomic_load_n(&vs->frame_obj, __ATOMIC_SEQ_CST);
-    if (!f) { pthread_mutex_unlock(&vs->frame_mutex); return seq; }
+    if (!vs->app->running || !vs->running) return -1;
 
-    unsigned char *copy = malloc(f->len);
-    if (!copy) {
-        LOG_ERROR("video_stream: frame alloc failed (%zu bytes)", f->len);
-        pthread_mutex_unlock(&vs->frame_mutex);
-        *out     = NULL;
-        *out_len = 0;
-        return seq;   /* 调用方应跳过该帧，避免 write(NULL) */
+    /* 持锁拷贝最新槽 raw：防止 worker 在复制期间释放该槽 */
+    frame_ring_lock(&vs->ring);
+    frame_slot_t *s = frame_ring_raw_newest_locked(&vs->ring);
+    unsigned long long seq = s ? s->seq : last;
+    if (s) {
+        unsigned char *copy = malloc(s->raw.len);
+        if (!copy) {
+            LOG_ERROR("video_stream: frame alloc failed (%zu bytes)", s->raw.len);
+            *out     = NULL;
+            *out_len = 0;
+        } else {
+            memcpy(copy, s->raw.buf, s->raw.len);
+            *out     = copy;
+            *out_len = s->raw.len;
+        }
     }
-    memcpy(copy, f->data, f->len);
-    pthread_mutex_unlock(&vs->frame_mutex);
-    *out     = copy;
-    *out_len = f->len;
-    return seq;
-}
-
-static int video_stream_is_running(void)
-{
-    return g_ctx ? g_ctx->running : 0;
+    frame_ring_unlock(&vs->ring);
+    return (int)(unsigned int)seq;   /* 客户端 pacing 兼容 32 位序号 */
 }
 
 /* 拷贝当前最新采集帧（AI 推理线程消费用：取快照，不等待新帧） */
@@ -396,28 +420,27 @@ int video_stream_get_frame(unsigned char **out, size_t *out_len, int *fmt,
 {
     video_ctx_t *vs = g_ctx;
     if (!vs || !out || !out_len || !fmt || !w || !h || !seq) return -1;
-    int s = __atomic_load_n(&vs->seq, __ATOMIC_SEQ_CST);
-    if (s <= 0) return -1;   /* 尚无采集帧 */
-    pthread_mutex_lock(&vs->frame_mutex);
-    frame_t *f = __atomic_load_n(&vs->frame_obj, __ATOMIC_SEQ_CST);
-    if (!f) {
-        pthread_mutex_unlock(&vs->frame_mutex);
-        return -1;
+    frame_ring_lock(&vs->ring);
+    frame_slot_t *s = frame_ring_raw_newest_locked(&vs->ring);
+    if (!s || !s->raw.buf) {
+        frame_ring_unlock(&vs->ring);
+        return -1;   /* 尚无采集帧 */
     }
-    unsigned char *copy = malloc(f->len);
+    unsigned char *copy = malloc(s->raw.len);
     if (!copy) {
-        pthread_mutex_unlock(&vs->frame_mutex);
+        frame_ring_unlock(&vs->ring);
         return -1;
     }
-    memcpy(copy, f->data, f->len);
-    size_t len = f->len;
-    pthread_mutex_unlock(&vs->frame_mutex);
+    memcpy(copy, s->raw.buf, s->raw.len);
+    size_t len = s->raw.len;
+    unsigned long long sseq = s->seq;
+    frame_ring_unlock(&vs->ring);
     *out     = copy;
     *out_len = len;
     *fmt     = (vs->pixfmt == V4L2_PIX_FMT_MJPEG) ? VIDEO_FMT_MJPEG : VIDEO_FMT_YUYV;
     *w       = vs->width;
     *h       = vs->height;
-    *seq     = (unsigned long long)s;
+    *seq     = sseq;
     return 0;
 }
 
@@ -426,7 +449,10 @@ unsigned long long video_stream_get_frame_seq(void)
 {
     video_ctx_t *vs = g_ctx;
     if (!vs) return 0;
-    return (unsigned long long)__atomic_load_n(&vs->seq, __ATOMIC_SEQ_CST);
+    frame_ring_lock(&vs->ring);
+    unsigned long long seq = vs->ring.produce_seq;
+    frame_ring_unlock(&vs->ring);
+    return seq;
 }
 
 /* 运行时重启视频流（切换设备/分辨率，不重启进程） */

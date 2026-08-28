@@ -9,8 +9,9 @@
 - TCP/IP 通信：TCP 服务监听，端口与绑定网卡均可配置
 - Web 管理界面：数据监控、配置修改、日志查看与重启 / 关机控制
 - 视频流服务：通过 V4L2 接入摄像头并输出 MJPEG 视频流
+- 视频帧环形队列：采集 / 推理 / 显示 / 编码四游标 + 分阶段缓冲池复用，V4L2 mmap 指针零拷贝入环（整帧只移动指针），内置分阶段丢帧计数器，仅凭计数器即可定位丢帧环节
 - AI 目标检测：RKNN + YOLO26（官方 ultralytics rknn 单输出格式），多线程推理池并行加速，检测结果实时画框推流
-- 网络录像：默认自动开启录屏（按天分目录 `recordings/YYYYMMDD/`，AI 画框帧优先），RK3588 硬件编码为 H.264 并封装 MP4(avc1) 文件，分辨率取自摄像头配置；下载界面与日志合并为「文件下载」页（/logs 双 TAB），支持下载、删除、打包下载
+- 网络录像：默认自动开启录屏（按天分目录 `recordings/YYYYMMDD/`，零拷贝取环形队列显示帧直接编码），RK3588 硬件编码为 H.264 并封装 MP4(avc1) 文件，分辨率取自摄像头配置；下载界面与日志合并为「文件下载」页（/logs 双 TAB），支持下载、删除、打包下载
 - systemd 看门狗：监控关键线程心跳，防止异常卡死
 - 热更新配置：Web 页面修改后立即生效
 - 运行维护：日志按日期与大小自动轮转（按天分目录、文件名不含重复日期）、清理脚本、部署脚本
@@ -25,9 +26,9 @@
  main ──┼─► can_send_task ──► 排空 txq（原始帧）写 socket + 发送方向 DBC 解码
         ├─► tcp_task      ──► TCP 监听 / 收发
         ├─► http_task     ──► Web 管理 + REST API + MJPEG 推流
-        ├─► video_task    ──► V4L2 采集
-        ├─► ai_task       ──► 采样帧 → 投递推理队列（多线程池并行推理）→ 画框帧快照
-        ├─► rec_task      ──► 网络录像（AI 画框帧优先，回退原始帧）→ H.264 硬件编码 → MP4(avc1)
+        ├─► video_task    ──► V4L2 采集（mmap 零拷贝入环形队列）
+        ├─► ai_task       ──► 事件驱动消费环槽 → 推理队列（多线程池并行推理）→ 结果写回环槽
+        ├─► rec_task      ──► 网络录像（零拷贝取显示帧 NV12，AI 停摆回退原始帧）→ H.264 硬件编码 → MP4(avc1)
         └─► watchdog_task ──► 心跳监控 + sd_notify
 ```
 
@@ -38,9 +39,9 @@
 | `can_send` | 排空 txq（原始帧）写 socket、发送方向 DBC 解码 |
 | `tcp` | TCP 监听、连接管理与数据收发 |
 | `http` | HTTP 管理服务主循环、REST API、MJPEG 推流 |
-| `video` | V4L2 MJPEG 采集与帧发布 |
-| `ai` | 帧采样、推理任务投递；模型加载与多线程推理池（每线程独立 rknn context） |
-| `rec` | 网络录像：AI 画框帧优先（回退原始帧）→ H.264 硬件编码 → MP4(avc1) 封装落盘 |
+| `video` | V4L2 采集：mmap 指针零拷贝入环形队列，推进 produce 游标 |
+| `ai` | 事件驱动消费环槽（infer 游标）、推理任务投递；模型加载与多线程推理池（每线程独立 rknn context） |
+| `rec` | 网络录像：从环取显示帧 NV12 直接编码（encode 游标，AI 停摆回退原始帧）→ H.264 硬件编码 → MP4(avc1) 封装落盘 |
 | `watchdog` | 线程心跳监控与 `sd_notify` |
 
 > 注：`signal` 模块仅注册信号处理（`init`），`task` 为空，不创建线程。
@@ -51,16 +52,20 @@
 
 ```text
 V4L2 摄像头（MJPEG / YUYV）
-  └► video_task 采集 ─► 帧快照（video_stream_get_frame，按配置分辨率输出）
-        ├► http 线程逐连接推流 ─► /video/mjpeg（原始帧，多部分 MJPEG）
-        ├► ai_task 采样 ─► 推理队列 ─► worker×N 并行推理（RKNN）─► 画框帧快照（JPEG）
-        │       └► http 线程逐连接推流 ─► /video/mjpeg_ai（AI 不可用回退原始帧）
-        └► rec_task 每 20ms 快照 ─► NV12 转换 → H.264 硬件编码（rkvenc）─► MP4(avc1) 封装 ─► recordings/YYYYMMDD/rec_HHMMSS.mp4
+  └► video_task 采集：mmap 指针零拷贝入环 ──► produce 游标推进
+        └► ai_task 事件驱动取槽（infer 游标）─► worker×N 并行推理（RKNN）─► 结果写回槽
+              └► composer 选最新完成槽画框（display 游标）
+                    ├► http 逐连接推流 ─► /video/mjpeg_ai（AI 必要流程，不可用返回 503）
+                    └► rec_task 取显示帧 NV12（encode 游标）─► H.264 硬件编码 ─► MP4(avc1) 落盘
+原始流 /video/mjpeg 由 http 直接从最新采集槽拷贝推流（与推理链路并行）
 ```
 
-- 采集：`video_task` 通过 V4L2 打开摄像头，优先 MJPEG 格式，失败回退 YUYV；分辨率取自配置 `video_width` / `video_height`
-- 推流：每个 `/video/mjpeg*` 连接一个独立线程，multipart/x-mixed-replace 持续推送 JPEG 帧，慢客户端不阻塞其他连接
-- 录像：`rec_task` 默认自动开启，AI 画框帧优先，无 AI 帧回退原始帧（JPEG 解码或 YUYV 直转 NV12），按天分目录落盘；帧率开录前实测（不写死），H.264 码率按 `宽×高×2` 动态计算
+- 帧环形队列：32 槽 × 四阶段缓冲（raw / rgb / nv12 / jpeg），四游标（produce / infer / display / encode）单调推进；缓冲按需分配、游标越过后回池复用——整帧只移动指针，无逐帧 malloc / memcpy
+- 采集：`video_task` V4L2 mmap 缓冲 DQBUF 后指针直接进槽（延迟 QBUF 至消费完成，真正零拷贝），环满才丢弃（capture_dropped）；优先 MJPEG，失败回退 YUYV；分辨率取 `video_width` / `video_height`
+- 推理：`ai_task` 阻塞等待 produce 游标（事件驱动，不再按固定间隔采样），取槽随任务投递 worker（任务存续期间钉住 raw 槽，采集不回收），解码 RGB 写入槽
+- 显示：composer 最新完成槽优先（跳过旧结果计 render_skipped），画框写 nv12 / jpeg 进槽；每个 `/video/mjpeg*` 连接一个独立线程各自拷贝最新 JPEG 推流（multipart/x-mixed-replace），慢客户端不钉槽、不阻塞其他连接
+- 编码：`rec_task` 从 encode 游标零拷贝窃取显示帧 NV12（用毕归还缓冲池）；AI 停摆超时回退拷贝原始帧转 NV12；与编码器分辨率不符时跳过（encode_skipped）
+- AI 必要流程：模型缺失 / NPU 不可用时启动直接失败退出（systemd failed），`/video/mjpeg_ai` 返回 503，不回退原始帧
 
 视频数据提取接口：
 
@@ -71,6 +76,27 @@ V4L2 摄像头（MJPEG / YUYV）
 | `GET /api/video/caps` | 摄像头能力（分辨率 / 格式） |
 | `GET /api/video/stats` | 环形队列分阶段计数器（produce_seq / 各阶段丢帧 / 缓冲池占用），回答"摄像头 vs 推理"丢帧问题 |
 | `GET /api/video/devices` | 可用视频设备列表 |
+
+### 帧率实测与丢帧诊断
+
+实测环境：Orange Pi 5 Max + USB 摄像头，设定 30fps @1280×720 MJPEG（2026-08-28 实测）：
+
+| 节点（游标） | 实测帧率 | 依据 |
+| --- | --- | --- |
+| 采集（produce） | 24.9 | `/api/video/stats` produce_seq 增量（18s 449 帧），driver_dropped 0 |
+| 推理（infer） | 24.9 | 事件驱动逐帧消费，infer_dropped 0（推理零丢帧） |
+| 显示（display） | ~24.9 | composer 最新帧优先渲染；HTTP 客户端实测 24.3（客户端轮询合并少量帧），render_skipped 仅个别 |
+| 编码（encode） | 24.8 | `/api/rec/status` 帧数增量（12s 298 帧），encode_skipped 0 |
+
+结论：设定 30fps 下相机实际送达 ~25fps（缺口在相机侧），推理 / 显示 / 编码全链路与送达率持平，管线固有损失 <3%。
+
+`/api/video/stats` 返回各阶段计数器，服务日志每 60s 汇总一次（"ring 60s" 行），仅凭计数器即可定位丢帧环节：
+
+- `driver_dropped`：驱动侧丢帧（V4L2 sequence 缺口）→ 相机 / USB 带宽问题
+- `capture_dropped`：环形队列满丢帧 → 下游消费过慢
+- `infer_dropped`：推理跟不上采集 → 加大 `ai_threads` / 降低分辨率
+- `render_skipped`：composer 最新帧优先跳过的旧结果（并行推理乱序完成时正常出现，持续偏大说明推理节拍抖动）
+- `encode_skipped`：与编码器分辨率不符跳过的帧（配置变更瞬间的正常过渡）
 
 ### CAN 数据流向
 
@@ -162,6 +188,7 @@ rk3588-canfd-and-tcp-ip/
 │   │   └── http_api_dbc.h            # DBC API 接口声明
 │   ├── video/
 │   │   ├── video_stream.h            # V4L2 视频流接口
+│   │   ├── frame_ring.h              # 视频帧环形队列（四游标零拷贝 + 分阶段丢帧计数）
 │   │   ├── video_rec.h               # 网络录像模块接口
 │   │   ├── h264_encoder.h            # RK3588 硬件 H.264 编码器封装接口（V4L2 M2M rkvenc）
 │   │   └── rec_mp4.h                 # MP4(avc1) 封装器接口（纯封装，可独立测试）
@@ -200,17 +227,20 @@ rk3588-canfd-and-tcp-ip/
 │   │   ├── http_logs.c               # 日志查看
 │   │   └── http_reboot.c             # 重启 / 关机
 │   ├── video/
-│   │   ├── video_stream.c            # V4L2 视频流实现
-│   │   ├── video_rec.c               # 网络录像模块实现（录制线程 + 帧获取 + NV12 转换）
+│   │   ├── video_stream.c            # V4L2 视频流实现（采集零拷贝入环）
+│   │   ├── frame_ring.c              # 帧环形队列实现（游标推进 / 缓冲池回池 / 引用计数 / 丢弃计数）
+│   │   ├── video_rec.c               # 网络录像模块实现（录制线程 + encode 游标取帧）
 │   │   ├── h264_encoder.c            # H.264 硬件编码器实现（V4L2 M2M MPLANE，NV12→H.264）
 │   │   └── rec_mp4.c                 # MP4(avc1) 封装器实现
 │   ├── ai/
-│   │   ├── rknn_yolo.c               # 模型加载 + 多线程推理池 + 乱序重排 + 帧快照
+│   │   ├── rknn_yolo.c               # 模型加载 + 多线程推理池 + 事件驱动取环槽 + 结果写回（显示/编码消费）
 │   │   ├── yolo_image.c              # 图像处理实现（libjpeg / 格式转换 / 缩放）
 │   │   ├── yolo_postprocess.c        # YOLO26 单输出后处理（框已解码，阈值 + NMS）
 │   │   └── yolo_draw.cpp             # 画框实现（OpenCV cv::rectangle / cv::putText）
 │   └── watchdog/
 │       └── watchdog.c                # 看门狗实现
+├── tests/
+│   └── frame_ring_test.c             # 帧环形队列单元测试（游标推进 / 回池 / 回绕 / 引用计数 / 丢弃计数）
 ├── html/                             # Web 前端
 │   ├── index.html                    # 监控页（CAN/TCP 数据网关仪表盘）
 │   ├── config.html                   # 配置页
@@ -343,7 +373,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | `video_width` / `video_height` | `<n>` | 分辨率，默认 640×480 |
 | `video_fps` | `<n>` | 期望帧率（1~120，V4L2 S_PARM 设置驱动帧间隔）；0 = 驱动默认 |
 | `can_dbc` | `<name> <path>` | 按 CAN 通道配置 DBC 数据库文件路径，留空则不启用该通道信号解码 |
-| `ai_model` | `<path>` | YOLO26 官方单输出 `.rknn` 模型路径，默认 `config/yolo26.rknn`（AI 推理为必要流程，始终启用；无模型/NPU 失败时优雅降级为原始流） |
+| `ai_model` | `<path>` | YOLO26 官方单输出 `.rknn` 模型路径，默认 `config/yolo26.rknn`（AI 推理为必要流程，始终启用；模型缺失/NPU 失败时启动直接失败退出） |
 | `ai_names` | `<path>` | 类别标签文件路径（COCO 格式，每行一个类名），默认 `config/coco.names` |
 | `ai_input_size` | `<n>` | 模型输入边长（32~2048），默认 640 |
 | `ai_conf` | `<n>` | 置信度阈值百分比（1~100），默认 25（0.25） |
@@ -370,7 +400,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 - `/dbc`：DBC 信号解析
 - `/config`：运行配置
   - 视频卡：格式 / 分辨率 / 帧率合并为单一下拉框（设备、格式两行纵向排列，标签定宽、下拉框等宽对齐），按相机真实能力枚举（`/api/video/caps`），选择即保存（`video_fps`）并立即生效
-  - AI 卡：推理参数与模型文件上传左右分栏（1:1），上传热生效
+  - AI 卡：推理参数 2×2 网格排列（无启用开关——AI 为必要流程），与模型文件上传左右分栏（1:1），上传热生效
   - CAN 卡：波特率 / DBC 上传 / CAN FD / FD 波特率一行配置，通道下拉框标注 FD 能力
   - 网络卡：IP 模式（关闭 / 静态 / DHCP），仅「静态」模式显示 IP / 掩码 / 网关输入框
   - 顶部「导出配置表」：一键导出全部配置为可读文本（含原始 JSON），便于备份与移植
@@ -396,8 +426,9 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 | GET | `/api/network/ifaces` | 无 | 网络接口信息 |
 | GET | `/api/video/devices` | 无 | 摄像头设备列表 |
 | GET | `/api/video/caps` | 无 | 视频参数列表 |
+| GET | `/api/video/stats` | 无 | 环形队列分阶段计数器（produce_seq / 各阶段丢帧 / 缓冲池占用），定位丢帧环节 |
 | GET | `/video/mjpeg` | 无 | MJPEG 视频流 |
-| GET | `/video/mjpeg_ai` | 无 | AI 画框 MJPEG 视频流（AI 未启用时回退原始帧） |
+| GET | `/video/mjpeg_ai` | 无 | AI 画框 MJPEG 视频流（AI 不可用返回 503，不回退原始帧） |
 | POST | `/api/rec/start` | root | 手动开始网络录像（默认已自动开启，一般无需调用） |
 | POST | `/api/rec/stop` | root | 手动停止网络录像（自动写 moov 收尾；停止后不再自动续录） |
 | GET | `/api/rec/status` | 无 | 录制状态（录制中 / 文件名 / 帧数 / 字节数 / 帧率） |
@@ -415,7 +446,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 RKNN + YOLO26（官方 ultralytics 单输出格式 `(1, 84, 8400)`，fp16，官方 mean/std），由 `rknn-toolkit2` 转换后在板载 NPU 推理：
 
 - 模型加载：`ai_model` 指向 `.rknn` 文件，校验输出必须为单个检测头 `(1, 84, 8400)`；类别名由 `ai_names` 加载（COCO 格式，每行一个类名，缺失回退内置 COCO 80 类）
-- 流水线：`ai_task` 按 `ai_interval_ms` 采样采集帧（seq 去重）→ 有界任务队列（容量 4）→ N 个推理 worker（独立 rknn context，worker i 绑定 NPU 核 i%3，RK3588 三核等量分配）→ 单 composer 线程严格按 seq 顺序消费结果（乱序重排、100ms 超时跳缺口、seq 回绕回退游标）→ EMA 平滑（α=0.4，同类 IoU≥0.3 匹配）→ 渲染 → 快照
+- 流水线：`ai_task` 事件驱动等待环形队列 produce 游标（不再按固定间隔采样；`ai_interval_ms` 为相邻取帧最小间隔，默认 10ms 在相机帧率下无感）→ 取槽随任务投递（任务存续期间钉住 raw 槽，采集不回收）→ N 个推理 worker（独立 rknn context，worker i 绑定 NPU 核 i%3，RK3588 三核等量分配）→ 结果写回槽 → composer 选最新完成槽（乱序完成时跳过旧结果，计 render_skipped）→ EMA 平滑（α=0.4，同类 IoU≥0.3 匹配）→ 渲染进槽（nv12 / jpeg）→ 显示 / 编码游标消费
 - 画框渲染：直接调用 OpenCV（`cv::rectangle` 3px 实色 + LINE_AA 抗锯齿；`cv::putText` Hershey Simplex 白色粗体字 + 实色底块，默认挂在框顶外侧，顶部不足落框内），每一帧都输出标注帧，不混入未推理的原始帧
 - 热更新：`ai_threads` / `ai_conf` / `ai_nms` / `ai_interval_ms` 保存后立即重建推理池生效，无需重启进程；`ai_model` / `ai_names` 可通过 Web 配置页或 API 上传（校验 RKNN magic / 标签格式后原子替换文件并热重载）
 - 必要流程：AI 推理不可停用；模型缺失 / NPU 驱动未加载 / 推理失败时直接报错——启动路径整体失败退出（systemd 进入 failed），运行期热重载失败由 API 返回 `saved_reload_failed`，画框流 `/video/mjpeg_ai` 返回 503（不回退原始帧）
@@ -440,7 +471,7 @@ RKNN + YOLO26（官方 ultralytics 单输出格式 `(1, 84, 8400)`，fp16，官�
 - 按天分目录：录制文件存于 `recordings/YYYYMMDD/`，每天一个子目录，自动跨天切换；文件名规范化只保留时间（`rec_HHMMSS.mp4`，同秒冲突自动追加序号），日志文件同理为 `rk3588-canfd-and-tcp-ip_info.log` / `_error.log`
 - 分辨率：录制分辨率取摄像头配置 `video_width` / `video_height` 的选定值（任意分辨率），未配置时退回首帧探测
 - 帧率：开录前连续抓帧实测（不写死），钳制在 1~120 fps
-- 编码链路：帧 → 转 NV12（AI 画框帧 JPEG 解码 / 原始 YUYV 直转）→ `/dev/video-enc0` 硬件编码 H.264（CBR，码率 `宽×高×2`，钳制 300k~16M，GOP = fps×2）→ 封装
+- 编码链路：零拷贝取环形队列显示帧 NV12（AI 停摆超时回退拷贝原始帧转 NV12）→ `/dev/video-enc0` 硬件编码 H.264（CBR，码率 `宽×高×2`，钳制 300k~16M，GOP = fps×2）→ 封装
 - 封装格式：标准 ISO BMFF MP4（avc1 track，SPS/PPS 取自编码器，stss 记录 IDR 关键帧），`ftyp + mdat + moov`，moov 末尾回写记录每帧偏移与时长，Chrome / VLC / ffplay 均可播放
 - 下载管理：与日志下载界面合并为「文件下载」页（`/logs`），TAB 切换日志 / 录像列表，支持下载、删除、打包下载（日志 `/logs/pack`、录像 `/api/rec/pack`，录像打包上限 2GB；文件名白名单 + 两段式路径校验防穿越）
 - 上限保护：单次录制帧数与 mdat 体积上限（防止 32 位 size 溢出），达到上限自动收尾并续录下一段

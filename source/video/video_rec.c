@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * video_rec.c — 网络录像模块：AI 画框帧（必要流程，无原始帧回退）+ H.264 硬件编码。
  *

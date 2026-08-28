@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * frame_ring.c — 视频帧环形队列（详见 include/video/frame_ring.h）。
  */

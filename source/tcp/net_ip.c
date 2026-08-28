@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * net_ip.c — 网卡 IP 配置：静态/DHCP 应用（ip 命令）、运行时地址读取。
  * 供配置页 IP 设置卡片（target=ip）与开机启动应用使用。

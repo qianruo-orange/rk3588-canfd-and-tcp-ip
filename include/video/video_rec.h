@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef VIDEO_REC_H
 #define VIDEO_REC_H
 

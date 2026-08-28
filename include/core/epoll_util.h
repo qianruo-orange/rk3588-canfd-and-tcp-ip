@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef CORE_EPOLL_UTIL_H
 #define CORE_EPOLL_UTIL_H
 

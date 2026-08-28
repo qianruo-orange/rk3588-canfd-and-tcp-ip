@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * http_api_video.c — V4L2 设备列表 & 格式/分辨率查询 + 环形队列运行统计
  */

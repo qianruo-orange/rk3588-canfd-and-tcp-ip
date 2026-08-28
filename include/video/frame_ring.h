@@ -1,10 +1,9 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef FRAME_RING_H
 #define FRAME_RING_H
 
 #include <stddef.h>
 #include <pthread.h>
-
-#include "ai/yolo_types.h"
 
 /**
  * video/frame_ring.h — 视频帧环形队列：采集/推理/显示/编码四阶段零拷贝。
@@ -14,8 +13,10 @@
  *   采集(video worker)  V4L2 mmap 指针直接入槽，延迟 QBUF（真正零拷贝）
  *   推理(ai_task)       claims++ 后锁外解码槽内 raw → 池内 rgb（job 持有）；
  *                       claim 随任务移交 worker（任务在途期间槽位被钉住不可复用）
- *   推理(worker)        resize 读 job rgb，结果与 rgb 一起写槽，置 rgb_done，unclaim
- *   显示(composer)      最新 rgb_done 槽原地画框 → nv12/jpeg 写槽，置 display_done
+ *   推理(worker)        resize 读 job rgb，推理结果（名称+坐标）入结果队列，
+ *                       rgb 写槽置 rgb_done，unclaim
+ *   显示(composer)      消费结果队列最新结果，按 seq 取最新 rgb_done 槽原地画框
+ *                       → nv12/jpeg 写槽，置 display_done
  *   编码(rec)           窃取槽内 nv12（所有权转移），置 encode_done（AI 必要流程，
  *                       停摆直接宕机，无原始帧回退）
  *   HTTP 推流            锁内拷贝最新显示槽 jpeg / 最新 raw（多读者，不钉槽）
@@ -74,8 +75,7 @@ typedef struct {
     /* ---- 推理阶段 ---- */
     ring_buf_t rgb;           /* JPEG/YUYV 解码 RGB24（池内缓冲） */
     int infer_done;           /* ai_task 解码完成（raw 可释放） */
-    int rgb_done;             /* worker 结果写入完成（res 有效，可渲染） */
-    yolo_result_t res;        /* 检测结果（worker 写入，锁内值拷贝读取） */
+    int rgb_done;             /* worker 解码 rgb 写入完成（可渲染）；检测结果经结果队列传递 */
 
     /* ---- 显示阶段 ---- */
     ring_buf_t nv12;          /* 画框 NV12（池内缓冲，供录像编码） */

@@ -1,5 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 cmake_minimum_required(VERSION 3.10)
-project(rk3588-canfd-and-tcp-ip VERSION 1.1.0 LANGUAGES C CXX)
+project(rk3588-edge-gateway VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -52,6 +53,7 @@ string(TIMESTAMP APP_BUILD_DATE "%Y-%m-%d %H:%M:%S" UTC)
 
 file(MAKE_DIRECTORY "${PROJECT_SOURCE_DIR}/include/core")
 file(WRITE "${PROJECT_SOURCE_DIR}/include/core/version.h"
+    "/* SPDX-License-Identifier: GPL-3.0-or-later */\n"
     "#pragma once\n\n"
     "#define APP_NAME \"${APP_NAME}\"\n"
     "#define APP_VERSION \"${APP_VERSION}\"\n"
@@ -76,38 +78,38 @@ endif()
 file(GLOB APP_SOURCES CONFIGURE_DEPENDS source/**/*.c source/**/*.cpp)
 file(GLOB APP_HEADERS CONFIGURE_DEPENDS include/**/*.h)
 
-add_executable(rk3588-canfd-and-tcp-ip ${APP_SOURCES} ${APP_HEADERS})
+add_executable(rk3588-edge-gateway ${APP_SOURCES} ${APP_HEADERS})
 
-target_include_directories(rk3588-canfd-and-tcp-ip PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(rk3588-edge-gateway PRIVATE ${PROJECT_SOURCE_DIR}/source ${PROJECT_SOURCE_DIR}/include)
 
 # libnl3 headers are under /usr/include/libnl3
-target_include_directories(rk3588-canfd-and-tcp-ip PRIVATE /usr/include/libnl3)
+target_include_directories(rk3588-edge-gateway PRIVATE /usr/include/libnl3)
 
-set_target_properties(rk3588-canfd-and-tcp-ip PROPERTIES
+set_target_properties(rk3588-edge-gateway PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin"
 )
 
-target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE pthread crypt m)
+target_link_libraries(rk3588-edge-gateway PRIVATE pthread crypt m)
 
 find_library(LIBSYSTEMD systemd REQUIRED)
-target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBSYSTEMD})
+target_link_libraries(rk3588-edge-gateway PRIVATE ${LIBSYSTEMD})
 
 find_library(LIBNL3 nl-3 REQUIRED)
-target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBNL3})
+target_link_libraries(rk3588-edge-gateway PRIVATE ${LIBNL3})
 
 find_library(LIBNLROUTE3 nl-route-3 REQUIRED)
-target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBNLROUTE3})
+target_link_libraries(rk3588-edge-gateway PRIVATE ${LIBNLROUTE3})
 
 # RKNN NPU 运行时（librknnrt.so，板载 /usr/lib）与 libjpeg-turbo（帧编解码）
 find_library(LIBRKNNRT rknnrt REQUIRED)
-target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBRKNNRT})
+target_link_libraries(rk3588-edge-gateway PRIVATE ${LIBRKNNRT})
 
 find_library(LIBJPEG jpeg REQUIRED)
-target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${LIBJPEG})
+target_link_libraries(rk3588-edge-gateway PRIVATE ${LIBJPEG})
 
 # OpenCV（core + imgproc）：检测框画框 / 标签文字渲染（cv::rectangle / cv::putText）
 find_package(OpenCV REQUIRED COMPONENTS core imgproc)
-target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE ${OpenCV_LIBS})
+target_link_libraries(rk3588-edge-gateway PRIVATE ${OpenCV_LIBS})
 
 # FFmpeg（可选）：提供 h264_rkmpp 硬件编码后端（Rockchip MPP）。
 # 系统装有带 rkmpp 的 libavcodec 时自动启用；否则编译 V4L2 后端。
@@ -117,7 +119,7 @@ if(PkgConfig_FOUND)
 endif()
 if(AVCODEC_FOUND)
     add_compile_definitions(HAVE_AVCODEC)
-    target_link_libraries(rk3588-canfd-and-tcp-ip PRIVATE PkgConfig::AVCODEC)
+    target_link_libraries(rk3588-edge-gateway PRIVATE PkgConfig::AVCODEC)
     message(STATUS "FFmpeg found: h264_rkmpp backend enabled")
 else()
     message(STATUS "FFmpeg not found: fallback to V4L2 rkvenc backend")

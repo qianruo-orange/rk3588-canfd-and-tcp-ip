@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * rknn_yolo.c — RKNN + YOLO26 检测主模块：模型管理 + 多线程推理池 + 按序渲染。
  *
@@ -7,10 +8,12 @@
  *             投递任务队列。claim 随任务移交 worker：任务在途期间槽位被
  *             claims 钉住，不会被采集复用/退让清空
  *   worker i: 出队 → 双线性缩放 → NPU 推理（独立 context，绑定 NPU 核 i%3）→
- *             单输出后处理 → 结果与 rgb 一起写槽（rgb_done=1）→ unclaim
- *   composer: 最新结果优先消费槽（seq 严格递增，绝不回退；旧结果回池）→
- *             EMA 时间平滑 → 槽内 rgb 原地画框 → JPEG（含标签）+ NV12 写槽
- *             （display_done=1，display_seq 推进）；渲染节拍 ~30fps
+ *             单输出后处理（NMS）→ rgb 写槽（rgb_done=1）→ unclaim；
+ *             NMS 最终结果（目标名称 + 置信度 + 标注框四点坐标）入结果队列
+ *   composer: 事件驱动消费结果队列，排空只留最新（seq 严格递增，绝不回退；
+ *             旧结果条目直接丢弃）→ EMA 时间平滑 → 槽内 rgb 原地画框 →
+ *             JPEG（含标签）+ NV12 写槽（display_done=1，display_seq 推进）；
+ *             渲染节拍 ~30fps
  *
  * 帧数据全部走视频帧环形队列（video/frame_ring.h）：采集 raw（V4L2 mmap）、
  * 解码 rgb、画框 nv12/jpeg 四个阶段缓冲只在槽位间移动指针，零拷贝。
@@ -30,7 +33,8 @@
  * 画框流 /video/mjpeg_ai 返回 503（不回退原始帧）。所有失败路径只记日志不崩溃。
  *
  * 图像处理与后处理已拆分为独立模块（yolo_image / yolo_postprocess / yolo_draw），
- * 本文件仅保留：模型生命周期、推理线程池、任务队列、环形队列槽消费、快照与对外 API。
+ * 本文件仅保留：模型生命周期、推理线程池、任务队列、结果队列、
+ * 环形队列槽消费、快照与对外 API。
  */
 
 #define _GNU_SOURCE
@@ -60,6 +64,7 @@
 
 #define AI_MAX_WORKERS 15    /* 推理工作线程上限（3 的倍数 3~15，每核 1~5 个） */
 #define AI_QUEUE_CAP   4     /* 任务队列容量（帧），与 worker 数共同约束在途帧内存 */
+#define AI_RESULT_CAP  8     /* 结果队列容量（帧），推理结果入队，composer 消费渲染 */
 
 /* 推理任务：解码后的 RGB 帧（池内缓冲，由消费它的 worker 写槽/回池）。
    槽 claim 随任务移交：ai_task claim 后不摘除，worker 写槽时一并 unclaim */
@@ -69,6 +74,18 @@ typedef struct {
     int               w, h;
     unsigned long long seq;
 } yolo_job_t;
+
+/* 推理结果队列条目：NMS 后处理的最终检测结果，只携带目标名称、置信度与
+   标注框四点坐标（seq 定位待渲染帧；渲染尺寸取自槽位）。纯元数据，无缓冲所有权 */
+typedef struct {
+    unsigned long long seq;
+    int count;
+    struct {
+        char  name[YOLO_CLASS_NAME_LEN];
+        float conf;
+        float x1, y1, x2, y2;
+    } dets[YOLO_MAX_DETS];
+} yolo_result_item_t;
 
 /* 单个推理工作线程：独立 rknn context，可与其它线程并行 run */
 typedef struct {
@@ -99,6 +116,14 @@ static struct {
     pthread_mutex_t q_lock;
     pthread_cond_t  q_not_empty;
     pthread_cond_t  q_not_full;
+
+    /* 有界结果队列（worker 生产推理结果 / composer 消费渲染） */
+    yolo_result_item_t results[AI_RESULT_CAP];
+    int            r_head, r_tail, r_count;
+    pthread_mutex_t r_lock;
+    pthread_cond_t  r_not_empty;
+    pthread_cond_t  r_not_full;
+
     pthread_t       w_tid[AI_MAX_WORKERS];
     pthread_t       render_tid;
     int             n_created;               /* 实际创建成功的 worker 线程数（停池据此 join） */
@@ -184,6 +209,69 @@ static int yolo_queue_pop(yolo_job_t *job)
     g_ai.q_count--;
     pthread_cond_signal(&g_ai.q_not_full);
     pthread_mutex_unlock(&g_ai.q_lock);
+    return 0;
+}
+
+/* ---- 推理结果队列（worker 生产 / composer 消费）---- */
+
+static int yolo_result_push(const yolo_result_item_t *item)
+{
+    pthread_mutex_lock(&g_ai.r_lock);
+    while (g_ai.r_count >= AI_RESULT_CAP && g_ai.running && g_ai.pool_running)
+        pthread_cond_wait(&g_ai.r_not_full, &g_ai.r_lock);
+    if (!g_ai.running || !g_ai.pool_running) {   /* 退出/停池：拒绝入队 */
+        pthread_mutex_unlock(&g_ai.r_lock);
+        return -1;
+    }
+    g_ai.results[g_ai.r_tail] = *item;
+    g_ai.r_tail = (g_ai.r_tail + 1) % AI_RESULT_CAP;
+    g_ai.r_count++;
+    pthread_cond_signal(&g_ai.r_not_empty);
+    pthread_mutex_unlock(&g_ai.r_lock);
+    return 0;
+}
+
+/* 非阻塞出队：队列空返回 -1 */
+static int yolo_result_try_pop(yolo_result_item_t *item)
+{
+    pthread_mutex_lock(&g_ai.r_lock);
+    if (g_ai.r_count == 0) {
+        pthread_mutex_unlock(&g_ai.r_lock);
+        return -1;
+    }
+    *item = g_ai.results[g_ai.r_head];
+    g_ai.r_head = (g_ai.r_head + 1) % AI_RESULT_CAP;
+    g_ai.r_count--;
+    pthread_cond_signal(&g_ai.r_not_full);
+    pthread_mutex_unlock(&g_ai.r_lock);
+    return 0;
+}
+
+/* 阻塞出队：timeout_ms 超时仅用于调用方周期性检查退出条件；
+   超时/停池/退出且队列空返回 -1 */
+static int yolo_result_pop(yolo_result_item_t *item, int timeout_ms)
+{
+    pthread_mutex_lock(&g_ai.r_lock);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += timeout_ms / 1000;
+    ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    while (g_ai.r_count == 0 && g_ai.running && g_ai.pool_running) {
+        if (pthread_cond_timedwait(&g_ai.r_not_empty, &g_ai.r_lock, &ts) != 0) {
+            pthread_mutex_unlock(&g_ai.r_lock);
+            return -1;
+        }
+    }
+    if (g_ai.r_count == 0) {
+        pthread_mutex_unlock(&g_ai.r_lock);
+        return -1;
+    }
+    *item = g_ai.results[g_ai.r_head];
+    g_ai.r_head = (g_ai.r_head + 1) % AI_RESULT_CAP;
+    g_ai.r_count--;
+    pthread_cond_signal(&g_ai.r_not_full);
+    pthread_mutex_unlock(&g_ai.r_lock);
     return 0;
 }
 
@@ -282,7 +370,7 @@ static void *yolo_worker_task(void *arg)
            避免停池后槽内滞留 rgb 阻碍该槽复用） */
         if (!g_ai.running || !g_ai.pool_running) { yolo_job_abandon(&job); continue; }
 
-        /* 结果与 rgb 一起写槽（claim 钉住槽位：任务在途期间不会被复用/清空，
+        /* rgb 写槽（claim 钉住槽位：任务在途期间不会被复用/清空，
            故 s->seq == job.seq 必然成立；防御分支防退让强制清空的迟到写） */
         frame_ring_lock(ring);
         frame_slot_t *s = ai_slot(ring, job.seq);
@@ -291,7 +379,6 @@ static void *yolo_worker_task(void *arg)
             s->rgb.cap  = job.rgb_cap;
             s->rgb.len  = (size_t)job.w * job.h * 3;
             s->rgb_done = 1;
-            s->res      = res;
             frame_ring_infer_unclaim_locked(ring, s, 1);
         } else {
             frame_ring_buf_put_locked(ring, FRAME_RING_POOL_RGB, job.rgb, job.rgb_cap);
@@ -299,17 +386,42 @@ static void *yolo_worker_task(void *arg)
                 frame_ring_infer_unclaim_locked(ring, s, 1);
         }
         frame_ring_unlock(ring);
+
+        /* NMS 后处理结果入结果队列：条目只携带目标名称、置信度与标注框
+           四点坐标（纯元数据；rgb 已入槽，随显示推进由维护规则释放） */
+        yolo_result_item_t item;
+        memset(&item, 0, sizeof(item));
+        item.seq = job.seq;
+        for (int i = 0; i < res.count && i < YOLO_MAX_DETS; i++) {
+            const yolo_det_t *d = &res.dets[i];
+            const char *nm = (d->cls >= 0 && d->cls < g_ai.classes.count)
+                             ? g_ai.classes.names[d->cls] : "obj";
+            snprintf(item.dets[i].name, sizeof(item.dets[i].name), "%s", nm);
+            item.dets[i].conf = d->conf;
+            item.dets[i].x1 = d->x1; item.dets[i].y1 = d->y1;
+            item.dets[i].x2 = d->x2; item.dets[i].y2 = d->y2;
+        }
+        item.count = res.count;
+        yolo_result_push(&item);   /* 停池/退出拒绝入队时条目直接丢弃（无资源持有） */
     }
     return NULL;
 }
 
-/* ---- 渲染 composer：最新结果优先（seq 单调不回退）+ ~30fps 渲染节拍 ----
+/* ---- 渲染 composer：结果队列最新结果优先（seq 单调不回退）+ ~30fps 节拍 ----
 
    严格按 seq 顺序消费会因 worker 乱序完成而等待缺口（实测卡顿 100~700ms）。
-   改为消费最新完成槽：渲染 seq 严格递增（绝不回退，画面不抖动），
-   被跳过的旧结果直接回池；EMA 平滑本身即可容忍帧间小跳跃。
+   改为消费结果队列中最新完成结果：渲染 seq 严格递增（绝不回退，画面不抖动），
+   被跳过的旧结果条目直接丢弃（纯元数据，无资源）；EMA 平滑本身即可容忍帧间小跳跃。
    渲染节拍与推流/显示速率匹配（~30fps），同时把 OpenCV 渲染 + JPEG 编码 +
    NV12 转换的 CPU 锁定在上限内。 */
+
+/* 名称回查类别下标（条目只携带名称；正常必命中，未命中兜底 0 保着色合法） */
+static int yolo_class_index(const char *name)
+{
+    for (int i = 0; i < g_ai.classes.count; i++)
+        if (strcmp(g_ai.classes.names[i], name) == 0) return i;
+    return 0;
+}
 
 static void *yolo_render_task(void *arg)
 {
@@ -320,28 +432,51 @@ static void *yolo_render_task(void *arg)
     while (g_ai.running && g_ai.pool_running) {
         if (!ring) { usleep(200000); continue; }   /* 防御：video 未初始化 */
 
-        /* 事件驱动：等新 rgb_done 槽（40ms 超时仅用于退出检查） */
-        if (!frame_ring_wait_render(ring, g_ai.next_seq, 40)) continue;
+        /* 事件驱动：等推理结果入队（40ms 超时仅用于退出检查） */
+        yolo_result_item_t item;
+        if (yolo_result_pop(&item, 40) != 0) continue;
 
-        yolo_result_t res;
+        /* 最新结果优先：排空队列只留最新（旧结果条目直接丢弃） */
+        yolo_result_item_t newer;
+        while (yolo_result_try_pop(&newer) == 0) item = newer;
+        /* 结果须晚于已渲染 seq（渲染 seq 严格递增，绝不回退） */
+        if (item.seq <= g_ai.next_seq) continue;
+
+        unsigned long long seq = item.seq;
         int w = 0, h = 0;
-        unsigned long long picked_seq = 0;
         ring_buf_t nv12b = { 0 }, jpegb = { 0 };
         frame_ring_lock(ring);
-        frame_slot_t *s = frame_ring_display_pick_locked(ring, g_ai.next_seq);
-        if (!s) { frame_ring_unlock(ring); continue; }
-        picked_seq = s->seq;
-        res = s->res;
+        /* rgb_done 钉住槽位（维护规则在显示推进后才释放 rgb）；
+           防御分支防退让强制清空的迟到渲染 */
+        frame_slot_t *s = ai_slot(ring, seq);
+        if (s->seq != seq || !s->rgb_done || !s->rgb.buf) {
+            frame_ring_unlock(ring);
+            continue;
+        }
         w = s->w; h = s->h;
         /* 渲染输出缓冲：池内 NV12（供录像窃取）与 JPEG（供推流拷贝）。
            s->rgb 由 rgb_done && seq > display_seq 钉住，锁外渲染期间无人释放 */
         frame_ring_buf_take_locked(ring, FRAME_RING_POOL_NV12, (size_t)w * h * 3 / 2, &nv12b);
         frame_ring_buf_take_locked(ring, FRAME_RING_POOL_JPEG, 64 * 1024, &jpegb);
-        g_ai.next_seq = picked_seq;
+        g_ai.next_seq = seq;
         frame_ring_unlock(ring);
 
+        /* 结果条目 → 渲染结果：名称回查类别下标（标签含置信度） */
+        yolo_result_t disp;
+        memset(&disp, 0, sizeof(disp));
+        disp.seq = seq;
+        disp.w = w; disp.h = h;
+        disp.count = item.count;
+        for (int i = 0; i < item.count && i < YOLO_MAX_DETS; i++) {
+            disp.dets[i].cls  = yolo_class_index(item.dets[i].name);
+            disp.dets[i].conf = item.dets[i].conf;
+            disp.dets[i].x1 = item.dets[i].x1;
+            disp.dets[i].y1 = item.dets[i].y1;
+            disp.dets[i].x2 = item.dets[i].x2;
+            disp.dets[i].y2 = item.dets[i].y2;
+        }
+
         /* 锁外渲染：EMA 平滑（prev 仅本线程访问）+ 槽内 rgb 原地画框标签 */
-        yolo_result_t disp = res;
         yolo_smooth(&g_ai.prev, &disp);
         unsigned char *jbuf = jpegb.buf;
         size_t jcap = jpegb.cap, jlen = 0;
@@ -358,7 +493,7 @@ static void *yolo_render_task(void *arg)
 
         frame_ring_lock(ring);
         /* 槽可能已被退让清空（相机重启）：校验 seq 后提交，否则缓冲回池 */
-        if (s->seq == picked_seq && s->rgb_done && s->rgb.buf) {
+        if (s->seq == seq && s->rgb_done && s->rgb.buf) {
             if (ok) {
                 s->nv12     = nv12b;
                 s->nv12.len = (size_t)w * h * 3 / 2;
@@ -471,6 +606,8 @@ static void ai_stop_pool(void)
     }
     pthread_cond_broadcast(&g_ai.q_not_empty);
     pthread_cond_broadcast(&g_ai.q_not_full);
+    pthread_cond_broadcast(&g_ai.r_not_empty);
+    pthread_cond_broadcast(&g_ai.r_not_full);
 
     for (int i = 0; i < g_ai.n_created; i++)
         pthread_join(g_ai.w_tid[i], NULL);
@@ -489,6 +626,9 @@ static void ai_stop_pool(void)
         }
     }
     g_ai.q_head = g_ai.q_tail = g_ai.q_count = 0;
+
+    /* 结果队列条目为纯元数据（无缓冲/claim），直接清空即可 */
+    g_ai.r_head = g_ai.r_tail = g_ai.r_count = 0;
 
     /* 清空快照与渲染状态（新池从干净状态开始；next_seq 保留跨 reload 连续） */
     pthread_mutex_lock(&g_ai.result_mutex);
@@ -638,6 +778,9 @@ int rknn_yolo_init(void *arg)
     pthread_mutex_init(&g_ai.q_lock, NULL);
     pthread_cond_init(&g_ai.q_not_empty, NULL);
     pthread_cond_init(&g_ai.q_not_full, NULL);
+    pthread_mutex_init(&g_ai.r_lock, NULL);
+    pthread_cond_init(&g_ai.r_not_empty, NULL);
+    pthread_cond_init(&g_ai.r_not_full, NULL);
 
     if (!app || !app->cfg) {
         LOG_ERROR("ai: init without config");
@@ -660,6 +803,9 @@ void rknn_yolo_destroy(void *arg)
     pthread_mutex_destroy(&g_ai.q_lock);
     pthread_cond_destroy(&g_ai.q_not_empty);
     pthread_cond_destroy(&g_ai.q_not_full);
+    pthread_mutex_destroy(&g_ai.r_lock);
+    pthread_cond_destroy(&g_ai.r_not_empty);
+    pthread_cond_destroy(&g_ai.r_not_full);
     pthread_mutex_destroy(&g_ai.result_mutex);
     g_ai.enabled = 0;
 }

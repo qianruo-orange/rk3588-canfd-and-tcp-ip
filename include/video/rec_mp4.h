@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef REC_MP4_H
 #define REC_MP4_H
 

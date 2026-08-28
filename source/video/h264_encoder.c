@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * h264_encoder.c — RK3588 硬件 H.264 编码器封装。
  *

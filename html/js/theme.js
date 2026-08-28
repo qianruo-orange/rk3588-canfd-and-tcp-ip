@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /* theme.js — 深/浅主题切换：data-theme + localStorage 持久化（默认深色） */
 (function() {
   var t = 'dark';

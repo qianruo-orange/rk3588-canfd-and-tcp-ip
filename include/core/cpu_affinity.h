@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef CPU_AFFINITY_H
 #define CPU_AFFINITY_H
 

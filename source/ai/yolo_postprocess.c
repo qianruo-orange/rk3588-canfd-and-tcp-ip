@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * yolo_postprocess.c — YOLO26 单输出后处理（官方 ultralytics rknn 导出格式）。
  *

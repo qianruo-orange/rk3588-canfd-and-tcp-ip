@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* monitor.css — 仪表盘页面样式 毛玻璃水滴风（主题变量化） */
 .top-bar{display:flex;align-items:center;margin-bottom:4px;flex-wrap:wrap}
 #datetime{color:var(--muted);font-size:16px;margin-left:16px}

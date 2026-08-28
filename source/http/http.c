@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * http.c — HTTP 核心：epoll Reactor 主循环、路由分发、认证、静态文件服务、工具函数。
  *

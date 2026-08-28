@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef HTTP_INTERNAL_H
 #define HTTP_INTERNAL_H
 

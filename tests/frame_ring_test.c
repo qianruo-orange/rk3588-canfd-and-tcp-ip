@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * frame_ring_test.c — 视频帧环形队列单元测试（build 独立 target）。
  *
@@ -212,9 +213,7 @@ static void test_full_pipeline(void)
         frame_ring_lock(&r);
         frame_slot_t *s = &r.slots[seq & 31];
         frame_ring_buf_take_locked(&r, FRAME_RING_POOL_RGB, 100, &s->rgb);
-        s->res.count = 1;
-        s->res.dets[0].conf = 0.9f;
-        s->rgb_done = 1;
+        s->rgb_done = 1;   /* 检测结果经结果队列传递，槽位不再持有 */
         frame_ring_signal(&r);
         frame_ring_unlock(&r);
     }
@@ -223,7 +222,6 @@ static void test_full_pipeline(void)
     frame_ring_lock(&r);
     frame_slot_t *d = frame_ring_display_pick_locked(&r, 0);
     CHECK(d && d->seq == 5, "display picks newest seq5");
-    CHECK(d->res.dets[0].conf == 0.9f, "res snapshot intact");
     ring_buf_t nv, jp;
     frame_ring_buf_take_locked(&r, FRAME_RING_POOL_NV12, 100, &nv);
     frame_ring_buf_take_locked(&r, FRAME_RING_POOL_JPEG, 100, &jp);

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * yolo_image.c — 图像处理模块：JPEG 解码/编码（libjpeg-turbo）、
  * YUYV→RGB、RGB 双线性缩放。纯函数，线程安全。

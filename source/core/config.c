@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * config.c — 配置持久化（文件 ↔ 运行时双向同步）
  * 启动时从 config.txt 加载，若无则用默认值；

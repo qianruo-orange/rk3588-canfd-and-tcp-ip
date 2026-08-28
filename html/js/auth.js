@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /* auth.js — 前端统一 Basic Auth 封装。
  *
  * 后端对写接口（删除/保存/重启/关机/上传等）强制 root 账号 Basic Auth，

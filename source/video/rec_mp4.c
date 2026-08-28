@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * rec_mp4.c — 最小 MP4(H.264 avc1 track) 封装器（ISO BMFF，moov 末尾回写）。
  *

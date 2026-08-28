@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * dbc_parser.c — DBC（CAN 数据库）解析与信号解码
  *

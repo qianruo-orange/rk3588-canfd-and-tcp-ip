@@ -1,4 +1,4 @@
-# rk3588-canfd-and-tcp-ip
+# rk3588-edge-gateway
 
 基于 epoll 的 CAN / CAN FD 数据采集、DBC 信号解析与 TCP/IP 通信解决方案，内置 Web 管理界面、视频流、AI 目标检测（RKNN + YOLO26）、网络录像与 systemd 看门狗，支持按系统信息自动识别可配置 CAN 通道。适用于 RK3588（如 Orange Pi 5 Max）/ Linux 运行环境，使用 C11 实现。
 
@@ -27,7 +27,7 @@
         ├─► tcp_task      ──► TCP 监听 / 收发
         ├─► http_task     ──► Web 管理 + REST API + MJPEG 推流
         ├─► video_task    ──► V4L2 采集（mmap 零拷贝入环形队列）
-        ├─► ai_task       ──► 事件驱动消费环槽 → 推理队列（多线程池并行推理）→ 结果写回环槽
+        ├─► ai_task       ──► 事件驱动消费环槽 → 推理队列（多线程池并行推理）→ rgb 写槽 + NMS 结果入结果队列
         ├─► rec_task      ──► 网络录像（零拷贝取显示帧 NV12，AI 停摆直接宕机）→ H.264 硬件编码 → MP4(avc1)
         └─► watchdog_task ──► 心跳监控 + sd_notify
 ```
@@ -40,7 +40,7 @@
 | `tcp` | TCP 监听、连接管理与数据收发 |
 | `http` | HTTP 管理服务主循环、REST API、MJPEG 推流 |
 | `video` | V4L2 采集：mmap 指针零拷贝入环形队列，推进 produce 游标 |
-| `ai` | 事件驱动消费环槽（infer 游标）、推理任务投递；模型加载与多线程推理池（每线程独立 rknn context） |
+| `ai` | 事件驱动消费环槽（infer 游标）、推理任务投递；模型加载与多线程推理池（每线程独立 rknn context）；推理后分两路：rgb 写槽走显示链路，NMS 结果（名称+置信度+坐标）入结果队列供 composer 消费 |
 | `rec` | 网络录像：从环取显示帧 NV12 直接编码（encode 游标；AI 停摆 >1s 置 fatal 整体宕机）→ H.264 硬件编码 → MP4(avc1) 封装落盘 |
 | `watchdog` | 线程心跳监控与 `sd_notify` |
 
@@ -53,8 +53,8 @@
 ```text
 V4L2 摄像头（MJPEG / YUYV）
   └► video_task 采集：mmap 指针零拷贝入环 ──► produce 游标推进
-        └► ai_task 事件驱动取槽（infer 游标）─► worker×N 并行推理（RKNN）─► 结果写回槽
-              └► composer 选最新完成槽画框（display 游标）
+        └► ai_task 事件驱动取槽（infer 游标）─► worker×N 并行推理（RKNN）─► rgb 写槽
+                    ├► NMS 结果（名称+置信度+坐标）入结果队列 ─► composer 消费最新结果画框（display 游标）
                     ├► http 逐连接推流 ─► /video/mjpeg_ai（AI 必要流程，不可用返回 503）
                     └► rec_task 取显示帧 NV12（encode 游标）─► H.264 硬件编码 ─► MP4(avc1) 落盘
 原始流 /video/mjpeg 由 http 直接从最新采集槽拷贝推流（与推理链路并行）
@@ -62,8 +62,8 @@ V4L2 摄像头（MJPEG / YUYV）
 
 - 帧环形队列：32 槽 × 四阶段缓冲（raw / rgb / nv12 / jpeg），四游标（produce / infer / display / encode）单调推进；缓冲按需分配、游标越过后回池复用——整帧只移动指针，无逐帧 malloc / memcpy
 - 采集：`video_task` V4L2 mmap 缓冲 DQBUF 后指针直接进槽（延迟 QBUF 至消费完成，真正零拷贝），环满才丢弃（capture_dropped）；优先 MJPEG，失败回退 YUYV；分辨率取 `video_width` / `video_height`
-- 推理：`ai_task` 阻塞等待 produce 游标（事件驱动，不再按固定间隔采样），取槽随任务投递 worker（任务存续期间钉住 raw 槽，采集不回收），解码 RGB 写入槽
-- 显示：composer 最新完成槽优先（跳过旧结果计 render_skipped），画框写 nv12 / jpeg 进槽；每个 `/video/mjpeg*` 连接一个独立线程各自拷贝最新 JPEG 推流（multipart/x-mixed-replace），慢客户端不钉槽、不阻塞其他连接
+- 推理：`ai_task` 阻塞等待 produce 游标（事件驱动，不再按固定间隔采样），取槽随任务投递 worker（任务存续期间钉住 raw 槽，采集不回收），解码 RGB 写入槽；推理后数据流分两路——rgb 写槽走显示链路，NMS 后处理结果（目标名称 + 置信度 + 标注框四点坐标）入结果队列（纯元数据，不携带缓冲）
+- 显示：composer 事件驱动消费结果队列（排空只留最新，旧结果丢弃计 render_skipped），按 seq 定位 rgb_done 槽画框写 nv12 / jpeg 进槽；每个 `/video/mjpeg*` 连接一个独立线程各自拷贝最新 JPEG 推流（multipart/x-mixed-replace），慢客户端不钉槽、不阻塞其他连接
 - 编码：`rec_task` 从 encode 游标零拷贝窃取显示帧 NV12（用毕归还缓冲池）；与编码器分辨率不符时跳过（encode_skipped）
 - AI 必要流程：模型缺失 / NPU 不可用时启动直接失败退出（systemd failed），`/video/mjpeg_ai` 返回 503，不回退原始帧；运行期 AI 停摆 >1s（无新标注帧）不回退原始帧，直接整体宕机（退出码 1 → systemd Restart=on-failure 拉起）
 
@@ -161,10 +161,10 @@ CAN 数据提取接口（从总线读数据）：
 ## 目录结构
 
 ```text
-rk3588-canfd-and-tcp-ip/
+rk3588-edge-gateway/
 ├── CMakeLists.txt
 ├── README.md
-├── rk3588-canfd-and-tcp-ip.service  # systemd 服务单元
+├── rk3588-edge-gateway.service  # systemd 服务单元
 ├── include/                          # 头文件
 │   ├── core/
 │   │   ├── common.h                  # 应用上下文与公共工具
@@ -233,7 +233,7 @@ rk3588-canfd-and-tcp-ip/
 │   │   ├── h264_encoder.c            # H.264 硬件编码器实现（V4L2 M2M MPLANE，NV12→H.264）
 │   │   └── rec_mp4.c                 # MP4(avc1) 封装器实现
 │   ├── ai/
-│   │   ├── rknn_yolo.c               # 模型加载 + 多线程推理池 + 事件驱动取环槽 + 结果写回（显示/编码消费）
+│   │   ├── rknn_yolo.c               # 模型加载 + 多线程推理池 + 事件驱动取环槽 + 结果队列（NMS 结果）+ 渲染 composer
 │   │   ├── yolo_image.c              # 图像处理实现（libjpeg / 格式转换 / 缩放）
 │   │   ├── yolo_postprocess.c        # YOLO26 单输出后处理（框已解码，阈值 + NMS）
 │   │   └── yolo_draw.cpp             # 画框实现（OpenCV cv::rectangle / cv::putText）
@@ -242,7 +242,7 @@ rk3588-canfd-and-tcp-ip/
 ├── tests/
 │   └── frame_ring_test.c             # 帧环形队列单元测试（游标推进 / 回池 / 回绕 / 引用计数 / 丢弃计数）
 ├── html/                             # Web 前端
-│   ├── index.html                    # 监控页（CAN/TCP 数据网关仪表盘）
+│   ├── index.html                    # 监控页（边缘智能网关仪表盘）
 │   ├── config.html                   # 配置页
 │   ├── dbc.html                      # DBC 解析页
 │   ├── logs.html                     # 文件下载页（日志 / 录像双 TAB）
@@ -294,7 +294,7 @@ apt install build-essential cmake libsystemd-dev libnl-3-dev libnl-route-3-dev l
 ## 构建
 
 ```bash
-cd /home/orangepi/rk3588-canfd-and-tcp-ip
+cd /home/orangepi/rk3588-edge-gateway
 ./scripts/build.sh -R   # Release（默认）
 ./scripts/build.sh -D   # Debug
 ./scripts/build.sh -C   # 清理构建产物与 logs
@@ -302,15 +302,15 @@ cd /home/orangepi/rk3588-canfd-and-tcp-ip
 
 `build.sh` 构建前会自动检查依赖（工具链 + 开发库 + librknnrt），缺失时打印具体缺项与安装命令并中止，避免在 cmake / make 阶段才暴露晦涩报错；`libavcodec-dev`（FFmpeg rkmpp 后端）为可选依赖，缺失时自动回退 V4L2 rkvenc 编码。
 
-构建产物：`./bin/rk3588-canfd-and-tcp-ip`
+构建产物：`./bin/rk3588-edge-gateway`
 
 版本信息由 CMake 在配置阶段生成到 `include/core/version.h`，包括 `APP_NAME`、`APP_VERSION`、`APP_GIT_COMMIT`、`APP_GIT_BRANCH`、`APP_GIT_DIRTY`、`APP_BUILD_TYPE`、`APP_BUILD_DATE`。
 
 ## 运行方式
 
 ```bash
-cd /home/orangepi/rk3588-canfd-and-tcp-ip
-./bin/rk3588-canfd-and-tcp-ip
+cd /home/orangepi/rk3588-edge-gateway
+./bin/rk3588-edge-gateway
 ```
 
 > 请在项目根目录运行，确保 `config/`、`html/` 和 `logs/` 目录可用。
@@ -327,7 +327,7 @@ sudo ./scripts/deploy.sh -r     # 重装（卸载后重新安装）
 sudo ./scripts/deploy.sh -h     # 查看帮助
 ```
 
-`deploy.sh` 需 root 权限，安装目录为 `/opt/rk3588-canfd-and-tcp-ip/`，部署内容如下：
+`deploy.sh` 需 root 权限，安装目录为 `/opt/rk3588-edge-gateway/`，部署内容如下：
 
 | 源 | 目标 |
 | --- | --- |
@@ -337,13 +337,13 @@ sudo ./scripts/deploy.sh -h     # 查看帮助
 
 > 注：`config/config.txt` 与 `config/` 下的 DBC 模板文件**不会**被复制；首次部署使用程序内置默认值，后续通过 Web 配置页保存配置、上传 DBC 文件。`logs/` 与 `recordings/` 目录由部署脚本创建。
 
-服务名称：`rk3588-canfd-and-tcp-ip`
+服务名称：`rk3588-edge-gateway`
 
 查看服务状态：
 
 ```bash
-systemctl status rk3588-canfd-and-tcp-ip
-journalctl -u rk3588-canfd-and-tcp-ip -f
+systemctl status rk3588-edge-gateway
+journalctl -u rk3588-edge-gateway -f
 ```
 
 部署要点：
@@ -447,7 +447,7 @@ journalctl -u rk3588-canfd-and-tcp-ip -f
 RKNN + YOLO26（官方 ultralytics 单输出格式 `(1, 84, 8400)`，fp16，官方 mean/std），由 `rknn-toolkit2` 转换后在板载 NPU 推理：
 
 - 模型加载：`ai_model` 指向 `.rknn` 文件，校验输出必须为单个检测头 `(1, 84, 8400)`；类别名由 `ai_names` 加载（COCO 格式，每行一个类名，缺失回退内置 COCO 80 类）
-- 流水线：`ai_task` 事件驱动等待环形队列 produce 游标（不再按固定间隔采样；`ai_interval_ms` 为相邻取帧最小间隔，默认 10ms 在相机帧率下无感）→ 取槽随任务投递（任务存续期间钉住 raw 槽，采集不回收）→ N 个推理 worker（独立 rknn context，worker i 绑定 NPU 核 i%3，RK3588 三核等量分配）→ 结果写回槽 → composer 选最新完成槽（乱序完成时跳过旧结果，计 render_skipped）→ EMA 平滑（α=0.4，同类 IoU≥0.3 匹配）→ 渲染进槽（nv12 / jpeg）→ 显示 / 编码游标消费
+- 流水线：`ai_task` 事件驱动等待环形队列 produce 游标（不再按固定间隔采样；`ai_interval_ms` 为相邻取帧最小间隔，默认 10ms 在相机帧率下无感）→ 取槽随任务投递（任务存续期间钉住 raw 槽，采集不回收）→ N 个推理 worker（独立 rknn context，worker i 绑定 NPU 核 i%3，RK3588 三核等量分配）→ 推理后分两路：rgb 写槽（显示链路），NMS 结果（名称+置信度+坐标）入结果队列 → composer 消费队列最新结果（乱序完成时跳过旧结果，计 render_skipped）→ EMA 平滑（α=0.4，同类 IoU≥0.3 匹配）→ 渲染进槽（nv12 / jpeg）→ 显示 / 编码游标消费
 - 画框渲染：直接调用 OpenCV（`cv::rectangle` 3px 实色 + LINE_AA 抗锯齿；`cv::putText` Hershey Simplex 白色粗体字 + 实色底块，默认挂在框顶外侧，顶部不足落框内），每一帧都输出标注帧，不混入未推理的原始帧
 - 热更新：`ai_threads` / `ai_conf` / `ai_nms` / `ai_interval_ms` 保存后立即重建推理池生效，无需重启进程；`ai_model` / `ai_names` 可通过 Web 配置页或 API 上传（校验 RKNN magic / 标签格式后原子替换文件并热重载）
 - 必要流程：AI 推理不可停用；模型缺失 / NPU 驱动未加载 / 推理失败时直接报错——启动路径整体失败退出（systemd 进入 failed），运行期热重载失败由 API 返回 `saved_reload_failed`，画框流 `/video/mjpeg_ai` 返回 503（不回退原始帧）
@@ -469,7 +469,7 @@ RKNN + YOLO26（官方 ultralytics 单输出格式 `(1, 84, 8400)`，fp16，官�
 服务启动后默认自动录制，依赖 RK3588 硬件 H.264 编码器（`/dev/video-enc0`，rkvenc）：
 
 - 触发方式：默认自动开启（无需 Web 操作）；也保留 `/api/rec/start` / `/api/rec/stop` 手动接口（手动停止后不再自动续录）
-- 按天分目录：录制文件存于 `recordings/YYYYMMDD/`，每天一个子目录，自动跨天切换；文件名规范化只保留时间（`rec_HHMMSS.mp4`，同秒冲突自动追加序号），日志文件同理为 `rk3588-canfd-and-tcp-ip_info.log` / `_error.log`
+- 按天分目录：录制文件存于 `recordings/YYYYMMDD/`，每天一个子目录，自动跨天切换；文件名规范化只保留时间（`rec_HHMMSS.mp4`，同秒冲突自动追加序号），日志文件同理为 `rk3588-edge-gateway_info.log` / `_error.log`
 - 分辨率：录制分辨率取摄像头配置 `video_width` / `video_height` 的选定值（任意分辨率），未配置时退回首帧探测
 - 帧率：开录前连续抓帧实测（不写死），钳制在 1~120 fps
 - 编码链路：零拷贝取环形队列显示帧 NV12（AI 必要流程，停摆直接宕机，无原始帧回退）→ `/dev/video-enc0` 硬件编码 H.264（CBR，码率 `宽×高×2`，钳制 300k~16M，GOP = fps×2）→ 封装
@@ -492,8 +492,8 @@ RKNN + YOLO26（官方 ultralytics 单输出格式 `(1, 84, 8400)`，fp16，官�
 ```text
 logs/
 └── YYYYMMDD/
-    ├── rk3588-canfd-and-tcp-ip_info.log
-    └── rk3588-canfd-and-tcp-ip_error.log
+    ├── rk3588-edge-gateway_info.log
+    └── rk3588-edge-gateway_error.log
 ```
 
 ## 清理说明
@@ -508,4 +508,6 @@ logs/
 
 ## 许可证
 
-该项目采用适用于本仓库的开源许可证，具体内容请参考仓库中的许可证文件。
+本项目采用 **GPL-3.0-or-later**（GNU 通用公共许可证 v3 或更高版本）发布，全文见仓库根目录 `LICENSE` 文件。所有自有源文件顶部均带 `SPDX-License-Identifier: GPL-3.0-or-later` 声明。
+
+> 注意：`include/ai/rknn_api.h` 来自 Rockchip RKNN SDK，版权归 Rockchip 所有，不受本仓库 GPL 声明约束；`librknnrt` 运行时库按 Rockchip 官方授权使用。

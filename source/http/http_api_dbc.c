@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * http_api_dbc.c — DBC 解析结果的 HTTP 展示模块
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <string.h>
 
 #include "tcp/tcp_queue.h"

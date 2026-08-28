@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * http_api_config.c — 运行时配置读写（通过 app_ctx_t 指针访问运行时状态）
  */

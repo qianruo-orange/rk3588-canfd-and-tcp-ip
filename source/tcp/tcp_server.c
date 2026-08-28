@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #define _GNU_SOURCE   /* 暴露 MSG_NOSIGNAL / eventfd 等 Linux 扩展 */
 
 #include <stdio.h>

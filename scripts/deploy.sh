@@ -1,8 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 #!/bin/bash
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="rk3588-canfd-and-tcp-ip"
+APP_NAME="rk3588-edge-gateway"
 DEPLOY_DIR="/opt/$APP_NAME"
 BINARY="$PROJECT_DIR/bin/$APP_NAME"
 SERVICE_SRC="$PROJECT_DIR/$APP_NAME.service"
@@ -58,20 +59,9 @@ do_install() {
     cp "$BINARY" "$DEPLOY_DIR/bin/$APP_NAME"
     chmod 755 "$DEPLOY_DIR/bin/$APP_NAME"
 
-    echo "[INSTALL] config/"
-    mkdir -p "$DEPLOY_DIR/config"
-    # 保留用户已有的配置（Web 配置页写入的内容），仅在首次安装时放入模板
-    if [ ! -f "$DEPLOY_DIR/config/config.txt" ] && [ -f "$PROJECT_DIR/config/config.txt" ]; then
-        cp "$PROJECT_DIR/config/config.txt" "$DEPLOY_DIR/config/config.txt"
-        echo "  (config.txt template installed — configure via web UI)"
-    else
-        echo "  (keep existing config.txt)"
-    fi
-
-    if [ -f "$PROJECT_DIR/config/example.dbc" ]; then
-        echo "[INSTALL] config/example.dbc"
-        cp "$PROJECT_DIR/config/example.dbc" "$DEPLOY_DIR/config/example.dbc"
-    fi
+    echo "[INSTALL] config/ (整目录覆盖)"
+    rm -rf "$DEPLOY_DIR/config"
+    cp -r "$PROJECT_DIR/config" "$DEPLOY_DIR/config"
 
     echo "[INSTALL] html/"
     rm -rf "$DEPLOY_DIR/html"

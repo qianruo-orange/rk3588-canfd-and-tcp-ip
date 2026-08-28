@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /* config.js — 配置页面逻辑 */
 (function() {
 

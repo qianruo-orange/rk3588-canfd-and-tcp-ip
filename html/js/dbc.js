@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /* dbc.js — 分别轮询接收 / 发送方向的 DBC 解析结果并渲染 */
 (function() {
   function esc(s) {

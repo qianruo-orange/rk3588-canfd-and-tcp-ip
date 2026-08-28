@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef DBC_PARSER_H
 #define DBC_PARSER_H
 

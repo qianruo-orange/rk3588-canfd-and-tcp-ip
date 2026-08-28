@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * http_api_can.c — CAN 接口状态查询与开关控制 API。
  */

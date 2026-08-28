@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef CAN_SOCKET_H
 #define CAN_SOCKET_H
 

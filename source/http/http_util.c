@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * http_util.c — HTTP 层公共工具实现（JSON 构建 / URL 解码 / 表单解析 /
  * 系统文件读取 / 便捷响应），供全部 http_api_*.c 复用。

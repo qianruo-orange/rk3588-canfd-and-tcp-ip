@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef H264_ENCODER_H
 #define H264_ENCODER_H
 

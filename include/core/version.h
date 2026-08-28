@@ -1,9 +1,10 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
-#define APP_NAME "rk3588-canfd-and-tcp-ip"
+#define APP_NAME "rk3588-edge-gateway"
 #define APP_VERSION "1.1.0"
-#define APP_GIT_COMMIT "320652f"
+#define APP_GIT_COMMIT "58864b6"
 #define APP_GIT_BRANCH "main"
 #define APP_GIT_DIRTY 1
 #define APP_BUILD_TYPE "Release"
-#define APP_BUILD_DATE "2026-08-28 03:29:13"
+#define APP_BUILD_DATE "2026-08-28 12:21:41"

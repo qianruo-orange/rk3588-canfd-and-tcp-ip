@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * http_api_rec.c — 网络录像控制路由：
  *   POST /api/rec/start   开始录制（AI 画框帧优先）

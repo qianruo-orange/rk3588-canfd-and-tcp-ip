@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * yolo_draw.cpp — 检测框渲染模块：RGB 画框 + 类别标签 + JPEG 编码。
  *

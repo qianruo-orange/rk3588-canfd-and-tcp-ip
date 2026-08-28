@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef YOLO_IMAGE_H
 #define YOLO_IMAGE_H
 

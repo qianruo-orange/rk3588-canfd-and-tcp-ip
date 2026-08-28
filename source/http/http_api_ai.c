@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
  * http_api_ai.c — AI 文件上传接口：POST /api/ai/upload?type=model|names
  *

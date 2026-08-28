@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef TCP_QUEUE_H
 #define TCP_QUEUE_H
 

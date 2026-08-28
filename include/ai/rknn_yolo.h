@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef RKNN_YOLO_H
 #define RKNN_YOLO_H
 
@@ -13,11 +14,13 @@
  *  - yolo_postprocess.c YOLO26 单输出模式后处理（sigmoid + stride + NMS）
  *  - yolo_draw.c       画框 + 标签 + JPEG 编码
  *  - rknn_yolo.c       模型加载、推理线程池（每线程独立 rknn context，并行推理）、
- *                      任务队列、按序重排槽、结果/画框帧快照
+ *                      任务队列、结果队列（NMS 后处理结果：目标名称 + 置信度 +
+ *                      标注框四点坐标）、渲染 composer、结果/画框帧快照
  *
  * 多线程推理：ai_threads 个推理工作线程（3 的倍数 3~15，各绑定 NPU 核 i%3），
- * 独立 rknn context 并行推理；乱序完成的结果在重排槽等待，由单个 composer
- * 线程严格按 seq 顺序做 EMA 平滑 + 渲染，每个视频帧都会产出标注画面。
+ * 独立 rknn context 并行推理。推理后数据流分两路：rgb 写槽（画框显示链路），
+ * NMS 结果入结果队列；composer 消费队列最新结果（乱序完成的旧结果丢弃），
+ * 按 seq 严格递增做 EMA 平滑 + 渲染，每个视频帧都会产出标注画面。
  *
  * 热重载：rknn_yolo_reload() 停池 → 重读配置（模型/标签/线程数/阈值等）→ 重建。
  *

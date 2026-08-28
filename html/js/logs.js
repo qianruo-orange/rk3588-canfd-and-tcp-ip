@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 /* logs.js — 日志/录像列表、下载、删除页面逻辑。
  * 日志与录像共用 loadFileList/delFile（复用同一套渲染与删除流程）；
  * 打包下载统一走 authFetch（避免 <a> 直连未登录时弹浏览器原生认证框）。 */

@@ -91,6 +91,127 @@
     }).catch(function() { streamRunning = false; streamAbort = null; });
   }
 
+  /* ---- H.264 fMP4 / MSE 播放器（默认 /video/stream） ----
+     单条 fetch 喂 MediaSource：init 段(ftyp/moov) + 逐片段(moof/mdat) append；
+     'moof' 签名计数喂 FPS 徽标（近似，仅显示用）。失败 1s 节流重连，
+     服务端断流（会话轮转）立即重连；1s 看门狗防缓冲堆积与假死 */
+  var mseMs = null, mseSb = null, mseAbort = null, mseReader = null;
+  var mseRunning = false, mseUrl = '', mseLastData = 0, mseLastFail = 0;
+  var mseTail = new Uint8Array(3);   /* 跨块 'moof' 签名续接尾巴 */
+
+  function mseSupported() {
+    if (!window.MediaSource || !MediaSource.isTypeSupported) return false;
+    var codes = ['avc1.64001f', 'avc1.4d401f', 'avc1.42e01f'];
+    for (var i = 0; i < codes.length; i++)
+      if (MediaSource.isTypeSupported('video/mp4; codecs="' + codes[i] + '"')) return true;
+    return false;
+  }
+
+  function mseStop() {
+    if (mseReader) { try { mseReader.cancel(); } catch(e) {} mseReader = null; }
+    if (mseAbort) { mseAbort.abort(); mseAbort = null; }
+    if (mseMs) {
+      try {
+        if (mseSb && mseMs.readyState === 'open') mseMs.removeSourceBuffer(mseSb);
+      } catch(e) {}
+      mseMs = null;
+    }
+    mseSb = null;
+    mseRunning = false;
+    mseUrl = '';
+    mseTail[0] = mseTail[1] = mseTail[2] = 0;
+    var vid = document.getElementById('stream_video');
+    if (vid) {
+      if (vid.src && vid.src.indexOf('blob:') === 0) URL.revokeObjectURL(vid.src);
+      vid.removeAttribute('src');
+      vid.load();                          /* 清空播放器（readyState 归零） */
+    }
+  }
+
+  function mseAppend(sb, chunk, tries) {
+    if (!mseRunning || mseSb !== sb) return;
+    if (sb.updating) {                     /* appendBuffer 未完成：稍后重试（16ms 步进，时序 FIFO） */
+      if (tries > 50) { mseLastFail = Date.now(); mseStop(); return; }
+      setTimeout(function() { mseAppend(sb, chunk, tries + 1); }, 16);
+      return;
+    }
+    try {
+      sb.appendBuffer(chunk);
+    } catch(e) {                           /* QuotaExceeded/NotSupported 等 */
+      mseLastFail = Date.now();
+      mseStop();
+    }
+  }
+
+  function mseScanMoof(chunk) {
+    var buf = new Uint8Array(mseTail.length + chunk.length);
+    buf.set(mseTail, 0);
+    buf.set(chunk, mseTail.length);
+    for (var i = 0; i + 3 < buf.length; i++) {
+      if (buf[i] === 0x6d && buf[i+1] === 0x6f && buf[i+2] === 0x6f && buf[i+3] === 0x66) {
+        fpsCnt++;
+        i += 3;
+      }
+    }
+    mseTail.set(buf.subarray(buf.length - 3));
+  }
+
+  function mseStart(url) {
+    if (mseUrl === url && mseRunning) return;        /* 同一流已在播放 */
+    if (Date.now() - mseLastFail < 1000) return;     /* 失败 1s 节流（update 200ms 轮询） */
+    mseStop();
+    mseUrl = url;
+    mseRunning = true;
+    mseLastData = Date.now();
+    resetFps();
+    var ac = new AbortController();
+    mseAbort = ac;
+
+    fetch(url, {signal: ac.signal}).then(function(r) {
+      if (!r.ok || !r.body) {                        /* 503（无编码会话）：节流重试 */
+        mseLastFail = Date.now();
+        mseStop();
+        return;
+      }
+      var codec = r.headers.get('X-Codec') || 'avc1.4d401f';
+      var ms = new MediaSource();
+      mseMs = ms;
+      var vid = document.getElementById('stream_video');
+      vid.src = URL.createObjectURL(ms);
+      var rd = r.body.getReader();
+      mseReader = rd;
+
+      ms.addEventListener('sourceopen', function() {
+        if (mseMs !== ms) return;                    /* 期间已被 mseStop：丢弃 */
+        var sb;
+        try {
+          sb = ms.addSourceBuffer('video/mp4; codecs="' + codec + '"');
+        } catch(e) {
+          mseLastFail = Date.now();
+          mseStop();
+          return;
+        }
+        mseSb = sb;
+        sb.addEventListener('error', function() { mseStop(); });
+        var p = vid.play();
+        if (p && p.catch) p.catch(function(){});     /* muted+autoplay 正常应成功 */
+
+        (function pump() {
+          rd.read().then(function(c) {
+            if (c.done) { mseStop(); return; }       /* 服务端断连（会话轮转）：立即重连 */
+            mseLastData = Date.now();
+            mseScanMoof(c.value);
+            mseAppend(sb, c.value, 0);
+            pump();
+          }).catch(function() { mseStop(); });
+        })();
+      });
+    }).catch(function() {                            /* 网络失败/中断：节流重连 */
+      mseLastFail = Date.now();
+      mseStop();
+    });
+  }
+
   function barColor(p) { return p < 60 ? 'green' : p < 85 ? 'yellow' : 'red'; }
 
   function fmtSpeed(bytesPerSec) {
@@ -240,20 +361,34 @@
       db.style.width = dp + '%'; db.className = barColor(dp);
 
       document.getElementById('datetime').textContent = fmtTime();
-      /* 视频流尝试自动加载配置的 URL（如果存在） */
+      /* 视频流：默认走 H.264 fMP4/MSE（~2Mbps，弱网不卡顿）；
+         显式配置 URL 或浏览器不支持 MSE 时回退原 img/video 管线 */
       try {
-        var streamUrl = window.STREAM_URL || '/video/mjpeg';
-        if (!streamUrl || streamUrl === '/video/mjpeg') {
+        var streamUrl = window.STREAM_URL || '';
+        var explicit = !!streamUrl;
+        if (!explicit) {
           var r2 = await fetch('/api/config');
           if (r2.ok) {
             var cfg = await r2.json();
-            /* AI 为必要流程，默认展示画框流（AI 降级时服务端自动回退原始帧） */
-            streamUrl = cfg.stream_url || cfg.video_url || '/video/mjpeg_ai';
+            if (cfg.stream_url || cfg.video_url) {
+              streamUrl = cfg.stream_url || cfg.video_url;
+              explicit = true;
+            }
           }
         }
-        if (streamUrl) {
-          var vid = document.getElementById('stream_video');
-          var img = document.getElementById('stream_img');
+        var vid = document.getElementById('stream_video');
+        var img = document.getElementById('stream_img');
+        var useMse = !explicit && mseSupported();
+        if (!explicit && !useMse) streamUrl = '/video/mjpeg_ai';   /* 无 MSE：回退画框流 */
+        if (useMse) {
+          /* MSE 路径：录制编码扇出（无会话 503 节流重试，会话轮转断流自动重连） */
+          imgEl = null;
+          streamStop();
+          img.style.display = 'none';
+          vid.style.display = '';
+          mseStart('/video/stream');        /* 每次轮询都调用：内部幂等 + 失败节流重连 */
+        } else if (streamUrl) {
+          mseStop();
           var useImg = streamUrl.indexOf('/video/mjpeg') === 0
                      || streamUrl.match(/\.mjpeg$|\.jpg$|\.jpeg$/i);
           if (useImg) {
@@ -295,6 +430,17 @@
       }
     }
     el.textContent = fpsVal > 0 ? Math.round(fpsVal) + ' FPS' : '-- FPS';
+  }, 1000);
+
+  /* MSE 延迟看门狗：缓冲超前 >3s（播放落后于实时）或 5s 无数据 → 重连接合最新 IDR */
+  setInterval(function() {
+    if (!mseRunning || !mseSb || !mseMs) return;
+    var vid = document.getElementById('stream_video');
+    try {
+      var b = mseSb.buffered;
+      if (b.length > 0 && b.end(b.length - 1) - vid.currentTime > 3) { mseStop(); return; }
+    } catch(e) {}
+    if (vid.readyState === 0 && Date.now() - mseLastData > 5000) mseStop();
   }, 1000);
 
   window.reboot = function() { if (!confirm('确定要重启设备吗？')) return; authFetch('/api/reboot').catch(function(){}); };

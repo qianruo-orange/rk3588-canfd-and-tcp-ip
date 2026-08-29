@@ -35,6 +35,7 @@
 #include "video/video_rec.h"
 #include "video/rec_mp4.h"
 #include "video/h264_encoder.h"
+#include "video/h264_stream.h"
 #include "video/video_stream.h"
 #include "video/frame_ring.h"
 #include "ai/rknn_yolo.h"
@@ -228,6 +229,15 @@ void *video_rec_task(void *arg)
             }
             init_fail_cnt = 0;
 
+            /* 直播扇出：新会话（新编码器 → 新 SPS/PPS）告知推流模块清环换 epoch。
+               rkmpp 首帧前 extradata 可能为空，sps/pps 传空由首 IDR 内嵌补齐 */
+            {
+                const unsigned char *sps = NULL, *pps = NULL;
+                unsigned int slen = 0, plen = 0;
+                h264_encoder_sps_pps(enc, &sps, &slen, &pps, &plen);
+                h264_stream_push_config(pw, ph, fps, sps, slen, pps, plen);
+            }
+
             /* 按天分目录：recordings/YYYYMMDD */
             time_t t = time(NULL);
             struct tm tm;
@@ -318,6 +328,8 @@ void *video_rec_task(void *arg)
                     done = 1;   /* 达上限或写失败：结束本段（自动续录下一段） */
                     break;
                 }
+                /* 直播扇出：MP4 写成功后同一编码帧入推流环（此时无锁持有，叶子锁安全） */
+                h264_stream_push_frame(h264, hlen, keyframe, ts);
                 free(h264);
 
                 pthread_mutex_lock(&g_rec.lock);
@@ -333,6 +345,7 @@ void *video_rec_task(void *arg)
             uint32_t n_bytes  = rec_mp4_bytes(s);
             rec_mp4_finalize(s);
             h264_encoder_destroy(enc);
+            h264_stream_push_end();   /* 直播扇出：会话结束断流（新连接 503，同 mjpeg_ai 无 AI 行为） */
             pthread_mutex_lock(&g_rec.lock);
             g_rec.recording = 0;
             g_rec.start_fail = 0;
@@ -421,4 +434,6 @@ void video_rec_destroy(void *arg)
     frame_ring_t *ring = video_stream_get_ring();
     if (ring) frame_ring_set_rec_active(ring, 0);
     pthread_mutex_destroy(&g_rec.lock);
+    /* 直播扇出：置停止标志并广播，唤醒全部推流线程收尾 */
+    h264_stream_shutdown();
 }

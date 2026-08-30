@@ -482,6 +482,14 @@ typedef struct {
     video_stream_client_close_cb on_close;
 } video_client_ctx_t;
 
+/* 活动推流连接计数：渲染线程据此跳过无观看者时的 JPEG 编码（省 CPU） */
+static int g_client_count = 0;
+
+int video_stream_client_count(void)
+{
+    return __atomic_load_n(&g_client_count, __ATOMIC_RELAXED);
+}
+
 static void *video_stream_client_task(void *arg)
 {
     video_client_ctx_t *a = (video_client_ctx_t *)arg;
@@ -505,6 +513,7 @@ static void *video_stream_client_task(void *arg)
                       "Content-Type: multipart/x-mixed-replace; boundary=--frame\r\n"
                       "Connection: close\r\n\r\n";
     fd_write_all_blocking(fd, hdr, strlen(hdr));
+    __atomic_fetch_add(&g_client_count, 1, __ATOMIC_RELAXED);
     int last_raw = 0;   /* 原始帧 pacing：seq 单调递增，wait_next 依赖此不变量 */
     unsigned long long last_ann = (unsigned long long)-1; /* 已推的标注帧 seq（-1 表示尚未推过） */
     time_t last_write = time(NULL);   /* 最近一次成功写帧的时间，用于空闲超时 */
@@ -554,6 +563,7 @@ static void *video_stream_client_task(void *arg)
         free(frame);
         last_write = time(NULL);
     }
+    __atomic_fetch_sub(&g_client_count, 1, __ATOMIC_RELAXED);
     if (on_close) on_close(fd);
     return NULL;
 }

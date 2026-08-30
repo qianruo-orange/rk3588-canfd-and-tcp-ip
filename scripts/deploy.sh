@@ -29,6 +29,10 @@ do_uninstall() {
     
     echo "[REMOVE] systemd service file"
     rm -f /etc/systemd/system/"$SERVICE_NAME".service
+    rm -f /etc/systemd/system/mediamtx.service
+    rm -f /etc/systemd/system/rk3588-edge-gateway-webrtc.service
+    systemctl stop mediamtx 2>/dev/null || true
+    systemctl stop rk3588-edge-gateway-webrtc 2>/dev/null || true
     systemctl daemon-reload || true
     
     echo "[REMOVE] $DEPLOY_DIR"
@@ -81,8 +85,23 @@ do_install() {
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
 
+    echo "[INSTALL] webrtc sidecar units (mediamtx + fifo pusher)"
+    cp "$PROJECT_DIR/deploy/mediamtx.service" /etc/systemd/system/mediamtx.service
+    cp "$PROJECT_DIR/deploy/rk3588-edge-gateway-webrtc.service" \
+       /etc/systemd/system/rk3588-edge-gateway-webrtc.service
+    systemctl daemon-reload
+    if [ -x /opt/mediamtx/mediamtx ]; then
+        systemctl enable mediamtx rk3588-edge-gateway-webrtc
+    else
+        echo "[WARN] /opt/mediamtx/mediamtx not found — WebRTC 待安装 mediamtx 后启用"
+    fi
+
     echo "[START] $SERVICE_NAME"
     systemctl start "$SERVICE_NAME"
+    if [ -x /opt/mediamtx/mediamtx ]; then
+        systemctl start mediamtx
+        systemctl start rk3588-edge-gateway-webrtc
+    fi
 
     echo "=== deploy complete ==="
 

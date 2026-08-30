@@ -32,7 +32,6 @@
 #include <grp.h>
 
 #include "http/http_internal.h"
-#include "video/h264_stream.h"
 #include "video/video_stream.h"
 #include "watchdog/watchdog.h"
 #include "core/common.h"
@@ -606,17 +605,6 @@ static void http_process_request(http_conn_t *c)
     /* 认证/命令类处理可能耗时（crypt 等），先喂狗 */
     watchdog_feed_self("http");
 
-    if (strcmp(c->uri, "/video/stream") == 0) {
-        /* H.264 fMP4 推流（浏览器 MSE）：录制编码扇出，无会话/无 AI 时 503 */
-        if (h264_stream_client_start(fd, http_video_client_closed) != 0) {
-            http_send_response(fd, 500, "Error", "text/plain", "", 0);
-        } else {
-            conn_detach(c);   /* fd 移交给推流线程 */
-            return;
-        }
-        goto finish;
-    }
-
     if (strcmp(c->uri, "/video/mjpeg_ai") == 0) {
         /* 画框流：AI 可用时推画框帧，AI 降级时自动回退原始帧 */
         if (video_stream_client_start_ai(fd, http_video_client_closed) != 0) {
@@ -684,6 +672,7 @@ static void http_process_request(http_conn_t *c)
         { "/api/video/devices",0,NULL, http_video_devices,NULL },
         { "/api/rec/start",0, "POST", http_rec_handler,  http_check_auth_root },
         { "/api/rec/stop", 0, "POST", http_rec_handler,  http_check_auth_root },
+        { "/api/webrtc/whep",0,"POST", http_webrtc_whep,  NULL },
         { "/api/rec/delete",0,"POST", http_rec_handler,  http_check_auth_root },
         { "/api/rec/clear", 0,"POST", http_rec_handler,  http_check_auth_root },
         { "/api/rec/status",0, NULL,  http_rec_handler,  NULL },

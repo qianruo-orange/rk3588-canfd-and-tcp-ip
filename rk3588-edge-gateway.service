@@ -19,6 +19,7 @@ AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 
 PrivateTmp=yes
 ProtectSystem=strict
+RuntimeDirectory=rk3588-edge-gateway   # FIFO 目录（WebRTC 推流链）
 ProtectHome=yes
 ReadWritePaths=/opt/rk3588-edge-gateway/logs /opt/rk3588-edge-gateway/config /opt/rk3588-edge-gateway/recordings
 ReadOnlyPaths=/opt/rk3588-edge-gateway/html

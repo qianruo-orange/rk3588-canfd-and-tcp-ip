@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
- * video_rec.c — 网络录像模块：AI 画框帧（必要流程，无原始帧回退）+ H.264 硬件编码。
+ * video_rec.c — 网络录像模块：AI 画框帧（必要流程，无原始帧回退）+ H.265 硬件编码。
  *
- * 编码链路：帧（JPEG/YUYV）→ NV12 → /dev/video-enc0（rkvenc）→ H.264
- *   Annex-B → MP4(avc1) 封装（详见 video/rec_mp4.c）。
+ * 编码链路：帧（JPEG/YUYV）→ NV12 → /dev/video-enc0（rkvenc）→ H.265
+ *   Annex-B → MP4(hvc1) 封装（详见 video/rec_mp4.c）。
  *
  * 线程模型：main 模块表 "rec" 线程，空闲时 100ms 轮询喂狗；
  *   默认自动录制：任务启动即开始，按天分目录（recordings/YYYYMMDD），
@@ -34,8 +34,8 @@
 
 #include "video/video_rec.h"
 #include "video/rec_mp4.h"
-#include "video/h264_encoder.h"
-#include "video/h264_stream.h"
+#include "video/hevc_encoder.h"
+#include "video/hevc_feed.h"
 #include "video/video_stream.h"
 #include "video/frame_ring.h"
 #include "ai/rknn_yolo.h"
@@ -203,7 +203,7 @@ void *video_rec_task(void *arg)
                 free(probe);
             }
 
-            /* 实测帧率（不写死）→ 按分辨率动态码率 → 创建 H.264 编码器 */
+            /* 实测帧率（不写死）→ 按分辨率动态码率 → 创建 H.265 编码器 */
             int fps = rec_measure_fps(app, ring);
             if (fps <= 0) {
                 pthread_mutex_lock(&g_rec.lock);
@@ -212,10 +212,10 @@ void *video_rec_task(void *arg)
                 usleep(100000);
                 continue;
             }
-            int bitrate = (int)((uint64_t)pw * ph * 2u);   /* 每像素 ~2bps */
+            int bitrate = (int)((uint64_t)pw * ph * 4u);   /* 每像素 ~4bps（VBR 目标；720p≈3.7M） */
             if (bitrate < 300000)  bitrate = 300000;
             if (bitrate > 16000000) bitrate = 16000000;
-            h264_encoder_t *enc = h264_encoder_create(pw, ph, fps, bitrate);
+            hevc_encoder_t *enc = hevc_encoder_create(pw, ph, fps, bitrate);
             if (!enc) {
                 init_fail_cnt++;
                 pthread_mutex_lock(&g_rec.lock);
@@ -223,20 +223,12 @@ void *video_rec_task(void *arg)
                 pthread_mutex_unlock(&g_rec.lock);
                 /* 日志退避：首次与每 25 次失败打一条，避免设备不可用时刷屏 */
                 if (init_fail_cnt == 1 || init_fail_cnt % 25 == 0)
-                    LOG_ERROR("rec: h264 encoder init failed (%dx%d), retrying...", pw, ph);
+                    LOG_ERROR("rec: hevc encoder init failed (%dx%d), retrying...", pw, ph);
                 usleep(500000);
                 continue;
             }
             init_fail_cnt = 0;
-
-            /* 直播扇出：新会话（新编码器 → 新 SPS/PPS）告知推流模块清环换 epoch。
-               rkmpp 首帧前 extradata 可能为空，sps/pps 传空由首 IDR 内嵌补齐 */
-            {
-                const unsigned char *sps = NULL, *pps = NULL;
-                unsigned int slen = 0, plen = 0;
-                h264_encoder_sps_pps(enc, &sps, &slen, &pps, &plen);
-                h264_stream_push_config(pw, ph, fps, sps, slen, pps, plen);
-            }
+            hevc_feed_reset_ps();   /* 新会话：参数集锁定重新采集（WebRTC 链） */
 
             /* 按天分目录：recordings/YYYYMMDD */
             time_t t = time(NULL);
@@ -252,7 +244,7 @@ void *video_rec_task(void *arg)
             rec_mp4_t *s = rec_mp4_create(dir, "rec", pw, ph,
                                           fname, sizeof(fname));
             if (!s) {
-                h264_encoder_destroy(enc);
+                hevc_encoder_destroy(enc);
                 pthread_mutex_lock(&g_rec.lock);
                 g_rec.start_fail = 3;
                 pthread_mutex_unlock(&g_rec.lock);
@@ -307,10 +299,10 @@ void *video_rec_task(void *arg)
                     continue;
                 }
 
-                /* H.264 编码 */
-                unsigned char *h264 = NULL; size_t hlen = 0;
+                /* H.265 编码 */
+                unsigned char *h265 = NULL; size_t hlen = 0;
                 int keyframe = 0;
-                if (h264_encoder_encode(enc, nv12, &h264, &hlen, &keyframe) != 0) {
+                if (hevc_encoder_encode(enc, nv12, &h265, &hlen, &keyframe) != 0) {
                     frame_ring_lock(ring);
                     frame_ring_buf_put_locked(ring, FRAME_RING_POOL_NV12, nv12, ncap);
                     frame_ring_unlock(ring);
@@ -323,14 +315,20 @@ void *video_rec_task(void *arg)
                 frame_ring_unlock(ring);
 
                 uint64_t ts = now_ms();
-                if (rec_mp4_write_frame(s, h264, hlen, keyframe, ts) != 0) {
-                    free(h264);
+                if (rec_mp4_write_frame(s, h265, hlen, keyframe, ts) != 0) {
+                    free(h265);
                     done = 1;   /* 达上限或写失败：结束本段（自动续录下一段） */
                     break;
                 }
-                /* 直播扇出：MP4 写成功后同一编码帧入推流环（此时无锁持有，叶子锁安全） */
-                h264_stream_push_frame(h264, hlen, keyframe, ts);
-                free(h264);
+                /* 直播扇出：参数集交给 feed（关键帧前重插，读者中途接入可恢复）
+                   + 编码帧所有权移交 FIFO 队列（WebRTC 链：ffmpeg→mediamtx） */
+                {
+                    const unsigned char *vps = NULL, *sps = NULL, *pps = NULL;
+                    unsigned int vlen = 0, slen = 0, plen = 0;
+                    if (hevc_encoder_sps_pps(enc, &vps, &vlen, &sps, &slen, &pps, &plen) == 0)
+                        hevc_feed_set_ps(vps, vlen, sps, slen, pps, plen);
+                }
+                hevc_feed_push(h265, hlen, keyframe);
 
                 pthread_mutex_lock(&g_rec.lock);
                 g_rec.frames = rec_mp4_frames(s);
@@ -344,8 +342,7 @@ void *video_rec_task(void *arg)
             uint32_t n_frames = rec_mp4_frames(s);
             uint32_t n_bytes  = rec_mp4_bytes(s);
             rec_mp4_finalize(s);
-            h264_encoder_destroy(enc);
-            h264_stream_push_end();   /* 直播扇出：会话结束断流（新连接 503，同 mjpeg_ai 无 AI 行为） */
+            hevc_encoder_destroy(enc);
             pthread_mutex_lock(&g_rec.lock);
             g_rec.recording = 0;
             g_rec.start_fail = 0;
@@ -418,6 +415,7 @@ int video_rec_init(void *arg)
     memset(&g_rec, 0, sizeof(g_rec));
     pthread_mutex_init(&g_rec.lock, NULL);
     mkdir(REC_DIR, 0755);
+    hevc_feed_init();   /* 直播扇出：FIFO（WebRTC 链），失败不阻断录像 */
     LOG_INFO("rec: recordings dir: %s", REC_DIR);
     return 0;
 }
@@ -434,6 +432,5 @@ void video_rec_destroy(void *arg)
     frame_ring_t *ring = video_stream_get_ring();
     if (ring) frame_ring_set_rec_active(ring, 0);
     pthread_mutex_destroy(&g_rec.lock);
-    /* 直播扇出：置停止标志并广播，唤醒全部推流线程收尾 */
-    h264_stream_shutdown();
+    hevc_feed_destroy();   /* 直播扇出：FIFO 写线程收尾 */
 }

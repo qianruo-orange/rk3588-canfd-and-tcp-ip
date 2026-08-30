@@ -1,14 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
- * h264_encoder.c — RK3588 硬件 H.264 编码器封装。
+ * hevc_encoder.c — RK3588 硬件 H.265(HEVC) 编码器封装。
  *
  * 后端自动选择（编译 + 运行时）：
- *   1) FFmpeg h264_rkmpp（Rockchip MPP 硬件编码，HAVE_AVCODEC 且运行时存在）
+ *   1) FFmpeg hevc_rkmpp（Rockchip MPP 硬件编码，HAVE_AVCODEC 且运行时存在）
  *   2) V4L2 M2M rkvenc（/dev/video-enc0 或扫描到的编码器节点）
  *
- * 输入 NV12（Y 平面 w*h + 交错 UV w*h/2），输出 H.264 Annex-B
- * （含 SPS/PPS/IDR/slice，以 00 00 00 01 分隔）。同步接口：一次 encode 一帧。
- * 关键帧（IDR）与 SPS/PPS 自动识别，供 MP4 封装写 avcC/stss。
+ * 输入 NV12（Y 平面 w*h + 交错 UV w*h/2），输出 H.265 Annex-B
+ * （含 VPS/SPS/PPS/IRAP/slice，以 00 00 00 01 分隔）。同步接口：一次 encode
+ * 一帧。关键帧（IRAP）与 VPS/SPS/PPS 自动识别，供 MP4 封装写 hvcC/stss。
  *
  * 单线程使用（录制线程独占）。
  */
@@ -30,19 +30,17 @@
 
 #ifdef HAVE_AVCODEC
 #include <libavcodec/avcodec.h>
+#include <libavutil/opt.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/error.h>   /* av_err2str */
 #endif
 
-#include "video/h264_encoder.h"
+#include "video/hevc_encoder.h"
 #include "core/log.h"
 #include "core/common.h"   /* safe_strncpy */
 
 #define ENC_DEV   "/dev/video-enc0"
 #define ENC_BUFS  3      /* 每队列缓冲数 */
-
-#define V4L2_CID_MPEG_VIDEO_H264_SPS_PPS_BEFORE_IDR \
-    0x00980919u  /* Rockchip 扩展 control（V4L2_CID_MPEG_VIDEO_BASE+24） */
 
 /* 编码器创建失败的日志限频：同一错误 10s 内只打一条，
    避免录制线程 0.5s 重试时无限刷屏 */
@@ -89,9 +87,9 @@ static int node_is_v4l2_encoder(const char *path)
     return ok;
 }
 
-/* 探测可用的 V4L2 H.264 编码器节点：优先 /dev/video-enc0，其次扫描 /dev/video0..15。
+/* 探测可用的 V4L2 编码器节点：优先 /dev/video-enc0，其次扫描 /dev/video0..15。
    返回 0 成功并把节点路径写入 dev（调用方提供缓冲区）。 */
-int h264_encoder_probe(char *dev, size_t dev_size)
+static int hevc_encoder_probe(char *dev, size_t dev_size)
 {
     if (node_is_v4l2_encoder(ENC_DEV)) {
         safe_strncpy(dev, dev_size, ENC_DEV);
@@ -109,9 +107,9 @@ int h264_encoder_probe(char *dev, size_t dev_size)
     return -1;
 }
 
-struct h264_encoder_s {
+struct hevc_encoder_s {
     int  w, h;
-    int  using_ff;              /* 1=FFmpeg h264_rkmpp 后端，0=V4L2 后端 */
+    int  using_ff;              /* 1=FFmpeg hevc_rkmpp 后端，0=V4L2 后端 */
 #ifdef HAVE_AVCODEC
     AVCodecContext *avctx;
     AVFrame *frame;
@@ -124,51 +122,67 @@ struct h264_encoder_s {
     int  sizeimage_out;             /* capture 单 plane 容量 */
     void *buf_in[ENC_BUFS];         /* mmap output 缓冲 */
     void *buf_out[ENC_BUFS];        /* mmap capture 缓冲 */
-    /* SPS/PPS（最近一次，供 avcC） */
+    /* VPS/SPS/PPS（最近一次，供 hvcC） */
+    unsigned char vps[64];
+    unsigned int  vps_len;
     unsigned char sps[64];
     unsigned int  sps_len;
     unsigned char pps[64];
     unsigned int  pps_len;
 };
 
-/* ---- NAL 扫描（Annex-B） ---- */
+/* ---- NAL 扫描（Annex-B，H.265 2 字节 NAL 头） ---- */
 
-/* 返回 NAL 起始偏移（相对 data），-1 无 */
-static long nal_find(const unsigned char *d, size_t len, long from)
+/* 从 from 起找下一个 start code：*sc_off 记录 start code 起点，
+   返回 NAL 数据起点（跳过 start code），无则 -1 */
+static long nal_find(const unsigned char *d, size_t len, long from, size_t *sc_off)
 {
     size_t i = (from > 0) ? (size_t)from : 0;
     for (; i + 3 <= len; i++) {
-        if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) return (long)(i + 3);          /* 3 字节 */
-        if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 0 && i + 3 < len && d[i + 3] == 1)
-            return (long)(i + 4);                                                        /* 4 字节 */
+        if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {          /* 3 字节 */
+            if (sc_off) *sc_off = i;
+            return (long)(i + 3);
+        }
+        if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 0 && i + 3 < len && d[i + 3] == 1) {
+            if (sc_off) *sc_off = i;                                /* 4 字节 */
+            return (long)(i + 4);
+        }
     }
     return -1;
 }
 
-/* ---- FFmpeg h264_rkmpp 后端 ---- */
+/* H.265 NAL 类型：2 字节头，type = 首字节 >> 1 & 0x3F */
+static unsigned nal_type(const unsigned char *p)
+{
+    return (p[0] >> 1) & 0x3Fu;
+}
+
+/* ---- FFmpeg hevc_rkmpp 后端 ---- */
 
 #ifdef HAVE_AVCODEC
 
-/* 从 avcC extradata 解析 SPS/PPS（NAL 无起始码，与 MP4 avcC 内嵌格式一致）。
-   布局：1(ver) profile constraint level | 0xFF(lengthSizeMinusOne) numSPS
-        [sps_len_be16 sps]*  numPPS  [pps_len_be16 pps]* */
-static void parse_avcc(h264_encoder_t *e, const unsigned char *d, int size)
+/* 从 hvcC extradata 解析 VPS/SPS/PPS（NAL 含 2 字节头）。
+   布局：1(ver) profile | compat(4) constraints(6) level(1)
+        minspatial(2) parallel(1) chroma(1) bitdepth(2) avgfr(2)
+        misc(1) numArrays(1) | per array: type(1) numNalus(2) [len_be16 nal]* */
+static void parse_hvcc(hevc_encoder_t *e, const unsigned char *d, int size)
 {
-    if (size < 8 || d[0] != 1) return;
-    int i = 5;
-    int num_sps = d[i++] & 0x1F;
-    for (int s = 0; s < num_sps && i + 2 <= size; s++) {
-        int len = (d[i] << 8) | d[i + 1]; i += 2;
-        if (i + len > size) return;
-        if (len <= (int)sizeof(e->sps)) { memcpy(e->sps, d + i, (size_t)len); e->sps_len = (unsigned int)len; }
-        i += len;
-    }
-    if (i < size) {
-        int num_pps = d[i++] & 0x1F;
-        for (int s = 0; s < num_pps && i + 2 <= size; s++) {
+    if (size < 24 || d[0] != 1) return;
+    int i = 22;
+    int num_arrays = d[i++];
+    for (int a = 0; a < num_arrays && i + 3 <= size; a++) {
+        int type = d[i] & 0x3F; i++;
+        int num = (d[i] << 8) | d[i + 1]; i += 2;
+        for (int n = 0; n < num && i + 2 <= size; n++) {
             int len = (d[i] << 8) | d[i + 1]; i += 2;
             if (i + len > size) return;
-            if (len <= (int)sizeof(e->pps)) { memcpy(e->pps, d + i, (size_t)len); e->pps_len = (unsigned int)len; }
+            if (type == 32 && len >= 6 && len <= (int)sizeof(e->vps)) {
+                memcpy(e->vps, d + i, (size_t)len); e->vps_len = (unsigned int)len;
+            } else if (type == 33 && len >= 6 && len <= (int)sizeof(e->sps)) {
+                memcpy(e->sps, d + i, (size_t)len); e->sps_len = (unsigned int)len;
+            } else if (type == 34 && len >= 4 && len <= (int)sizeof(e->pps)) {
+                memcpy(e->pps, d + i, (size_t)len); e->pps_len = (unsigned int)len;
+            }
             i += len;
         }
     }
@@ -176,16 +190,15 @@ static void parse_avcc(h264_encoder_t *e, const unsigned char *d, int size)
 
 /* FFmpeg packet → Annex-B（00 00 00 01 + NAL）。返回 malloc 缓冲，*out_len 为实际长度。
    自动识别包内格式：
-   - 已含起始码（MPP 编码器原生输出，h264e_slice.c/h264e_sps.c 写 00 00 00 01）
-     → 原样拷贝；
+   - 已含起始码（MPP 编码器原生输出）→ 原样拷贝；
    - AVCC 4 字节大端长度前缀（个别后端）→ 逐 NAL 加起始码。 */
-static unsigned char *avcc_to_annexb(const unsigned char *d, int size, size_t *out_len)
+static unsigned char *len_to_annexb(const unsigned char *d, int size, size_t *out_len)
 {
     *out_len = 0;
     if (size <= 0) return NULL;
 
     /* 仅当起始码后的 NAL 头合法（forbidden_zero_bit=0）才认 Annex-B：
-       否则 AVCC 首 NAL 长度前缀恰为 00 00 01 xx 时会被误判 */
+       否则首 NAL 长度前缀恰为 00 00 01 xx 时会被误判 */
     int has_sc =
         (size >= 5 && d[0] == 0 && d[1] == 0 && d[2] == 0 && d[3] == 1 && !(d[4] & 0x80)) ||
         (size >= 4 && d[0] == 0 && d[1] == 0 && d[2] == 1 && !(d[3] & 0x80));
@@ -223,10 +236,10 @@ static unsigned char *avcc_to_annexb(const unsigned char *d, int size, size_t *o
     return out;
 }
 
-/* 打开 FFmpeg h264_rkmpp 编码器；成功返回 0（e->using_ff=1） */
-static int ff_encoder_open(h264_encoder_t *e, int fps, int bitrate_bps)
+/* 打开 FFmpeg hevc_rkmpp 编码器；成功返回 0（e->using_ff=1） */
+static int ff_encoder_open(hevc_encoder_t *e, int fps, int bitrate_bps)
 {
-    const AVCodec *codec = avcodec_find_encoder_by_name("h264_rkmpp");
+    const AVCodec *codec = avcodec_find_encoder_by_name("hevc_rkmpp");
     if (!codec) return -1;                       /* 当前 FFmpeg 未编译 rkmpp */
 
     AVCodecContext *ctx = avcodec_alloc_context3(codec);
@@ -237,12 +250,23 @@ static int ff_encoder_open(h264_encoder_t *e, int fps, int bitrate_bps)
     ctx->time_base   = (AVRational){ 1, fps > 0 ? fps : 30 };
     ctx->framerate   = (AVRational){ fps > 0 ? fps : 30, 1 };
     ctx->bit_rate    = bitrate_bps;
+    /* 画质优先的码控：不给 rc_max_rate 时 rkmpp 默认 CBR 且 qp_max=48，
+       复杂画面为死守码率把质量压烂。改 VBR（目标 bitrate、上限 2x 弹性），
+       并压低 QP 上限兜住质量下限 */
+    ctx->rc_max_rate = (int64_t)bitrate_bps * 2;
+    av_opt_set(ctx->priv_data, "rc_mode", "VBR", 0);
+    av_opt_set_int(ctx->priv_data, "qp_max",   40, 0);
+    av_opt_set_int(ctx->priv_data, "qp_max_i", 36, 0);
     ctx->gop_size    = (fps > 0 ? fps : 30) * 2;  /* GOP=2s */
     ctx->max_b_frames = 0;
     ctx->thread_count = 1;
     ctx->flags      |= AV_CODEC_FLAG_LOW_DELAY;
-    /* 不用 GLOBAL_HEADER：SPS/PPS 随 IDR 内嵌输出，rec_mp4 封装从码流
-       扫描 SPS/PPS 写 avcC（与 V4L2 后端一致）；否则 avcC 会缺 SPS/PPS */
+    /* 内容为 BT.601（OpenCV RGB2YUV_I420 与标量转换一致），VUI 声明 601，
+       解码端按 601 还原（声明 709 会整体偏绿） */
+    ctx->colorspace          = AVCOL_SPC_BT470BG;
+    ctx->color_primaries     = AVCOL_PRI_BT470BG;
+    /* 不用 GLOBAL_HEADER：VPS/SPS/PPS 随 IDR 内嵌输出，rec_mp4 封装从码流
+       扫描写 hvcC（与 V4L2 后端一致）；否则 hvcC 会缺参数集 */
 
     if (avcodec_open2(ctx, codec, NULL) < 0) {
         avcodec_free_context(&ctx);
@@ -250,7 +274,7 @@ static int ff_encoder_open(h264_encoder_t *e, int fps, int bitrate_bps)
     }
 
     if (ctx->extradata && ctx->extradata_size > 0)
-        parse_avcc(e, ctx->extradata, ctx->extradata_size);
+        parse_hvcc(e, ctx->extradata, ctx->extradata_size);
 
     e->frame = av_frame_alloc();
     e->pkt   = av_packet_alloc();
@@ -276,20 +300,20 @@ static int ff_encoder_open(h264_encoder_t *e, int fps, int bitrate_bps)
 
 /* ---- 设备控制 ---- */
 
-static int enc_set_ctrl(h264_encoder_t *e, uint32_t id, int value)
+static int enc_set_ctrl(hevc_encoder_t *e, uint32_t id, int value)
 {
     struct v4l2_control c;
     memset(&c, 0, sizeof(c));
     c.id = id;
     c.value = value;
     if (ioctl(e->fd, VIDIOC_S_CTRL, &c) < 0) {
-        /* 部分固件缺该 control（如 SPS_PPS_BEFORE_IDR），静默跳过 */
+        /* 部分固件缺该 control，静默跳过 */
         return -1;
     }
     return 0;
 }
 
-static int enc_reqbufs(h264_encoder_t *e, uint32_t type, void **bufs)
+static int enc_reqbufs(hevc_encoder_t *e, uint32_t type, void **bufs)
 {
     struct v4l2_requestbuffers req;
     memset(&req, 0, sizeof(req));
@@ -297,7 +321,7 @@ static int enc_reqbufs(h264_encoder_t *e, uint32_t type, void **bufs)
     req.type   = type;
     req.memory = V4L2_MEMORY_MMAP;
     if (ioctl(e->fd, VIDIOC_REQBUFS, &req) < 0 || req.count < 2) {
-        LOG_ERROR("h264: VIDIOC_REQBUFS type=%u failed", type);
+        LOG_ERROR("hevc: VIDIOC_REQBUFS type=%u failed", type);
         return -1;
     }
     for (uint32_t i = 0; i < req.count; i++) {
@@ -311,13 +335,13 @@ static int enc_reqbufs(h264_encoder_t *e, uint32_t type, void **bufs)
         b.length   = 1;
         b.m.planes = &p;
         if (ioctl(e->fd, VIDIOC_QUERYBUF, &b) < 0) {
-            LOG_ERROR("h264: VIDIOC_QUERYBUF type=%u idx=%u failed", type, i);
+            LOG_ERROR("hevc: VIDIOC_QUERYBUF type=%u idx=%u failed", type, i);
             return -1;
         }
         bufs[i] = mmap(NULL, p.length, PROT_READ | PROT_WRITE, MAP_SHARED,
                        e->fd, p.m.mem_offset);
         if (bufs[i] == MAP_FAILED) {
-            LOG_ERROR("h264: mmap type=%u failed", type);
+            LOG_ERROR("hevc: mmap type=%u failed", type);
             bufs[i] = NULL;
             return -1;
         }
@@ -334,35 +358,35 @@ static int enc_reqbufs(h264_encoder_t *e, uint32_t type, void **bufs)
         b.length   = 1;
         b.m.planes = &p;
         if (ioctl(e->fd, VIDIOC_QBUF, &b) < 0) {
-            LOG_ERROR("h264: VIDIOC_QBUF type=%u idx=%u failed", type, i);
+            LOG_ERROR("hevc: VIDIOC_QBUF type=%u idx=%u failed", type, i);
             return -1;
         }
     }
     return (int)req.count;
 }
 
-h264_encoder_t *h264_encoder_create(int w, int h, int fps, int bitrate_bps)
+hevc_encoder_t *hevc_encoder_create(int w, int h, int fps, int bitrate_bps)
 {
     if (w <= 0 || h <= 0 || (w & 1) || (h & 1)) return NULL;
 
-    h264_encoder_t *e = calloc(1, sizeof(*e));
+    hevc_encoder_t *e = calloc(1, sizeof(*e));
     if (!e) return NULL;
     e->fd = -1;
     e->w = w; e->h = h;
 
 #ifdef HAVE_AVCODEC
-    /* 优先 FFmpeg h264_rkmpp（Rockchip MPP 硬件编码） */
+    /* 优先 FFmpeg hevc_rkmpp（Rockchip MPP 硬件编码） */
     if (ff_encoder_open(e, fps, bitrate_bps) == 0) {
-        LOG_INFO("h264: FFmpeg rkmpp encoder ready %dx%d fps=%d bitrate=%d",
+        LOG_INFO("hevc: FFmpeg rkmpp encoder ready %dx%d fps=%d bitrate=%d",
                  w, h, fps, bitrate_bps);
         return e;
     }
 #endif
 
     char dev_path[64];
-    if (h264_encoder_probe(dev_path, sizeof(dev_path)) != 0) {
+    if (hevc_encoder_probe(dev_path, sizeof(dev_path)) != 0) {
         if (errlog_spam_ok())
-            LOG_ERROR("h264: no V4L2 encoder node (tried %s and /dev/video0-15)", ENC_DEV);
+            LOG_ERROR("hevc: no V4L2 encoder node (tried %s and /dev/video0-15)", ENC_DEV);
         free(e);
         return NULL;
     }
@@ -370,7 +394,7 @@ h264_encoder_t *h264_encoder_create(int w, int h, int fps, int bitrate_bps)
     e->fd = open(dev_path, O_RDWR | O_NONBLOCK, 0);
     if (e->fd < 0) {
         if (errlog_spam_ok())
-            LOG_ERROR("h264: open %s failed: %s", dev_path, strerror(errno));
+            LOG_ERROR("hevc: open %s failed: %s", dev_path, strerror(errno));
         free(e);
         return NULL;
     }
@@ -378,7 +402,7 @@ h264_encoder_t *h264_encoder_create(int w, int h, int fps, int bitrate_bps)
     struct v4l2_capability cap;
     if (ioctl(e->fd, VIDIOC_QUERYCAP, &cap) < 0) {
         if (errlog_spam_ok())
-            LOG_ERROR("h264: QUERYCAP failed on %s: %s", dev_path, strerror(errno));
+            LOG_ERROR("hevc: QUERYCAP failed on %s: %s", dev_path, strerror(errno));
         goto fail;
     }
     /* Rockchip 编码器固件差异：有的只在 device_caps 报 M2M，有的仅报 M2M 不带 MPLANE，
@@ -388,7 +412,7 @@ h264_encoder_t *h264_encoder_create(int w, int h, int fps, int bitrate_bps)
     if (!(caps & (V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_VIDEO_M2M |
                   V4L2_CAP_VIDEO_OUTPUT_MPLANE | V4L2_CAP_VIDEO_CAPTURE_MPLANE))) {
         if (errlog_spam_ok())
-            LOG_ERROR("h264: %s not M2M (caps=0x%x device_caps=0x%x)",
+            LOG_ERROR("hevc: %s not M2M (caps=0x%x device_caps=0x%x)",
                       dev_path, cap.capabilities, cap.device_caps);
         goto fail;
     }
@@ -403,21 +427,21 @@ h264_encoder_t *h264_encoder_create(int w, int h, int fps, int bitrate_bps)
     ofmt.fmt.pix_mp.field       = V4L2_FIELD_ANY;
     ofmt.fmt.pix_mp.num_planes  = 1;
     if (ioctl(e->fd, VIDIOC_S_FMT, &ofmt) < 0) {
-        LOG_ERROR("h264: S_FMT NV12 %dx%d failed: %s", w, h, strerror(errno));
+        LOG_ERROR("hevc: S_FMT NV12 %dx%d failed: %s", w, h, strerror(errno));
         goto fail;
     }
 
-    /* ---- capture 队列：H264 ---- */
+    /* ---- capture 队列：HEVC ---- */
     struct v4l2_format cfmt;
     memset(&cfmt, 0, sizeof(cfmt));
     cfmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     cfmt.fmt.pix_mp.width       = (uint32_t)w;
     cfmt.fmt.pix_mp.height      = (uint32_t)h;
-    cfmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_H264;
+    cfmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_HEVC;
     cfmt.fmt.pix_mp.field       = V4L2_FIELD_ANY;
     cfmt.fmt.pix_mp.num_planes  = 1;
     if (ioctl(e->fd, VIDIOC_S_FMT, &cfmt) < 0) {
-        LOG_ERROR("h264: S_FMT H264 failed: %s", strerror(errno));
+        LOG_ERROR("hevc: S_FMT HEVC failed: %s", strerror(errno));
         goto fail;
     }
 
@@ -425,9 +449,7 @@ h264_encoder_t *h264_encoder_create(int w, int h, int fps, int bitrate_bps)
     if (fps <= 0) fps = 30;
     enc_set_ctrl(e, V4L2_CID_MPEG_VIDEO_BITRATE, bitrate_bps);
     enc_set_ctrl(e, V4L2_CID_MPEG_VIDEO_BITRATE_MODE, V4L2_MPEG_VIDEO_BITRATE_MODE_CBR);
-    enc_set_ctrl(e, V4L2_CID_MPEG_VIDEO_H264_PROFILE, V4L2_MPEG_VIDEO_H264_PROFILE_MAIN);
-    enc_set_ctrl(e, V4L2_CID_MPEG_VIDEO_H264_I_PERIOD, fps * 2);      /* GOP=2s */
-    enc_set_ctrl(e, V4L2_CID_MPEG_VIDEO_H264_SPS_PPS_BEFORE_IDR, 1);  /* 尽力，失败忽略 */
+    enc_set_ctrl(e, V4L2_CID_MPEG_VIDEO_HEVC_PROFILE, V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN);
 
     /* ---- 申请缓冲 ---- */
     if (enc_reqbufs(e, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, e->buf_in) < 0 ||
@@ -437,19 +459,19 @@ h264_encoder_t *h264_encoder_create(int w, int h, int fps, int bitrate_bps)
     uint32_t ot = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
     uint32_t ct = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     if (ioctl(e->fd, VIDIOC_STREAMON, &ot) < 0 || ioctl(e->fd, VIDIOC_STREAMON, &ct) < 0) {
-        LOG_ERROR("h264: STREAMON failed: %s", strerror(errno));
+        LOG_ERROR("hevc: STREAMON failed: %s", strerror(errno));
         goto fail;
     }
 
-    LOG_INFO("h264: encoder ready %dx%d fps=%d bitrate=%d", w, h, fps, bitrate_bps);
+    LOG_INFO("hevc: encoder ready %dx%d fps=%d bitrate=%d", w, h, fps, bitrate_bps);
     return e;
 
 fail:
-    h264_encoder_destroy(e);
+    hevc_encoder_destroy(e);
     return NULL;
 }
 
-void h264_encoder_destroy(h264_encoder_t *e)
+void hevc_encoder_destroy(hevc_encoder_t *e)
 {
     if (!e) return;
 
@@ -484,7 +506,7 @@ void h264_encoder_destroy(h264_encoder_t *e)
 
 /* 逐行拷贝 NV12 到 output 缓冲（bytesperline 可能大于宽度，逐行复制最稳）。
    @idx 为 VIDIOC_DQBUF 归还的缓冲索引：必须写回该缓冲，不能固定 [0]。 */
-static void nv12_copy(h264_encoder_t *e, const unsigned char *nv12, int idx)
+static void nv12_copy(hevc_encoder_t *e, const unsigned char *nv12, int idx)
 {
     int w = e->w, h = e->h;
     unsigned char *dst = e->buf_in[idx];
@@ -498,42 +520,42 @@ static void nv12_copy(h264_encoder_t *e, const unsigned char *nv12, int idx)
     }
 }
 
-/* 从 Annex-B 码流单遍提取 SPS/PPS、判断关键帧（含 IDR）与 VCL 存在性
-   （type 1 非 IDR slice / type 5 IDR）。@has_vcl 可为 NULL（不关心时） */
-static void h264_scan(h264_encoder_t *e, const unsigned char *d, size_t len,
+/* 从 Annex-B 码流单遍提取 VPS/SPS/PPS、判断关键帧（IRAP）与 VCL 存在性
+   （H.265 NAL：type≤31 为 VCL slice，16-21 为 IRAP 随机访问点）。
+   @has_vcl 可为 NULL（不关心时） */
+static void hevc_scan(hevc_encoder_t *e, const unsigned char *d, size_t len,
                       int *keyframe, int *has_vcl)
 {
     if (has_vcl) *has_vcl = 0;
-    long pos = nal_find(d, len, 0);
+    long pos = nal_find(d, len, 0, NULL);
     while (pos >= 0 && (size_t)pos < len) {
-        unsigned char type = d[pos] & 0x1F;
-        long next = nal_find(d, len, pos + 1);
-        size_t nlen = (next < 0) ? (len - (size_t)pos) : (size_t)(next - pos);
-        /* next 指向下一 NAL 头，[pos, next) 内含其后置起始码字节（3-4 个 0x00…01），
-           必须裁掉，否则 avcC 里的 SPS/PPS 末尾带起始码 → MP4 无法解码。
-           仅当确实找到下一 NAL（next >= 0）才裁：末段 NAL 无后置起始码，
-           裁剪会误删其合法尾字节（如 rbsp 停止位恰好落在最低位的 0x01） */
-        if (next >= 0) {
-            while (nlen > 1 && d[pos + nlen - 1] == 0) nlen--;
-            if (nlen > 1 && d[pos + nlen - 1] == 1) nlen--;
-        }
-        if (type == 7 && nlen >= 4 && nlen <= sizeof(e->sps)) {       /* SPS */
+        unsigned type = nal_type(d + pos);
+        /* NAL 长度按下一 start code 起点精确计算（同 rec_mp4.c 双定位法）：
+           不采用尾部裁剪 hack——裁剪会在 4 字节起始码时残留 00 00 00，
+           使同一 VPS 每次采集长度不一（ffmpeg/mediamtx 误判参数集变化） */
+        size_t sc2 = 0;
+        long next = nal_find(d, len, pos + 1, &sc2);
+        size_t nlen = (next < 0) ? (len - (size_t)pos) : (sc2 - (size_t)pos);
+        if (type == 32 && nlen >= 6 && nlen <= sizeof(e->vps)) {       /* VPS */
+            memcpy(e->vps, d + pos, nlen);
+            e->vps_len = (unsigned int)nlen;
+        } else if (type == 33 && nlen >= 6 && nlen <= sizeof(e->sps)) { /* SPS */
             memcpy(e->sps, d + pos, nlen);
             e->sps_len = (unsigned int)nlen;
-        } else if (type == 8 && nlen >= 4 && nlen <= sizeof(e->pps)) { /* PPS */
+        } else if (type == 34 && nlen >= 4 && nlen <= sizeof(e->pps)) { /* PPS */
             memcpy(e->pps, d + pos, nlen);
             e->pps_len = (unsigned int)nlen;
-        } else if (type == 5) {
+        } else if (type >= 16 && type <= 21) {   /* IRAP（BLA/IDR/CRA）：关键帧 */
             *keyframe = 1;
             if (has_vcl) *has_vcl = 1;
-        } else if (type == 1 && has_vcl) {
+        } else if (type <= 31 && has_vcl) {
             *has_vcl = 1;
         }
         pos = next;
     }
 }
 
-int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
+int hevc_encoder_encode(hevc_encoder_t *e, const unsigned char *nv12,
                         unsigned char **out, size_t *out_len, int *keyframe)
 {
     if (!e || !nv12 || !out || !out_len) return -1;
@@ -554,26 +576,26 @@ int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
             rc = avcodec_send_frame(e->avctx, e->frame);
         }
         if (rc < 0) {
-            LOG_ERROR("h264: avcodec_send_frame failed: %s", av_err2str(rc));
+            LOG_ERROR("hevc: avcodec_send_frame failed: %s", av_err2str(rc));
             return -1;
         }
         av_packet_unref(e->pkt);
         rc = avcodec_receive_packet(e->avctx, e->pkt);
         if (rc < 0) {
-            LOG_ERROR("h264: avcodec_receive_packet failed (%s)",
+            LOG_ERROR("hevc: avcodec_receive_packet failed (%s)",
                       rc == AVERROR(EAGAIN) ? "EAGAIN, no packet yet" : av_err2str(rc));
             return -1;
         }
-        /* rkmpp 原生输出 Annex-B（含起始码）；若是 AVCC 前缀则自动转换 */
+        /* rkmpp 原生输出 Annex-B（含起始码）；若是 4 字节长度前缀则自动转换 */
         size_t alen = 0;
-        unsigned char *copy = avcc_to_annexb(e->pkt->data, e->pkt->size, &alen);
+        unsigned char *copy = len_to_annexb(e->pkt->data, e->pkt->size, &alen);
         int kf = (e->pkt->flags & AV_PKT_FLAG_KEY) ? 1 : 0;
         if (!copy) {
-            LOG_ERROR("h264: rkmpp packet malformed");
+            LOG_ERROR("hevc: rkmpp packet malformed");
             return -1;
         }
-        /* 与 V4L2 后端一致：从输出码流补扫内嵌 SPS/PPS 与 IDR */
-        h264_scan(e, copy, alen, &kf, NULL);
+        /* 与 V4L2 后端一致：从输出码流补扫内嵌 VPS/SPS/PPS 与 IRAP */
+        hevc_scan(e, copy, alen, &kf, NULL);
         *out = copy;
         *out_len = alen;
         if (keyframe) *keyframe = kf;
@@ -591,22 +613,22 @@ int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
     ob.length   = 1;
     ob.m.planes = &op;
     if (ioctl(e->fd, VIDIOC_DQBUF, &ob) < 0) {
-        LOG_ERROR("h264: DQBUF out failed: %s", strerror(errno));
+        LOG_ERROR("hevc: DQBUF out failed: %s", strerror(errno));
         return -1;
     }
     nv12_copy(e, nv12, (int)ob.index);
     op.bytesused = (uint32_t)((size_t)e->w * e->h * 3 / 2);
     if (ioctl(e->fd, VIDIOC_QBUF, &ob) < 0) {
-        LOG_ERROR("h264: QBUF out failed: %s", strerror(errno));
+        LOG_ERROR("hevc: QBUF out failed: %s", strerror(errno));
         return -1;
     }
 
-    /* 2. 等待并读取编码结果（可能包含纯 SPS/PPS 配置帧，无 VCL 则丢弃重读） */
+    /* 2. 等待并读取编码结果（可能包含纯 VPS/SPS/PPS 配置帧，无 VCL 则丢弃重读） */
     for (int tries = 0; tries < 4; tries++) {
         struct pollfd pfd = { .fd = e->fd, .events = POLLIN };
         int pr = poll(&pfd, 1, 2000);
         if (pr <= 0) {
-            LOG_ERROR("h264: poll capture timeout");
+            LOG_ERROR("hevc: poll capture timeout");
             return -1;
         }
 
@@ -620,19 +642,18 @@ int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
         cb.m.planes = &cp;
         if (ioctl(e->fd, VIDIOC_DQBUF, &cb) < 0) {
             if (errno == EAGAIN) continue;
-            LOG_ERROR("h264: DQBUF cap failed: %s", strerror(errno));
+            LOG_ERROR("hevc: DQBUF cap failed: %s", strerror(errno));
             return -1;
         }
 
         /* 先扫描/拷贝再归还缓冲：归还后驱动可能立即填充覆盖。
-           单遍扫描：提取 SPS/PPS、识别 IDR、检测 VCL（type 1/5）。
-           纯 SPS/PPS 配置帧（无 VCL）丢弃并继续等 VCL 帧；
-           含非 IDR slice 的帧接受，但不算关键帧 */
+           单遍扫描：提取 VPS/SPS/PPS、识别 IRAP、检测 VCL。
+           纯参数集配置帧（无 VCL）丢弃并继续等 VCL 帧 */
         unsigned char *data = e->buf_out[cb.index];
         size_t len = (size_t)cp.bytesused;
 
         int kf = 0, has_vcl = 0;
-        h264_scan(e, data, len, &kf, &has_vcl);
+        hevc_scan(e, data, len, &kf, &has_vcl);
         if (!has_vcl) {
             ioctl(e->fd, VIDIOC_QBUF, &cb);   /* 纯配置帧：归还后丢弃 */
             continue;
@@ -641,7 +662,7 @@ int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
         unsigned char *copy = malloc(len);
         if (!copy) {
             ioctl(e->fd, VIDIOC_QBUF, &cb);
-            LOG_ERROR("h264: out alloc failed");
+            LOG_ERROR("hevc: out alloc failed");
             return -1;
         }
         memcpy(copy, data, len);
@@ -651,19 +672,22 @@ int h264_encoder_encode(h264_encoder_t *e, const unsigned char *nv12,
         if (keyframe) *keyframe = kf;
         return 0;
     }
-    LOG_ERROR("h264: no VCL frame after %d tries", 4);
+    LOG_ERROR("hevc: no VCL frame after %d tries", 4);
     return -1;
 }
 
-/* SPS/PPS 提取（供 avcC 写入） */
-int h264_encoder_sps_pps(h264_encoder_t *e,
+/* VPS/SPS/PPS 提取（供 hvcC 写入） */
+int hevc_encoder_sps_pps(hevc_encoder_t *e,
+                         const unsigned char **vps, unsigned int *vps_len,
                          const unsigned char **sps, unsigned int *sps_len,
                          const unsigned char **pps, unsigned int *pps_len)
 {
     if (!e) return -1;
+    if (vps)     *vps     = e->vps;
+    if (vps_len) *vps_len = e->vps_len;
     if (sps)     *sps     = e->sps;
     if (sps_len) *sps_len = e->sps_len;
     if (pps)     *pps     = e->pps;
     if (pps_len) *pps_len = e->pps_len;
-    return (e->sps_len > 0 && e->pps_len > 0) ? 0 : -1;
+    return (e->vps_len > 0 && e->sps_len > 0 && e->pps_len > 0) ? 0 : -1;
 }

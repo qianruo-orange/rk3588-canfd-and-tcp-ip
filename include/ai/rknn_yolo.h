@@ -41,9 +41,6 @@ int rknn_yolo_reload(void);
 /* AI 工作线程（main 模块框架 task）：采集帧 → 解码 → 投递推理队列 */
 void *rknn_ai_task(void *arg);
 
-/* 拷贝最新检测结果；@return 检测数 */
-int rknn_yolo_get(yolo_result_t *out);
-
 /* 拷贝最新画框 JPEG 帧（调用方 free *data）；@return 0 成功，-1 无可用帧 */
 int rknn_yolo_get_frame(unsigned char **data, size_t *len, unsigned long long *seq);
 

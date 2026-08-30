@@ -14,40 +14,6 @@
 
 #define YOLO_JPEG_QUALITY 95   /* 高画质档（~101KB @720p）；单连接拉流后码流压力已减半，卡顿根因不在体积 */
 
-int yolo_jpeg_to_rgb(const unsigned char *jpeg, size_t jpeg_len,
-                     unsigned char **rgb_out, int *w_out, int *h_out)
-{
-    struct jpeg_decompress_struct cinfo;
-    struct jpeg_error_mgr jerr;
-    cinfo.err = jpeg_std_error(&jerr);
-    jpeg_create_decompress(&cinfo);
-    jpeg_mem_src(&cinfo, (unsigned char *)jpeg, jpeg_len);
-    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
-        jpeg_destroy_decompress(&cinfo);
-        return -1;
-    }
-    cinfo.out_color_space = JCS_RGB;
-    jpeg_start_decompress(&cinfo);
-    int w = (int)cinfo.output_width, h = (int)cinfo.output_height;
-    unsigned char *rgb = malloc((size_t)w * h * 3);
-    if (!rgb) {
-        jpeg_destroy_decompress(&cinfo);
-        return -1;
-    }
-    /* 行指针直接指向目标缓冲：免去行缓冲 malloc 与每行 w*3 的 memcpy */
-    while (cinfo.output_scanline < cinfo.output_height) {
-        unsigned int y = cinfo.output_scanline;   /* 读前保存：read_scanlines 返回后 output_scanline 已 +1 */
-        JSAMPROW row_ptr = rgb + (size_t)y * w * 3;
-        if (jpeg_read_scanlines(&cinfo, &row_ptr, 1) != 1) break;
-    }
-    jpeg_finish_decompress(&cinfo);
-    jpeg_destroy_decompress(&cinfo);
-    *rgb_out = rgb;
-    *w_out = w;
-    *h_out = h;
-    return 0;
-}
-
 int yolo_jpeg_to_rgb_buf(const unsigned char *jpeg, size_t jpeg_len,
                         unsigned char *dst, int w, int h)
 {
@@ -160,19 +126,6 @@ int yolo_rgb_to_jpeg_reuse(const unsigned char *rgb, int w, int h,
     return 0;
 }
 
-/* RGB24 → JPEG（malloc 输出）；成功返回 0，调用方 free *out。
-   热路径（渲染任务 30fps）请用 yolo_rgb_to_jpeg_reuse 复用缓冲 */
-int yolo_rgb_to_jpeg(const unsigned char *rgb, int w, int h,
-                     unsigned char **out, size_t *out_len)
-{
-    unsigned char *buf = NULL;
-    size_t cap = 0;
-    if (yolo_rgb_to_jpeg_reuse(rgb, w, h, &buf, &cap, out_len) != 0)
-        return -1;
-    *out = buf;
-    return 0;
-}
-
 void yolo_yuyv_to_rgb(const unsigned char *src, int w, int h, unsigned char *dst)
 {
     int npix = w * h / 2;
@@ -181,7 +134,9 @@ void yolo_yuyv_to_rgb(const unsigned char *src, int w, int h, unsigned char *dst
         src += 4;
         for (int k = 0; k < 2; k++) {
             int y = k ? y1 : y0;
-            /* BT.601 定点系数（×1/1024 ≈ 1.402/0.344/0.714/1.772）：免浮点 */
+            /* BT.601 定点系数（×1/1024 ≈ 1.402/0.344/0.714/1.772）：免浮点。
+               UVC 相机 YUYV 为 BT.601；下游 OpenCV RGB2YUV_I420 与编码器
+               VUI 声明也是 601，全链一致 */
             int r = y + ((1436 * v) >> 10);
             int g = y - ((352 * u + 731 * v) >> 10);
             int b = y + ((1815 * u) >> 10);
@@ -205,6 +160,9 @@ void yolo_rgb_to_nv12(const unsigned char *rgb, int w, int h, unsigned char *nv1
         for (int x = 0; x < w; x++) {
             const unsigned char *p = row + x * 3;
             int r = p[0], g = p[1], b = p[2];
+            /* BT.601 limited-range 整数系数：与快路径 OpenCV RGB2YUV_I420
+               及编码器 VUI 声明（BT.601）一致——本函数是快路径的兜底，
+               两者系数必须相同，否则兜底帧会突变色 */
             Yrow[x] = (unsigned char)((66 * r + 129 * g + 25 * b + 128) / 256 + 16);
             if ((y & 1) == 0 && (x & 1) == 0) {
                 unsigned char *uv = UV + (size_t)(y / 2) * w + x;

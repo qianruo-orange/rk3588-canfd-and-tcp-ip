@@ -49,6 +49,7 @@
 #include <time.h>
 
 #include "ai/rknn_api.h"
+#include "video/video_stream.h"
 
 #include "ai/rknn_yolo.h"
 #include "ai/yolo_image.h"
@@ -448,6 +449,8 @@ static void *yolo_render_task(void *arg)
         unsigned long long seq = item.seq;
         int w = 0, h = 0;
         ring_buf_t nv12b = { 0 }, jpegb = { 0 };
+        /* 无 MJPEG 观看者时跳过 JPEG 编码与池占用（省 CPU） */
+        int want_jpeg = video_stream_client_count() > 0;
         frame_ring_lock(ring);
         /* rgb_done 钉住槽位（维护规则在显示推进后才释放 rgb）；
            防御分支防退让强制清空的迟到渲染 */
@@ -460,7 +463,8 @@ static void *yolo_render_task(void *arg)
         /* 渲染输出缓冲：池内 NV12（供录像窃取）与 JPEG（供推流拷贝）。
            s->rgb 由 rgb_done && seq > display_seq 钉住，锁外渲染期间无人释放 */
         frame_ring_buf_take_locked(ring, FRAME_RING_POOL_NV12, (size_t)w * h * 3 / 2, &nv12b);
-        frame_ring_buf_take_locked(ring, FRAME_RING_POOL_JPEG, 64 * 1024, &jpegb);
+        if (want_jpeg)
+            frame_ring_buf_take_locked(ring, FRAME_RING_POOL_JPEG, 64 * 1024, &jpegb);
         g_ai.next_seq = seq;
         frame_ring_unlock(ring);
 
@@ -479,13 +483,17 @@ static void *yolo_render_task(void *arg)
             disp.dets[i].y2 = item.dets[i].y2;
         }
 
-        /* 锁外渲染：EMA 平滑（prev 仅本线程访问）+ 槽内 rgb 原地画框标签 */
+        /* 锁外渲染：EMA 平滑（prev 仅本线程访问）+ 槽内 rgb 原地画框标签。
+           无 MJPEG 观看者时跳过 JPEG 编码（省 CPU）；观看者接入后下一帧
+           （≤33ms）恢复编码，get_frame 对 len==0 帧返回 -1 由客户端等待 */
         yolo_smooth(&g_ai.prev, &disp);
         unsigned char *jbuf = jpegb.buf;
         size_t jcap = jpegb.cap, jlen = 0;
-        int ok = (jbuf && nv12b.buf &&
+        int ok = (nv12b.buf &&
                   yolo_render_annotated(s->rgb.buf, w, h, &disp, &g_ai.classes,
-                                        &jbuf, &jcap, &jlen) == 0);
+                                        want_jpeg ? &jbuf : NULL,
+                                        want_jpeg ? &jcap : NULL,
+                                        want_jpeg ? &jlen : NULL) == 0);
         jpegb.buf = jbuf; jpegb.cap = jcap;   /* realloc 可能更换指针 */
         if (ok) {
             yolo_rgb_to_nv12_fast(s->rgb.buf, w, h, nv12b.buf);
@@ -819,15 +827,6 @@ int rknn_yolo_enabled(void)
 }
 
 /* ---- 显示槽快照访问（供推流客户端/录像线程）---- */
-
-int rknn_yolo_get(yolo_result_t *out)
-{
-    if (!out || !g_ai.enabled) return 0;
-    pthread_mutex_lock(&g_ai.result_mutex);
-    *out = g_ai.result;
-    pthread_mutex_unlock(&g_ai.result_mutex);
-    return out->count;
-}
 
 int rknn_yolo_get_frame(unsigned char **data, size_t *len, unsigned long long *seq)
 {

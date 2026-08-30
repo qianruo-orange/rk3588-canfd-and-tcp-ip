@@ -77,8 +77,8 @@ int yolo_classes_load(const char *path, yolo_classes_t *out)
 
 /* ---- OpenCV 画框：3px 实色 + LINE_AA 抗锯齿 ---- */
 
-void yolo_draw_box(unsigned char *rgb, int w, int h,
-                   int x1, int y1, int x2, int y2, unsigned int color)
+static void yolo_draw_box(unsigned char *rgb, int w, int h,
+                          int x1, int y1, int x2, int y2, unsigned int color)
 {
     /* 注意：缓冲区为 RGB 字节序，OpenCV 按 BGR 解释，
        故 Scalar 分量用 (r, g, b) 顺序构造 */
@@ -117,27 +117,29 @@ void yolo_rgb_letterbox(const unsigned char *src, int sw, int sh,
 
 void yolo_rgb_to_nv12_fast(const unsigned char *rgb, int w, int h, unsigned char *nv12)
 {
-    /* RGB → I420（NEON 加速）。目标 Mat 行布局：
-       Y 0..h-1，U h..h+h/2-1，V h+h/2..h*3/2-1 */
+    /* RGB → I420（NEON 加速）到临时缓冲，再交错成 NV12。
+       曾经的"原地交错"（I420 直接写进 NV12 输出再自后向前合并）有别名破坏：
+       奇数 UV 行的写入区覆盖后续偶数 V 行的数据源，V 平面被搅成噪声，
+       低饱和场景平均后呈灰度（直播/录像画面灰化的根因）。
+       OpenCV 单 Mat I420 布局（8x4 探针在本板实测）：色度 Mat 行 h+k =
+       [U 行 k @ 0..hw) 并排 [V 行 k @ hw..w)。旧代码假设 U 行两两打包、
+       V 平面在 h+hh/2 处开始——与实际不符：U 平面会隔行混入 V 行、
+       V 平面整体错位半个画面，运动边缘/检测框处出现横向色度条纹。 */
+    unsigned char *tmp = (unsigned char *)malloc((size_t)w * h * 3 / 2);
+    if (!tmp) { yolo_rgb_to_nv12(rgb, w, h, nv12); return; }   /* 兜底：标量实现 */
     cv::Mat src(h, w, CV_8UC3, (void *)rgb);
-    cv::Mat i420(h * 3 / 2, w, CV_8UC1, nv12);
+    cv::Mat i420(h * 3 / 2, w, CV_8UC1, tmp);
     cv::cvtColor(src, i420, cv::COLOR_RGB2YUV_I420);
 
-    /* I420 → NV12：U/V 四分之一行交错合并（Y 已就位）。
-       OpenCV 单 Mat I420 布局（已实测）：U 行 k 在 Mat 行 h+k/2、行内偏移 (k%2)*hw；
-       V 行 k 在 Mat 行 h+hh/2+k/2、行内偏移 (k%2)*hw。NV12 UV 行 r 偏移 w*r。
-       自后向前原地交错安全；首行 U 与写入区重叠，先暂存 */
+    memcpy(nv12, tmp, (size_t)w * h);   /* Y 平面直接拷贝 */
     const int hw = w / 2, hh = h / 2;
-    unsigned char *t = (unsigned char *)malloc((size_t)hw);
-    if (!t) { yolo_rgb_to_nv12(rgb, w, h, nv12); return; }   /* 兜底：标量实现 */
-    for (int r = hh - 1; r >= 0; r--) {
-        const unsigned char *up = nv12 + (size_t)w * (h + r / 2) + (size_t)(r % 2) * hw;
-        const unsigned char *vp = nv12 + (size_t)w * (h + hh / 2 + r / 2) + (size_t)(r % 2) * hw;
-        if (r == 0) { memcpy(t, up, (size_t)hw); up = t; }
+    for (int r = 0; r < hh; r++) {
+        const unsigned char *up = tmp + (size_t)w * (h + r);   /* U 行 r：Mat 行 h+r，偏移 0 */
+        const unsigned char *vp = up + hw;                     /* V 行 r：同行，偏移 hw */
         unsigned char *o = nv12 + (size_t)w * h + (size_t)w * r;
         for (int c = 0; c < hw; c++) { o[2 * c] = up[c]; o[2 * c + 1] = vp[c]; }
     }
-    free(t);
+    free(tmp);
 }
 
 /* ---- OpenCV cv2.putText 风格标签 ---- */
@@ -210,10 +212,13 @@ int yolo_render_annotated(unsigned char *rgb, int w, int h,
         yolo_draw_label(mat, (int)d->x1, (int)d->y1, label, color);
     }
 
-    size_t jlen = 0;
-    if (yolo_rgb_to_jpeg_reuse(rgb, w, h, jpeg_buf, jpeg_cap, &jlen) != 0)
-        return -1;
-    *jpeg_len = jlen;
+    /* JPEG 编码可选：jpeg_buf 为 NULL 时跳过（无 MJPEG 观看者，省 CPU） */
+    if (jpeg_buf) {
+        size_t jlen = 0;
+        if (yolo_rgb_to_jpeg_reuse(rgb, w, h, jpeg_buf, jpeg_cap, &jlen) != 0)
+            return -1;
+        *jpeg_len = jlen;
+    }
     return 0;
 }
 

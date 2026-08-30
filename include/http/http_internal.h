@@ -53,5 +53,6 @@ void http_video_devices(app_ctx_t *app, int fd, const char *method, const char *
 void http_video_caps(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf);
 void http_video_stats(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf);
 void http_rec_handler(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf);
+void http_webrtc_whep(app_ctx_t *app, int fd, const char *method, const char *uri, const char *req_buf);
 
 #endif

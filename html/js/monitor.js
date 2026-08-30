@@ -96,7 +96,8 @@
      收 answer 后 RTCPeerConnection 直连 mediamtx 收流（媒体不经过本服务，
      同网段走 UDP，弱网自适应丢包）。
      rVFC 计数喂 FPS 徽标；失败 1s 节流重连；5s 无帧看门狗重连 */
-  var wrPc = null, wrRunning = false, wrUrl = '', wrLastFail = 0, wrLastFrame = 0;
+  var wrPc = null, wrRunning = false, wrUrl = '', wrLastFail = 0, wrLastFrame = 0,
+      wrGotFrame = false;
 
   function wrSupported() { return !!window.RTCPeerConnection; }
 
@@ -118,6 +119,7 @@
     wrUrl = url;
     wrRunning = true;
     wrLastFrame = Date.now();
+    wrGotFrame = false;
     resetFps();
     var vid = document.getElementById('stream_video');
     try {
@@ -146,7 +148,7 @@
           cbStarted = true;
           var cb = function() {
             if (wrPc !== pc) return;
-            fpsCnt++; wrLastFrame = Date.now();
+            fpsCnt++; wrLastFrame = Date.now(); wrGotFrame = true;
             vid.requestVideoFrameCallback(cb);
           };
           vid.requestVideoFrameCallback(cb);
@@ -389,9 +391,14 @@
     el.textContent = fpsVal > 0 ? Math.round(fpsVal) + ' FPS' : '-- FPS';
   }, 1000);
 
-  /* WebRTC 看门狗：5s 无呈现帧 → 重连（断流/服务重启自动恢复） */
+  /* WebRTC 看门狗：无呈现帧 → 重连（断流/服务重启自动恢复）。
+     首帧宽限 12s：弱网下 握手+等关键帧+丢包恢复 常超 5s，过早重杀会
+     反复从头协商，把起播时间越拖越长（journal 可见 4-6s 短命会话循环）；
+     已出帧后仍用 5s 快速检测断流。页面隐藏时跳过：rVFC 不回调，
+     否则后台标签每分钟都会误杀重连一次。 */
   setInterval(function() {
-    if (wrRunning && Date.now() - wrLastFrame > 5000) {
+    if (document.hidden) { wrLastFrame = Date.now(); return; }
+    if (wrRunning && Date.now() - wrLastFrame > (wrGotFrame ? 5000 : 12000)) {
       wrLastFail = Date.now();
       wrStop();
     }

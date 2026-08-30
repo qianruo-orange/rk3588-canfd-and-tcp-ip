@@ -29,10 +29,6 @@ do_uninstall() {
     
     echo "[REMOVE] systemd service file"
     rm -f /etc/systemd/system/"$SERVICE_NAME".service
-    rm -f /etc/systemd/system/mediamtx.service
-    rm -f /etc/systemd/system/rk3588-edge-gateway-webrtc.service
-    systemctl stop mediamtx 2>/dev/null || true
-    systemctl stop rk3588-edge-gateway-webrtc 2>/dev/null || true
     systemctl daemon-reload || true
     
     echo "[REMOVE] $DEPLOY_DIR"
@@ -57,6 +53,17 @@ do_install() {
 
     echo "[STOP] existing service (if running)"
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+
+    # 清理旧 WebRTC 边车（mediamtx + fifo pusher）：直播已改回 fMP4/MSE 直供，
+    # 不再需要外部 RTSP 中转。从旧版本升级时留着会白占 VPU/内存并抢 8554/8889 端口
+    for u in mediamtx rk3588-edge-gateway-webrtc; do
+        if [ -f /etc/systemd/system/"$u".service ]; then
+            echo "[CLEAN] legacy webrtc unit: $u"
+            systemctl stop "$u" 2>/dev/null || true
+            systemctl disable "$u" 2>/dev/null || true
+            rm -f /etc/systemd/system/"$u".service
+        fi
+    done
 
     echo "[INSTALL] $BINARY -> $DEPLOY_DIR/bin/"
     mkdir -p "$DEPLOY_DIR/bin"
@@ -85,23 +92,8 @@ do_install() {
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
 
-    echo "[INSTALL] webrtc sidecar units (mediamtx + fifo pusher)"
-    cp "$PROJECT_DIR/deploy/mediamtx.service" /etc/systemd/system/mediamtx.service
-    cp "$PROJECT_DIR/deploy/rk3588-edge-gateway-webrtc.service" \
-       /etc/systemd/system/rk3588-edge-gateway-webrtc.service
-    systemctl daemon-reload
-    if [ -x /opt/mediamtx/mediamtx ]; then
-        systemctl enable mediamtx rk3588-edge-gateway-webrtc
-    else
-        echo "[WARN] /opt/mediamtx/mediamtx not found — WebRTC 待安装 mediamtx 后启用"
-    fi
-
     echo "[START] $SERVICE_NAME"
     systemctl start "$SERVICE_NAME"
-    if [ -x /opt/mediamtx/mediamtx ]; then
-        systemctl start mediamtx
-        systemctl start rk3588-edge-gateway-webrtc
-    fi
 
     echo "=== deploy complete ==="
 

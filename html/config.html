@@ -61,7 +61,9 @@
 <div class="cfg-grid vid2">
 <div class="row"><label>设备</label><select name="vd" id="vd" onchange="queryCaps()"><option value="">-- 扫描中 --</option></select></div>
 <div class="row"><label>格式 / 分辨率 / 帧率</label><select name="vr" id="vr" onchange="onResChange()"><option value="">-- 请选择设备 --</option></select></div>
+<div class="row"><label>码率系数</label><input name="vbp" id="vbp" type="number" min="50" max="800" step="5" oninput="onBpxChange()"><span class="unit" id="vbp_hint"></span></div>
 </div>
+<div class="tip" id="vbp_tip">码率 = 宽 × 高 × 系数 ÷ 100（bps）。录像与直播共用同一编码器，调高会同时提高两者码率；超出网络承载会丢帧导致画面横向条纹。默认 175</div>
 <input type="hidden" id="vw"><input type="hidden" id="vh">
 </div>
 

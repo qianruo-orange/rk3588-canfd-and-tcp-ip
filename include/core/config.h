@@ -69,6 +69,11 @@ struct app_config_t {
     int           video_width;
     int           video_height;
     int           video_fps;       /* 期望帧率；0 = 驱动默认 */
+    /* 码率系数（每像素 bit/s ×100，即 175 = 1.75bps/px）。
+       录像与直播共用同一编码器，故此值同时决定两者码率：
+       bitrate = 宽 × 高 × 系数/100，VBR 上限为其 1.25 倍。
+       上调超出网络承载会让直播持续滞后/断流重连（详见 video_rec.c） */
+    int           video_bitrate_ppx;
 
     /* ---- RKNN AI 检测（YOLO26，必要流程）---- */
     char          ai_model[256];    /* .rknn 模型文件路径 */

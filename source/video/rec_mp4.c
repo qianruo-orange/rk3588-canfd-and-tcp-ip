@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
- * rec_mp4.c — 最小 MP4(H.265 hvc1 track) 封装器（ISO BMFF，moov 末尾回写）。
+ * rec_mp4.c — 最小 MP4(H.264 avc1 track) 封装器（ISO BMFF，moov 末尾回写）。
  *
- * 文件布局：ftyp(28) + mdat(8+N 帧 H.265 length-prefixed) + moov
+ * 文件布局：ftyp(28) + mdat(8+N 帧 H.264 length-prefixed) + moov
  *   stbl 记录每帧绝对偏移（stco）/ 大小（stsz）/ 平均帧间隔（stts），
- *   stss 记录关键帧（IRAP），stsd 用 hvc1+hvcC（VPS/SPS/PPS 取自编码器）。
- *   mdat 内样本为 4 字节大端长度前缀的 NAL（hvc1 规范格式），
+ *   stss 记录关键帧（IDR），stsd 用 avc1+avcC（SPS/PPS 取自编码器）。
+ *   mdat 内样本为 4 字节大端长度前缀的 NAL（avc1 规范格式），
  *   Chrome / VLC / ffplay 均可直接播放。
  *
  * 纯封装，无线程；调用方保证并发安全。
@@ -43,9 +43,9 @@ struct rec_mp4_s {
     uint32_t    n_samples, cap_samples;
     uint32_t    *keyframes;           /* 关键帧样本序号（1-based，stss 用） */
     uint32_t    n_key, cap_key;
-    unsigned char vps[64], sps[64], pps[64];   /* hvcC：VPS/SPS/PPS（首帧写入） */
-    unsigned int  vps_len, sps_len, pps_len;
-    int         hvcC_written;
+    unsigned char sps[64], pps[64];   /* avcC：SPS/PPS（首帧写入） */
+    unsigned int  sps_len, pps_len;
+    int         avcC_written;
     uint64_t    first_ts_ms, last_ts_ms;   /* 首/末帧单调时钟 */
     uint64_t    start_ms;
 };
@@ -124,7 +124,7 @@ static void nal_walk(const unsigned char *d, size_t len, nal_cb_t cb, void *ud)
         size_t sc = 0;
         long pos = nal_find(d, len, from, &sc);
         if (pos < 0) break;
-        /* 从当前 NAL 数据起点找下一个 start code：H.265 帧内经防竞争字节
+        /* 从当前 NAL 数据起点找下一个 start code：H.264 帧内经防竞争字节
            保证不含 00 00 00/00 00 01，直接扫描数据区是安全的 */
         size_t sc2 = 0;
         long next = nal_find(d, len, (size_t)pos, &sc2);
@@ -154,9 +154,9 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
     uint32_t N = n, K = n_key;
 
     /* 子盒尺寸（全部动态推导） */
-    uint32_t hvcC_size = 46u + s->vps_len + s->sps_len + s->pps_len;  /* 8 头 + 23 固定 + 3 数组(5+len) */
-    uint32_t hvc1_size = 86u + hvcC_size;                      /* 8 hdr + 78 body + hvcC 盒 */
-    uint32_t stsd_size = 16u + hvc1_size;                      /* 8+8+entry */
+    uint32_t avcC_size = 19u + s->sps_len + s->pps_len;        /* 8+6+2+sps+1+2+pps */
+    uint32_t avc1_size = 86u + avcC_size;                      /* 8 hdr + 78 body + avcC 盒 */
+    uint32_t stsd_size = 16u + avc1_size;                      /* 8+8+entry */
     uint32_t stss_size = 16u + 4u * K;
     uint32_t stts_size = 24u;
     uint32_t stsc_size = 28u;
@@ -252,11 +252,11 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
     /* ---- stbl ---- */
     box_hdr(fp, stbl_size, "stbl");
 
-    /* ---- stsd：H.265 VisualSampleEntry（'hvc1'）+ hvcC ---- */
+    /* ---- stsd：H.264 VisualSampleEntry（'avc1'）+ avcC ---- */
     box_hdr(fp, stsd_size, "stsd");
     be32(fp, 0);
     be32(fp, 1);                    /* entry_count */
-    box_hdr(fp, hvc1_size, "hvc1");
+    box_hdr(fp, avc1_size, "avc1");
     be32(fp, 0); be16(fp, 0);       /* reserved 6 */
     be16(fp, 1);                    /* data_reference_index */
     be16(fp, 0); be16(fp, 0);       /* pre_defined + reserved */
@@ -271,35 +271,19 @@ static void mp4_write_moov(FILE *fp, const rec_mp4_t *s, uint32_t n,
     be16(fp, 24);                   /* depth */
     be16(fp, 0xFFFFu);              /* pre_defined */
 
-    /* hvcC（HEVCDecoderConfigurationRecord）：固定头 23 字节 +
-       3 个参数集数组（VPS 32 / SPS 33 / PPS 34，NAL 含 2 字节头）。
-       SPS body = sps 跳过 2 字节 NAL 头：profile 字节 = body[0]，
-       compat = body[1..4]，constraints = body[5..10]，level = body[12] */
-    {
-        const unsigned char *sb = (s->sps_len >= 15) ? s->sps + 2 : NULL;
-        static const unsigned char z4[4] = { 0 };
-        static const unsigned char z6[6] = { 0 };
-        box_hdr(fp, hvcC_size, "hvcC");
-        fputc(1, fp);                                        /* configurationVersion */
-        fputc(sb ? (int)sb[0] : 1, fp);                      /* profile_space/tier/profile_idc */
-        fwrite(sb ? sb + 1 : z4, 1, 4, fp);                  /* profile_compatibility_flags */
-        fwrite(sb ? sb + 5 : z6, 1, 6, fp);                  /* constraint_indicator_flags */
-        fputc(sb ? (int)sb[12] : 93, fp);                    /* general_level_idc */
-        fputc(0xF0, fp); fputc(0, fp);                       /* min_spatial_segmentation_idc = 0 */
-        fputc(0xFC, fp);                                     /* parallelismType = 0 */
-        fputc(0xFD, fp);                                     /* chromaFormat = 1（4:2:0）：0xFC | 1 */
-        fputc(0xF8, fp);                                     /* bitDepthLumaMinus8 = 0 */
-        fputc(0xF8, fp);                                     /* bitDepthChromaMinus8 = 0 */
-        be16(fp, 0);                                         /* avgFrameRate */
-        fputc(0x0F, fp);                                     /* 1 层 + nested + lengthSizeMinusOne=3 */
-        fputc(3, fp);                                        /* numOfArrays */
-        fputc(32, fp); be16(fp, 1);
-        be16(fp, (uint16_t)s->vps_len); fwrite(s->vps, 1, s->vps_len, fp);
-        fputc(33, fp); be16(fp, 1);
-        be16(fp, (uint16_t)s->sps_len); fwrite(s->sps, 1, s->sps_len, fp);
-        fputc(34, fp); be16(fp, 1);
-        be16(fp, (uint16_t)s->pps_len); fwrite(s->pps, 1, s->pps_len, fp);
-    }
+    /* avcC */
+    box_hdr(fp, avcC_size, "avcC");
+    fputc(1, fp);                               /* configurationVersion */
+    fputc((int)(s->sps_len > 0 ? s->sps[1] : 66), fp);      /* AVCProfileIndication */
+    fputc((int)(s->sps_len > 0 ? s->sps[2] : 0), fp);       /* profile_compatibility */
+    fputc((int)(s->sps_len > 0 ? s->sps[3] : 30), fp);      /* AVCLevelIndication */
+    fputc(0xFF, fp);                            /* 0xFC|lengthSizeMinusOne=3（4 字节） */
+    fputc(0xE1, fp);                            /* 0xE0|numSPS=1 */
+    be16(fp, (uint16_t)s->sps_len);
+    fwrite(s->sps, 1, s->sps_len, fp);
+    fputc(1, fp);                               /* numPPS */
+    be16(fp, (uint16_t)s->pps_len);
+    fwrite(s->pps, 1, s->pps_len, fp);
 
     /* ---- stts：一个 entry，平均帧间隔 ---- */
     box_hdr(fp, stts_size, "stts");
@@ -395,40 +379,38 @@ rec_mp4_t *rec_mp4_create(const char *dir, const char *prefix, int w, int h,
     return s;
 }
 
-/* VPS/SPS/PPS 收集回调：H.265 NAL 2 字节头，type 32/33/34 */
+/* SPS/PPS 收集回调：type 7 → sps，type 8 → pps */
 static void sps_pps_cb(void *ud, const unsigned char *start, size_t nlen)
 {
     rec_mp4_t *s = ud;
-    if (s->hvcC_written) return;
-    unsigned type = (start[0] >> 1) & 0x3Fu;
-    if (type == 32 && nlen >= 6 && nlen <= sizeof(s->vps) && s->vps_len == 0) {
-        memcpy(s->vps, start, nlen);
-        s->vps_len = (unsigned int)nlen;
-    } else if (type == 33 && nlen >= 6 && nlen <= sizeof(s->sps) && s->sps_len == 0) {
+    if (s->avcC_written) return;
+    unsigned char type = start[0] & 0x1F;
+    /* nlen >= 4：合法 SPS/PPS 最短 4 字节，防 1 字节伪 NAL 污染 avcC */
+    if (type == 7 && nlen >= 4 && nlen <= sizeof(s->sps) && s->sps_len == 0) {
         memcpy(s->sps, start, nlen);
         s->sps_len = (unsigned int)nlen;
-    } else if (type == 34 && nlen >= 4 && nlen <= sizeof(s->pps) && s->pps_len == 0) {
+    } else if (type == 8 && nlen >= 4 && nlen <= sizeof(s->pps) && s->pps_len == 0) {
         memcpy(s->pps, start, nlen);
         s->pps_len = (unsigned int)nlen;
     }
-    if (s->vps_len && s->sps_len && s->pps_len) s->hvcC_written = 1;
+    if (s->sps_len && s->pps_len) s->avcC_written = 1;
 }
 
-/* 首次遇到 VPS/SPS/PPS 时保存（供 hvcC） */
+/* 首次遇到 SPS/PPS 时保存（供 avcC） */
 static void rec_save_sps_pps(rec_mp4_t *s, const unsigned char *d, size_t len)
 {
     nal_walk(d, len, sps_pps_cb, s);
 }
 
-int rec_mp4_write_frame(rec_mp4_t *s, const unsigned char *hevc, size_t len,
+int rec_mp4_write_frame(rec_mp4_t *s, const unsigned char *h264, size_t len,
                         int keyframe, uint64_t ts_ms)
 {
-    if (!s || !s->fp || !hevc) return -1;
+    if (!s || !s->fp || !h264) return -1;
     if (s->n_samples >= REC_MAX_SAMPLES ||
         s->data_len + (uint32_t)len > REC_MAX_MDAT)
         return -1;
 
-    rec_save_sps_pps(s, hevc, len);
+    rec_save_sps_pps(s, h264, len);
 
     if (s->n_samples >= s->cap_samples) {
         uint32_t ncap = s->cap_samples * 2;
@@ -448,11 +430,11 @@ int rec_mp4_write_frame(rec_mp4_t *s, const unsigned char *hevc, size_t len,
         s->keyframes[s->n_key++] = s->n_samples + 1;   /* 1-based */
     }
 
-    /* Annex-B → 4 字节长度前缀（hvc1 规范），逐 NAL 写入并统计实际大小 */
+    /* Annex-B → 4 字节长度前缀（avc1 规范），逐 NAL 写入并统计实际大小 */
     long off = ftell(s->fp);
     if (off < 0) return -1;
     struct { FILE *fp; uint32_t written; int ok; } w = { s->fp, 0, 1 };
-    nal_walk(hevc, len, nal_write_cb, &w);
+    nal_walk(h264, len, nal_write_cb, &w);
     if (!w.ok || w.written == 0) return -1;   /* 写失败或无有效 NAL，丢弃 */
     uint32_t written = w.written;
 
@@ -471,7 +453,7 @@ int rec_mp4_finalize(rec_mp4_t *s)
     int rc = -1;
     if (s->fp) {
         /* 回填 mdat 总大小（ftyp 之后） */
-        if (s->n_samples > 0 && s->vps_len && s->sps_len && s->pps_len) {
+        if (s->n_samples > 0 && s->sps_len && s->pps_len) {
             long cur = ftell(s->fp);
             fseek(s->fp, (long)s->mdat_start, SEEK_SET);
             be32(s->fp, 8u + s->data_len);
@@ -497,9 +479,14 @@ int rec_mp4_finalize(rec_mp4_t *s)
     free(s->keyframes);
     s->samples = NULL;
     s->keyframes = NULL;
-    if (rc != 0) unlink(s->path);   /* 空录制/缺参数集/失败：删除残缺文件 */
+    if (rc != 0) unlink(s->path);   /* 空录制/缺 SPS/PPS/失败：删除残缺文件 */
     free(s);
     return rc;
+}
+
+const char *rec_mp4_name(const rec_mp4_t *s)
+{
+    return s ? s->name : "";
 }
 
 uint32_t rec_mp4_frames(const rec_mp4_t *s)

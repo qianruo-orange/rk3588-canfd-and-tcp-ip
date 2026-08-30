@@ -39,6 +39,11 @@ void *video_rec_task(void *arg);
 int video_rec_start(void);
 int video_rec_stop(void);
 
+/* 结束当前录制段，让线程按最新配置续录下一段（不改变自动续录开关）。
+   编码器随会话创建，码率系数等编码参数变更后须调用本函数才会生效；
+   已手动停录时为空操作 */
+void video_rec_cycle_session(void);
+
 /* 拷贝当前录制状态 */
 int video_rec_status(video_rec_status_t *out);
 

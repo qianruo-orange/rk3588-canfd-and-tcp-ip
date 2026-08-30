@@ -7,6 +7,7 @@
 #include "can/can_socket.h"
 #include "tcp/tcp_server.h"
 #include "video/video_stream.h"
+#include "video/video_rec.h"
 #include "watchdog/watchdog.h"
 #include "tcp/net_ip.h"
 #include "ai/rknn_yolo.h"
@@ -58,8 +59,10 @@ void http_config_get(app_ctx_t *app, int fd, const char *method, const char *uri
         ip_if, cur_addr, cur_mask, cur_gw);
 
     if (cfg->video_device[0]) JSON_ADD(json, off, ",\"video_device\":\"%s\"", cfg->video_device);
-    JSON_ADD(json, off, ",\"video_width\":%d,\"video_height\":%d,\"video_fps\":%d",
-             cfg->video_width, cfg->video_height, cfg->video_fps);
+    JSON_ADD(json, off, ",\"video_width\":%d,\"video_height\":%d,\"video_fps\":%d,"
+             "\"video_bitrate_ppx\":%d",
+             cfg->video_width, cfg->video_height, cfg->video_fps,
+             cfg->video_bitrate_ppx > 0 ? cfg->video_bitrate_ppx : 175);
     /* AI 检测配置（必要流程：推理不可关停，前端默认展示画框流） */
     JSON_ADD(json, off, ",\"ai_model\":\"%s\",\"ai_names\":\"%s\",\"ai_input_size\":%d,"
         "\"ai_conf\":%.2f,\"ai_nms\":%.2f,\"ai_interval_ms\":%d,\"ai_threads\":%d",
@@ -245,7 +248,10 @@ static void apply_net(app_ctx_t *app, const http_form_field_t *fields, int count
     }
 }
 
-/* 视频：更新设备/分辨率，返回 1 表示需要重启视频流 */
+/* 视频：更新设备/分辨率/码率系数，返回 APPLY_VIDEO_* 位组合标识需要重启的部件 */
+#define APPLY_VIDEO_CAPTURE  0x1   /* 采集参数变化：重启视频流 */
+#define APPLY_VIDEO_ENCODER  0x2   /* 编码参数变化：滚动录制会话（编码器随会话创建） */
+
 static int apply_video(app_ctx_t *app, const http_form_field_t *fields, int count)
 {
     struct app_config_t *cfg = app->cfg;
@@ -253,23 +259,29 @@ static int apply_video(app_ctx_t *app, const http_form_field_t *fields, int coun
 
     const char *v = http_form_find(fields, count, "video_device");
     if (v && strcmp(v, cfg->video_device) != 0) {
-        changed = 1;
+        changed |= APPLY_VIDEO_CAPTURE;
         safe_strncpy(cfg->video_device, sizeof(cfg->video_device), v);
     }
     v = http_form_find(fields, count, "video_width");
     if (v) {
         int nw = parse_int_clamped(v, 1, 4096, cfg->video_width > 0 ? cfg->video_width : 640);
-        if (nw != cfg->video_width) { changed = 1; cfg->video_width = nw; }
+        if (nw != cfg->video_width) { changed |= APPLY_VIDEO_CAPTURE; cfg->video_width = nw; }
     }
     v = http_form_find(fields, count, "video_height");
     if (v) {
         int nh = parse_int_clamped(v, 1, 4096, cfg->video_height > 0 ? cfg->video_height : 480);
-        if (nh != cfg->video_height) { changed = 1; cfg->video_height = nh; }
+        if (nh != cfg->video_height) { changed |= APPLY_VIDEO_CAPTURE; cfg->video_height = nh; }
     }
     v = http_form_find(fields, count, "video_fps");
     if (v) {
         int nf = parse_int_clamped(v, 0, 120, 0);   /* 0/空 = 驱动默认帧率 */
-        if (nf != cfg->video_fps) { changed = 1; cfg->video_fps = nf; }
+        if (nf != cfg->video_fps) { changed |= APPLY_VIDEO_CAPTURE; cfg->video_fps = nf; }
+    }
+    v = http_form_find(fields, count, "video_bitrate_ppx");
+    if (v) {
+        int np = parse_int_clamped(v, 50, 800, cfg->video_bitrate_ppx > 0 ? cfg->video_bitrate_ppx : 175);
+        /* 只滚会话不重启采集：码率只影响编码器，重启采集会白白中断画面 */
+        if (np != cfg->video_bitrate_ppx) { changed |= APPLY_VIDEO_ENCODER; cfg->video_bitrate_ppx = np; }
     }
     return changed;
 }
@@ -384,7 +396,7 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
     if (!target || strcmp(target, "all") == 0 || strcmp(target, "video") == 0) {
         vid_changed = apply_video(app, fields, count);
         /* 单独保存视频模块：点击即期望立即生效，参数未变化也重启一次视频流 */
-        if (target && strcmp(target, "video") == 0) vid_changed = 1;
+        if (target && strcmp(target, "video") == 0) vid_changed |= APPLY_VIDEO_CAPTURE;
     }
 
     int ai_changed = 0;
@@ -396,7 +408,10 @@ void http_config_post(app_ctx_t *app, int fd, const char *method, const char *ur
     http_ok_text(fd, "saved");
 
     /* 视频参数变更后重启视频流（target=video 时用户点击保存即按变更结果重启） */
-    if (vid_changed) video_stream_restart();
+    if (vid_changed & APPLY_VIDEO_CAPTURE) video_stream_restart();
+    /* 码率系数变更：编码器随录制会话创建，须滚动一次会话新码率才生效
+       （当前段正常收尾存盘，线程立即按新配置续录下一段） */
+    if (vid_changed & APPLY_VIDEO_ENCODER) video_rec_cycle_session();
     /* AI 参数变更后热重载推理池（停旧池 → 重读配置重建），无需重启服务 */
     if (ai_changed) rknn_yolo_reload();
 

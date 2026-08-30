@@ -10,6 +10,7 @@ video_device /dev/video0
 video_width 1280
 video_height 720
 video_fps 30
+video_bitrate_ppx 175
 
 # --- AI 检测 (YOLO26, RKNN) ---
 ai_model config/yolo26.rknn
@@ -18,6 +19,6 @@ ai_input_size 640
 ai_conf 65
 ai_nms 45
 ai_interval_ms 10
-ai_threads 3
+ai_threads 12
 
 # --- DBC ---

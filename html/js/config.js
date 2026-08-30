@@ -184,6 +184,21 @@
     document.getElementById('vw').value = s.w;
     document.getElementById('vh').value = s.h;
     selVidFps = parseInt(parts[2], 10) || 0;   /* 帧率随选项一起保存 */
+    onBpxChange();                             /* 分辨率变了，实际码率跟着变 */
+  };
+
+  /* 码率系数 → 实际码率提示：与后端同式 bitrate = 宽×高×系数/100（bps） */
+  window.onBpxChange = function() {
+    var hint = document.getElementById('vbp_hint');
+    if (!hint) return;
+    var ppx = parseInt(document.getElementById('vbp').value, 10);
+    var w = parseInt(document.getElementById('vw').value, 10);
+    var h = parseInt(document.getElementById('vh').value, 10);
+    if (!ppx || !w || !h) { hint.textContent = ''; return; }
+    var bps = w * h * ppx / 100;
+    if (bps < 300000) bps = 300000;            /* 后端同样的上下限钳位 */
+    if (bps > 16000000) bps = 16000000;
+    hint.textContent = '≈ ' + (bps / 1000000).toFixed(2) + ' Mbps';
   };
 
   window.addFilter = function() {
@@ -243,6 +258,8 @@
       document.getElementById('vw').value = cfg.video_width > 0 ? cfg.video_width : '';
       document.getElementById('vh').value = cfg.video_height > 0 ? cfg.video_height : '';
       cfgVideoFps = cfg.video_fps || 0;
+      document.getElementById('vbp').value = cfg.video_bitrate_ppx || 175;
+      onBpxChange();
 
       /* AI 检测配置（必要流程；线程数下拉框为 3 的倍数；置信度/NMS 显示为百分比） */
       var el = document.getElementById('ai_th');
@@ -391,7 +408,8 @@
       video_device: document.getElementById('vd').value,
       video_width: document.getElementById('vw').value,
       video_height: document.getElementById('vh').value,
-      video_fps: selVidFps
+      video_fps: selVidFps,
+      video_bitrate_ppx: document.getElementById('vbp').value
     });
   };
 

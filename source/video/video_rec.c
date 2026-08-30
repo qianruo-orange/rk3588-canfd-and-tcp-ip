@@ -212,7 +212,12 @@ void *video_rec_task(void *arg)
                 usleep(100000);
                 continue;
             }
-            int bitrate = (int)((uint64_t)pw * ph * 4u);   /* 每像素 ~4bps（VBR 目标；720p≈3.7M） */
+            /* 每像素 ~1.75bps（VBR 目标；720p≈1.6M）。上限由直播链路决定而非画质偏好：
+               实测 WebRTC 侧只能稳定送达 ~2Mbps，早前按 4bps/px（720p 3.7M，运动峰值
+               实测 5M）推流时 mediamtx 丢掉 19.5% 的帧——H.265 丢的是 GOP 中间帧，
+               浏览器解码器只能拿旧内容补，画面出现成带横向条纹与残影（运动越大越明显）。
+               编码器同时喂录像与直播，故源码率必须压在链路承载之下 */
+            int bitrate = (int)((uint64_t)pw * ph * 7u / 4u);
             if (bitrate < 300000)  bitrate = 300000;
             if (bitrate > 16000000) bitrate = 16000000;
             hevc_encoder_t *enc = hevc_encoder_create(pw, ph, fps, bitrate);

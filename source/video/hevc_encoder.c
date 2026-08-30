@@ -250,13 +250,16 @@ static int ff_encoder_open(hevc_encoder_t *e, int fps, int bitrate_bps)
     ctx->time_base   = (AVRational){ 1, fps > 0 ? fps : 30 };
     ctx->framerate   = (AVRational){ fps > 0 ? fps : 30, 1 };
     ctx->bit_rate    = bitrate_bps;
-    /* 画质优先的码控：不给 rc_max_rate 时 rkmpp 默认 CBR 且 qp_max=48，
-       复杂画面为死守码率把质量压烂。改 VBR（目标 bitrate、上限 2x 弹性），
-       并压低 QP 上限兜住质量下限 */
-    ctx->rc_max_rate = (int64_t)bitrate_bps * 2;
+    /* 码控：不给 rc_max_rate 时 rkmpp 默认 CBR 且 qp_max=48，复杂画面为死守
+       码率把质量压烂。改 VBR（目标 bitrate + 弹性上限）。
+       上限只给 1.25x：直播链路承载有限，2x 弹性会让运动瞬间冲到目标两倍，
+       正好在链路最吃紧时压垮它（mediamtx 成批丢帧 → 横向条纹）。
+       qp_max 相应放宽到 44：上限收紧后若 QP 封顶在 40 编码器就守不住码率，
+       会反过来冲破 rc_max——宁可运动瞬间细节软一点，也不能超发 */
+    ctx->rc_max_rate = (int64_t)bitrate_bps * 5 / 4;
     av_opt_set(ctx->priv_data, "rc_mode", "VBR", 0);
-    av_opt_set_int(ctx->priv_data, "qp_max",   40, 0);
-    av_opt_set_int(ctx->priv_data, "qp_max_i", 36, 0);
+    av_opt_set_int(ctx->priv_data, "qp_max",   44, 0);
+    av_opt_set_int(ctx->priv_data, "qp_max_i", 40, 0);
     ctx->gop_size    = (fps > 0 ? fps : 30) * 2;  /* GOP=2s */
     ctx->max_b_frames = 0;
     ctx->thread_count = 1;

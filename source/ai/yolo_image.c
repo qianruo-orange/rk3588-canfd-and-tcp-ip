@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <setjmp.h>
 #include <jpeglib.h>
 #include <jerror.h>   /* ERREXIT 宏（自定义输出管理器报错用） */
 
@@ -14,12 +15,30 @@
 
 #define YOLO_JPEG_QUALITY 95   /* 高画质档（~101KB @720p）；单连接拉流后码流压力已减半，卡顿根因不在体积 */
 
+/* 解码错误管理器：libjpeg 默认 error_exit 直接 exit() 杀进程（相机坏帧
+   即可触发），改为 longjmp 回解码入口按坏帧丢弃 */
+typedef struct {
+    struct jpeg_error_mgr pub;
+    jmp_buf jb;
+} jpeg_safe_err_t;
+
+static void safe_error_exit(j_common_ptr cinfo)
+{
+    jpeg_safe_err_t *e = (jpeg_safe_err_t *)cinfo->err;
+    longjmp(e->jb, 1);
+}
+
 int yolo_jpeg_to_rgb_buf(const unsigned char *jpeg, size_t jpeg_len,
                         unsigned char *dst, int w, int h)
 {
     struct jpeg_decompress_struct cinfo;
-    struct jpeg_error_mgr jerr;
-    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_safe_err_t jerr;
+    cinfo.err = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = safe_error_exit;
+    if (setjmp(jerr.jb)) {
+        jpeg_destroy_decompress(&cinfo);   /* 硬损坏（坏头/坏熵流）：丢帧 */
+        return -1;
+    }
     jpeg_create_decompress(&cinfo);
     jpeg_mem_src(&cinfo, (unsigned char *)jpeg, jpeg_len);
     if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
@@ -33,14 +52,24 @@ int yolo_jpeg_to_rgb_buf(const unsigned char *jpeg, size_t jpeg_len,
         return -1;   /* 尺寸不符：调用方缓冲不可用（坏帧/参数变更过渡期） */
     }
     /* 行指针直接指向调用方缓冲：免去行缓冲 malloc 与每行 w*3 的 memcpy */
+    int complete = 1;
     while (cinfo.output_scanline < cinfo.output_height) {
         unsigned int y = cinfo.output_scanline;
         JSAMPROW row_ptr = dst + (size_t)y * w * 3;
-        if (jpeg_read_scanlines(&cinfo, &row_ptr, 1) != 1) break;
+        if (jpeg_read_scanlines(&cinfo, &row_ptr, 1) != 1) { complete = 0; break; }
     }
-    jpeg_finish_decompress(&cinfo);
+    if (complete)
+        jpeg_finish_decompress(&cinfo);
+    else
+        jpeg_abort_decompress(&cinfo);
+    /* 截断/损坏帧如实报失败：USB 带宽不足时相机 MJPEG 会掉尾（运动大 →
+       帧变大更易触发），libjpeg 仅发 warning 并对缺损 MCU 段拼接凑数，
+       半解码帧混着池内旧帧残像 → 直播/录像出现横向条纹带。丢帧由调用方
+       处理（沿用 decode_ok==0 路径：回池 + infer_dropped 计数 + 退避），
+       ~30fps 下偶发丢一帧只是重复显示上一帧，无感 */
+    long nwarn = jerr.pub.num_warnings;
     jpeg_destroy_decompress(&cinfo);
-    return 0;
+    return (complete && nwarn == 0) ? 0 : -1;
 }
 
 /* 自定义 JPEG 输出管理器：写入调用方提供的缓冲，容量不足时 realloc 增长。
